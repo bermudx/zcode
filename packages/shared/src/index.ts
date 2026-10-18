@@ -368,6 +368,7 @@ export * from "./channel-mention.js";
 export {
   requestSecuritySensitiveHeaders,
   isRequestSecurityFailure,
+  readClientSignatureFailureReason,
 } from "./request-security-edition/policy.js";
 export * from "./request-security-edition/verification-policy.js";
 
