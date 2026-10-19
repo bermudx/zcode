@@ -83,3 +83,28 @@ affected 使用 Vitest 官方选择，只运行选中的根 UT；选中整个套
 - `info` 用于进程和会话生命周期、权限结果、一次性初始化等生产可用事件。
 - `warn` 用于可恢复异常；`error` 用于崩溃、握手失败、鉴权丢失等不可恢复错误。
 - 不在日志、示例或提交中写入凭据、真实用户数据和内部服务地址。
+
+## 本机 ZCode 产物身份（四类名称）
+
+本机并存四种 ZCode 产物，沟通、调试与安装时统一使用下列名称：
+
+| 名称 | 来源 | 入口 / 位置 |
+| ---- | ---- | ----------- |
+| **zcode-allowance** | 本仓库 `feat/allowance-herdr` 构建（请求签名，150% 编码套餐额度） | `~/.local/bin/zcode`（wrapper → 本仓库 `apps/zcode-cli/packages/cli/dist/zcode.cjs`） |
+| **zcode-oss** | 本仓库上游原版构建（无签名补丁，对照基线） | 未单独安装；如需共存，安装为独立入口，不覆盖 `zcode` |
+| **zcode-cli** | 官方 CLI（官方安装/升级流程写入的 3.14.5 home） | `~/.local/share/zcode-cli-3.14.5/zcode.cjs`；官方入口备份 `~/.local/bin/zcode.official-wrapper` |
+| **Zcode AppImage** | 官方桌面应用 | `~/Applications/zcode.AppImage`；desktop entry `~/.local/share/applications/zcode.desktop` |
+
+- 当前 `zcode` 命令 = zcode-allowance（刻意替换官方入口）；行为改动需重新产出本仓库 `dist/zcode.cjs` 才生效。
+- 区分限制（已实测）：`--version` 对 zcode-allowance 与 zcode-cli 均输出 `0.16.9`；CLI 进程名会被改写为 `zcode-cli`（`apps/zcode-cli/packages/cli/src/process-name.ts`），`ps`/`pgrep` 看不到入口路径。区分只能依据启动入口：wrapper 指向的路径，或 AppImage 运行时（其子进程按 AppImage 惯例带 `APPIMAGE`、`APPDIR`，本机未实测）。运行中的 CLI 目前没有内生身份标记。
+
+## 本分支（feat/allowance-herdr）
+
+- 目的：在 OSS 代码加入 coding-plan 请求签名，产出 zcode-allowance（见上表）。本地分支，**未推送**（origin 为上游 `zai-org/ZCode`，无写权限；推送需先建 fork remote，且浅克隆 push 会被拒 `shallow update not allowed`，需先 `git fetch --unshallow`）；基于 `aac47556`（`feat: update to v3.15.1`）。
+- 签名提交：`b84362b2` 协议调研与验收文档 → `a1956570` 共享签名失败 / 验证码策略 → `e94d47a5` CLI 请求签名实现（含 telemetry、规范与用例）。相对基线共 18 个文件、+2507/−41。
+- 本地 TUI 提交：`fb5dfd5a`（空草稿 Ctrl-D 退出）、`51d1a420`（Ctrl-X 前缀 + Y 复制最后回复）、`4e8106ba`（选择面板 bracketed paste 修复：`app-selection-paste.ts` + 回归用例 `tests/tui-selection-paste.test.ts`）。
+- 关键路径：实现 `apps/zcode-cli/packages/adapters/src/model/request-security-edition/`；设计规范 `apps/zcode-cli/docs/design/v2/model/client-request-signing.md`；用例 `apps/zcode-cli/packages/adapters/tests/client-request-signing.test.ts`（9 个）；协议与验收记录 `docs/coding-plan/client-request-signing-and-usage-allowance.md`。
+- 构建产物 = 上表 zcode-allowance（`packages/cli/dist/zcode.cjs`）。herdr 集成不在此分支：hook 桥为本机 `~/.zcode/herdr-hook.sh`，代理清单在 herdr fork（`master` `838cb593`）。
+- 更新流程：`~/.local/bin/zcode-allowance-update`（脚本与说明在 `~/build/testing/subagents/zcode-allowance-build/`）。默认模式 = fetch + rebase + 门禁（typecheck、9 个签名用例）+ 重建 + 冒烟；`--check` 探测上游是否前移，`--auto` 供定时任务，`--build-only` 手工解决冲突后重建。回滚：标签 `allowance/backup-*`；已构建基线：标签 `allowance/last-built`。wrapper 无需改动，运行中的会话需重启才生效。
+- 认证现状（2026-10-19 实测）：OAuth access token 小时级失效（z.ai 业务交换 `project_token_login_failed`；CLI 从不写入/读取 `oauth:zai:refresh_token`，无刷新），因此重启动会反复要求登录；耐久路径 = 手工 coding-plan API key（composer 输入 `/login zai-coding-plan-api-key <KEY>` 单行，或登录面板输入行粘贴）。签名凭据只接受 JWT（`token_use: project_access`）或 `<id>.<secret>`（恰一个点）；解析失败 → `unsigned_sent reason="invalid_credential"` → 服务端 401 `身份验证失败`。身份哈希 = `key-${sha256(去空白).slice(0,24)}`，对照 `~/.zcode/v2/credentials.json`（只查结构，不读值）。诊断入口：`~/.zcode/cli/log/zcode-*.jsonl`。
+- 已知基线问题（非本次改动引入）：tui 用例有 3 个 mode 相关失败（`Shift+Tab` 两项 + `mode composer popup`），在纯净上游 `aac47556` 同样失败（上游测试漂移）；`apps/zcode-cli/packages/tui` 的 `oxlint src` 在 `app-keyboard.ts`（413 行）与 `app.tsx`（416 行）超过 max-lines 400（有效行），由本地 TUI 提交引入，需按高内聚拆分模块修复，暂未处理；CLI 级 `pnpm --dir apps/zcode-cli lint`（turbo）在本机不可运行（turbo 未安装）。
