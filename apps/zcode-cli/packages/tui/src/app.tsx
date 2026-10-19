@@ -340,6 +340,7 @@ export function TuiApp({
     filteredModeOptions: modeCommand.filteredOptions,
     filteredModelOptions: modelCommand.filteredOptions,
     handleFileMentionKey: fileMentions.handleKey,
+    hasDraftAttachments: () => draftAttachmentsRef.current.length > 0,
     onExit,
     pasteClipboardImage,
     recallNextInput,

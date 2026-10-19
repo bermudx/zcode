@@ -18,6 +18,7 @@ import {
   resetCtrlCExitGuard,
   resolveCtrlCExitIntent,
   shouldClearPromptDraftOnCtrlC,
+  shouldExitOnCtrlD,
   shouldHandleInputHistoryNavigation,
   workflowExpansionActionFor,
 } from "./app-keyboard-helpers.js";
@@ -66,6 +67,7 @@ type UseTuiKeyboardControlsOptions = {
   filteredModelOptions: readonly TuiModelOption[];
   filteredSlashCommands: readonly SlashCommand[];
   handleFileMentionKey: (key: KeyEvent) => boolean;
+  hasDraftAttachments: () => boolean;
   inputHistoryActive: boolean;
   messages: readonly Message[];
   effortSelection: EffortCommandSelectionState | undefined;
@@ -105,6 +107,7 @@ export function useTuiKeyboardControls({
   filteredModelOptions,
   filteredSlashCommands,
   handleFileMentionKey,
+  hasDraftAttachments,
   inputHistoryActive,
   messages,
   effortSelection,
@@ -225,6 +228,17 @@ export function useTuiKeyboardControls({
         }
 
         resetCtrlCExitGuard(ctrlCExitGuardRef.current);
+
+        if (
+          key.name === "d" &&
+          key.ctrl &&
+          shouldExitOnCtrlD({ draftValue, hasAttachments: hasDraftAttachments() })
+        ) {
+          consumeKey(key);
+          abortControllerRef.current?.abort();
+          onExit(0);
+          return;
+        }
 
         if (key.name === "y" && key.ctrl) {
           consumeKey(key);
@@ -389,6 +403,7 @@ export function useTuiKeyboardControls({
         filteredModelOptions,
         filteredSlashCommands,
         handleFileMentionKey,
+        hasDraftAttachments,
         inputHistoryActive,
         messages,
         modelSelection,

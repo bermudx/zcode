@@ -44,6 +44,10 @@ TUI:
   inside that window aborts active work and closes the fullscreen TUI. Any
   non-`Ctrl-C` key, draft-clearing `Ctrl-C`, or confirmation timeout clears the
   pending exit.
+- `Ctrl-D` exits the TUI only when the composer is empty: no draft text and no
+  draft attachments. It aborts active work and closes the fullscreen TUI like a
+  confirmed `Ctrl-C`. With a non-empty composer `Ctrl-D` is left untouched and
+  falls through to the input editor unchanged.
 
 ZCode app-server:
 - `session/cancel` aborts the active prompt controller for that ZCode app-server session.
@@ -108,6 +112,8 @@ Required coverage:
   attachments without closing or aborting active output.
 - TUI first `Ctrl-C` with an empty normal prompt input shows `Press Ctrl-C again
   to exit.` without closing; a second consecutive `Ctrl-C` exits.
+- TUI `Ctrl-D` with an empty composer exits; `Ctrl-D` with draft text or draft
+  attachments does not exit and leaves the composer untouched.
 - Core abort during model wait emits `turn_cancelled`.
 - Core abort after a model emits tool calls does not schedule tools.
 - Core abort reaches per-tool `AbortSignal` and subprocess adapters.

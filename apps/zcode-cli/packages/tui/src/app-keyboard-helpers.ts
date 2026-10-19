@@ -105,6 +105,20 @@ export function shouldClearPromptDraftOnCtrlC(draftValue: string): boolean {
   return draftValue.length > 0;
 }
 
+/**
+ * `Ctrl-D` 只在 composer 完全为空时退出：草稿文本和草稿附件都计入"空"的判定，
+ * 否则已经贴好的图片/文件附件会被一次按键悄悄丢掉。
+ */
+export function shouldExitOnCtrlD({
+  draftValue,
+  hasAttachments,
+}: {
+  draftValue: string;
+  hasAttachments: boolean;
+}): boolean {
+  return draftValue.length === 0 && !hasAttachments;
+}
+
 export type CtrlCExitGuard = {
   lastPressAtMs: number | undefined;
 };
