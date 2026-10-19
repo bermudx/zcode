@@ -99,6 +99,9 @@ export function workflowExpansionActionFor({
 
 export const PROMPT_DRAFT_CLEARED_STATUS = "Ready.";
 export const CTRL_C_EXIT_PROMPT = "Press Ctrl-C again to exit.";
+export const LAST_REPLY_COPIED_STATUS = "Copied last assistant reply.";
+export const LAST_REPLY_COPY_FAILED_STATUS = "Could not copy last assistant reply.";
+export const NO_ASSISTANT_REPLY_STATUS = "No assistant reply to copy.";
 export const CTRL_C_EXIT_CONFIRMATION_WINDOW_MS = 2_000;
 
 export function shouldClearPromptDraftOnCtrlC(draftValue: string): boolean {

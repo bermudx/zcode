@@ -1,5 +1,12 @@
 import type { TuiWriteClipboardText } from "./types.js";
 import type { TuiCopy } from "@zcode/i18n";
+import {
+  LAST_REPLY_COPIED_STATUS,
+  LAST_REPLY_COPY_FAILED_STATUS,
+  NO_ASSISTANT_REPLY_STATUS,
+} from "./app-keyboard-helpers.js";
+import type { Message } from "./app-model.js";
+import { lastAgentReplyText } from "./app-transcript-stream.js";
 
 export type SelectionCopyResult =
   | {
@@ -58,6 +65,44 @@ export function createSelectionCopyHandler({
 
 export function hasCopyableSelectionText(text: string | null | undefined): text is string {
   return typeof text === "string" && text.trim().length > 0;
+}
+
+export type LastReplyCopyOptions = {
+  liveModelText: string;
+  messages: readonly Message[];
+  setStatus: (status: string) => void;
+  setStatusDetails: (details: string[]) => void;
+  unavailableStatus: string;
+  writeClipboardText?: TuiWriteClipboardText;
+};
+
+/**
+ * `Ctrl+X Y` 的复制目标与 AppView 渲染的"最近回复"一致：liveModelText 尚未落进
+ * messages，按同样方式补一条尾部 agent 消息再取最后一条回复文本。
+ */
+export function copyLastAssistantReply(input: LastReplyCopyOptions): void {
+  const transcript = input.liveModelText
+    ? [
+        ...input.messages,
+        { content: input.liveModelText, role: "agent" as const, streaming: true },
+      ]
+    : input.messages;
+  const text = lastAgentReplyText(transcript);
+  if (!text) {
+    input.setStatus(NO_ASSISTANT_REPLY_STATUS);
+    return;
+  }
+  if (!input.writeClipboardText) {
+    input.setStatus(input.unavailableStatus);
+    return;
+  }
+  void Promise.resolve(input.writeClipboardText(text)).then(
+    () => input.setStatus(LAST_REPLY_COPIED_STATUS),
+    (error: unknown) => {
+      input.setStatus(LAST_REPLY_COPY_FAILED_STATUS);
+      input.setStatusDetails([error instanceof Error ? error.message : String(error)]);
+    },
+  );
 }
 
 export function selectionCopyStatus(

@@ -102,6 +102,17 @@ export function projectedTranscriptHasResponse(messages: Message[], response: st
   return lastProjected ? transcriptText(lastProjected).trim() === normalized : false;
 }
 
+/**
+ * 最近一条含正文的 agent 消息的可见文本（text parts 拼接，无 parts 时回落 content）。
+ * thought / tool parts 不算正文；只含工具调用的 agent 消息会继续向前找。
+ */
+export function lastAgentReplyText(messages: readonly Message[]): string | undefined {
+  const message = messages.findLast(
+    (candidate) => candidate.role === AGENT_ROLE && transcriptText(candidate).trim().length > 0,
+  );
+  return message ? transcriptText(message) : undefined;
+}
+
 function appendTextPart(message: Message, delta: string): Message {
   const parts = [...(message.parts ?? [])];
   const last = parts.at(-1);
@@ -188,7 +199,7 @@ function completeThoughtParts(message: Message): Message {
   };
 }
 
-function transcriptText(message: Message): string {
+export function transcriptText(message: Message): string {
   if (!message.parts) return message.content;
   return message.parts
     .filter((part): part is TextTranscriptPart => part.type === "text")

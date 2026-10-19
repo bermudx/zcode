@@ -13,6 +13,10 @@ selection ends.
   starts the TUI exit confirmation. The user must press `Ctrl+C` again in the
   confirmation window to exit.
 - `Ctrl+Y` copies the current OpenTUI selection without exiting.
+- `Ctrl+X Y` (the `Ctrl+X` leader, then `Y`) copies the text of the most recent
+  assistant reply — the last agent message's text parts, or `content` when the
+  message has no parts — without needing a selection. Thought and tool parts
+  are excluded. When no reply exists yet, a status hint is shown instead.
 - Empty selections are ignored and cleared.
 - Clipboard failures surface as TUI status text instead of crashing the session.
 

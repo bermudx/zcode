@@ -60,6 +60,7 @@ type UseTuiKeyboardControlsOptions = {
   approvalQueue: ApprovalPrompt[];
   busy: boolean;
   copyCurrentSelection: () => boolean;
+  copyLastAssistantReply: () => void;
   draftValue: string;
   workflowExpansion?: TuiWorkflowExpansionControls;
   filteredEffortOptions: readonly TuiEffortOption[];
@@ -100,6 +101,7 @@ export function useTuiKeyboardControls({
   approvalQueue,
   busy,
   copyCurrentSelection,
+  copyLastAssistantReply,
   draftValue,
   workflowExpansion,
   filteredEffortOptions,
@@ -146,6 +148,7 @@ export function useTuiKeyboardControls({
           if (
             handleSidebarShortcutKey({
               consumeKey,
+              copyLastAssistantReply,
               key,
               nowMs: Date.now(),
               setStatus,
@@ -189,6 +192,7 @@ export function useTuiKeyboardControls({
         if (
           handleSidebarShortcutKey({
             consumeKey,
+            copyLastAssistantReply,
             key,
             nowMs: Date.now(),
             setStatus,
@@ -396,6 +400,7 @@ export function useTuiKeyboardControls({
         workflowExpansion,
         busy,
         copyCurrentSelection,
+        copyLastAssistantReply,
         draftValue,
         effortSelection,
         filteredEffortOptions,

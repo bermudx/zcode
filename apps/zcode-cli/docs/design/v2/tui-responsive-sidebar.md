@@ -37,7 +37,9 @@ and composer room in narrower terminals.
 - Toggling while visible hides the sidebar.
 - Toggling while hidden returns the sidebar to `auto`; if the terminal is
   narrow, the sidebar opens as an overlay immediately.
-- Any non-sidebar key clears the armed leader state and continues through the
+- The `Ctrl+X` leader also owns non-sidebar follow-up keys; `Ctrl+X Y` copies
+  the last assistant reply (see `tui-selection-copy.md`).
+- Any non-leader key clears the armed leader state and continues through the
   normal keyboard path.
 
 ## State And Boundaries

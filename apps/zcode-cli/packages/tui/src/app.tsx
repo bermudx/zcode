@@ -3,7 +3,11 @@ import { getZCodeCopy } from "@zcode/i18n";
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import { AppView } from "./app-view.js";
 import type { PromptInputEditor } from "./app-input-pane.js";
-import { selectionCopyStatus, type SelectionCopyResult } from "./app-copy.js";
+import {
+  copyLastAssistantReply,
+  selectionCopyStatus,
+  type SelectionCopyResult,
+} from "./app-copy.js";
 import { useClipboardImagePaste } from "./app-clipboard-image.js";
 import { useFileMentionController } from "./app-file-mentions.js";
 import { useTuiKeyboardControls } from "./app-keyboard.js";
@@ -321,6 +325,16 @@ export function TuiApp({
     });
     return true;
   }, [copy, copySelection, hasCopyableSelection]);
+  const copyLastReply = useCallback(() => {
+    copyLastAssistantReply({
+      liveModelText,
+      messages,
+      setStatus,
+      setStatusDetails,
+      unavailableStatus: copy.tui.copy.unavailable,
+      writeClipboardText: options.writeClipboardText,
+    });
+  }, [copy, liveModelText, messages, options.writeClipboardText]);
   const switchMode = useTuiModeSwitcher({
     mode,
     setMode,
@@ -334,6 +348,7 @@ export function TuiApp({
     approvalQueue,
     busy,
     copyCurrentSelection,
+    copyLastAssistantReply: copyLastReply,
     effortSelection: effortCommand.selection,
     filteredEffortOptions: effortCommand.filteredOptions,
     filteredSlashCommands,

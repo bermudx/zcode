@@ -295,6 +295,18 @@ test("Ctrl-X leader toggles sidebar sections while unrelated keys clear the lead
   assert.equal(resolveSidebarShortcut(state, key("b"), 8_000), "pass");
 });
 
+test("Ctrl-X leader resolves Y to the last-reply copy intent", () => {
+  const state = createSidebarShortcutState();
+
+  assert.equal(resolveSidebarShortcut(state, key("x", { ctrl: true }), 1_000), "arm");
+  assert.equal(resolveSidebarShortcut(state, key("y"), 1_500), "copy-last-reply");
+  assert.equal(resolveSidebarShortcut(state, key("y"), 1_600), "pass");
+
+  // Ctrl+Y stays the selection-copy key, not a leader follow-up.
+  assert.equal(resolveSidebarShortcut(state, key("x", { ctrl: true }), 2_000), "arm");
+  assert.equal(resolveSidebarShortcut(state, key("y", { ctrl: true }), 2_100), "pass");
+});
+
 test("app shell hides, docks, and overlays sidebar based on layout", () => {
   const sidebar = React.createElement("box", { id: "sidebar" });
   const hidden = reactElementChildren(
