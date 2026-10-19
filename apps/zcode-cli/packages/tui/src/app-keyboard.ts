@@ -23,6 +23,7 @@ import {
   workflowExpansionActionFor,
 } from "./app-keyboard-helpers.js";
 import { handleSuggestionNavigationKey } from "./app-keyboard-suggestions.js";
+import { useSelectionPaste } from "./app-selection-paste.js";
 import { createSidebarShortcutState, type SidebarShortcutState } from "./app-sidebar-shortcut.js";
 import { handleSidebarShortcutKey } from "./app-sidebar-keyboard.js";
 import type {
@@ -435,6 +436,10 @@ export function useTuiKeyboardControls({
       ],
     ),
   );
+
+  // 粘贴与键盘走两条通道：bracketed paste 是独立 paste 事件，须单独订阅，
+  // 否则选择面板（composer 已被替换）打开时粘贴无人消费，长文本无法录入。
+  useSelectionPaste({ approvalQueue, readOnlyView, selection, setSelection });
 }
 
 function consumeKey(key: KeyEvent): void {
