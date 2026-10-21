@@ -34,6 +34,7 @@ export const zhCN: ZCodeCopy = {
   --surface <surface>  设置无头 prompt/app-server 的呈现面：terminal 或 desktop
   --socket <path>    用于 app-server/agent-server：监听 Unix socket 而非 stdio
   --no-plugins       用于 app-server/agent-server：禁用全部插件与 MCP server
+  --shared-core      用于 tui：接入当前工作区的共享无头 core（zcode attach 等价入口）
   --browser-executable <path> headless Browser Use 使用的 Chrome/Chromium 路径
   --attach <path>  给 --prompt 附加本地文件；可重复传入
   --cwd <path>     从指定目录运行命令

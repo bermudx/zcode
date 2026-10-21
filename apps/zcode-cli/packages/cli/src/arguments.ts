@@ -38,6 +38,9 @@ export const parseGlobalArgs = (argv: string[]) =>
         multiple: true,
         type: "string",
       },
+      "shared-core": {
+        type: "boolean",
+      },
       cwd: {
         type: "string",
       },

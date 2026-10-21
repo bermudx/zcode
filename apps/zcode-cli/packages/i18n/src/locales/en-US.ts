@@ -34,6 +34,7 @@ Options:
   --surface <surface>  Presentation surface for headless prompts/app-server: terminal or desktop
   --socket <path>    With app-server/agent-server, listen on a Unix socket instead of stdio
   --no-plugins       With app-server/agent-server, disable all plugins and MCP servers
+  --shared-core      With tui, attach to the shared headless core for this workspace (zcode attach)
   --browser-executable <path> Chrome/Chromium executable for headless Browser Use
   --attach <path>  Attach a local file to --prompt; repeat for multiple files
   --cwd <path>     Run this command from the given directory

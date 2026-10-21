@@ -30,6 +30,7 @@ import { runPrompt } from "./prompt-command.js";
 import { runPluginsCommand, type PluginsCommandFlags } from "./plugins-command.js";
 import { runSkillsCommand } from "./skills-command.js";
 import { runTuiCommand } from "./tui-command.js";
+import { runAttachCommand } from "./attach/attach-command.js";
 import {
   DEFAULT_CLI_WORKFLOW_MODE,
   normalizeWorkflowModeOption,
@@ -68,6 +69,8 @@ const NO_PLUGINS_SCOPE_ERROR =
 const EMPTY_SOCKET_ERROR = "--socket requires a non-empty path.";
 const SOCKET_STDIO_CONFLICT_ERROR = "--socket cannot be used with --stdio.";
 const SOCKET_PREPARE_STORAGE_ERROR = "--socket cannot be used with --prepare-storage.";
+const SHARED_CORE_SCOPE_ERROR =
+  "--shared-core can only be used with tui (or the zcode attach alias).";
 
 const pluginsCommandFlags = (
   values: ReturnType<typeof parseGlobalArgs>["values"],
@@ -529,6 +532,13 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
     ctx.stderr.write(`${NO_PLUGINS_SCOPE_ERROR}\n`);
     return 1;
   }
+  if (
+    parsed.values["shared-core"] === true &&
+    commandName(parsed.positionals) !== "tui"
+  ) {
+    ctx.stderr.write(`${SHARED_CORE_SCOPE_ERROR}\n`);
+    return 1;
+  }
 
   if (parsed.values.help === true) {
     writeHelp(ctx.stdout, options.locale, options.detectedLocale);
@@ -713,6 +723,9 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
     case "skills":
       return await runSkillsCommand(ctx, options, commandDeps, parsed.positionals.slice(1));
     case "tui":
+      if (parsed.values["shared-core"] === true) {
+        return await runAttachCommand(ctx, options, commandDeps, version, tuiFrontend);
+      }
       return await runTuiCommand(
         ctx,
         options,

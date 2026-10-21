@@ -18,6 +18,7 @@ import {
   type AppToolSearchMode,
   type ZCodeAutomationBotDeliveryTarget,
   type ZCodeDeliveryKind,
+  type ZCodeSessionEventFormat,
   type ModelSelection,
   type ZCodeModelContextBudgetStrategy,
   type ZCodeProtocolMessage,
@@ -91,6 +92,12 @@ export interface ZCodeProtocolSessionRecord {
   modelContextBudgetStrategy: ZCodeModelContextBudgetStrategy;
   createdAt: number;
   deliveryKind?: ZCodeDeliveryKind;
+  /**
+   * 订阅事件格式（session/subscribe eventFormat）："mapped" 走既有折叠映射，
+   * "raw" 把 contracts SessionEvent 原样下投给 session/rawEvent（tui-attach 瘦客户端）。
+   * record 级与 deliveryKind 同一语义：同 record 只持一种格式，后写覆盖。
+   */
+  eventFormat?: ZCodeSessionEventFormat;
   /**
    * 旧 session/subscribe 没有 unsubscribe RPC；只在真正 subscribe 时置位，不能用
    * 会被 session/read 写入的 deliveryKind 代替。连接结束会销毁整个 CLI 进程。

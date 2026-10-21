@@ -3,6 +3,7 @@ import { interceptTuiStderr, isTuiInvocation } from "./tui-stderr.js";
 import { interceptKnownRuntimeWarnings } from "./runtime-warnings.js";
 import { installStderrConsoleBoundary } from "./protocol-console.js";
 import { setCliProcessTitle } from "./process-name.js";
+import { rewriteAttachArgv } from "./attach/attach-argv.js";
 import { applyCliRuntimeEnvSanitization } from "./env.js";
 import { ensureSeaRuntimeTools } from "./sea-runtime-tools.js";
 import { isPluginHostInvocation, runPluginHostCommand } from "./plugin-host-command.js";
@@ -15,7 +16,9 @@ import { isProtocolServerInvocation } from "./arguments.js";
 void main();
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+  // `zcode attach` → `zcode tui --tui-frontend=pi --shared-core`（argv 重写，
+  // 不走 --attach 布尔位：该旗标已被 prompt 文件附件占用且为多值 string）。
+  const argv = rewriteAttachArgv(process.argv.slice(2));
   // 存储模式也可运行在 Host Worker 中，不能修改整个 Host 的进程名称。
   if (argv[0] !== STORAGE_MIGRATION_COMMAND && !argv.includes("--prepare-storage")) setCliProcessTitle();
   // 真实 zcode CLI 进程里仍可能有少量路径直接读取 process.env。

@@ -47,6 +47,8 @@ import {
   readEvents,
   readMessages,
   readSession,
+  recallPreviousInput,
+  recordInputHistory,
   resumeSession,
   sendPrompt,
   setMode,
@@ -672,6 +674,10 @@ export class ZCodeProtocolAgentServer {
         return await readEvents(this.context, request.params);
       case zcodeProtocolMethods.sessionSubscribe:
         return await subscribeSession(this.context, request.params);
+      case zcodeProtocolMethods.sessionRecallPreviousInput:
+        return await recallPreviousInput(this.context, request.params);
+      case zcodeProtocolMethods.sessionRecordInputHistory:
+        return await recordInputHistory(this.context, request.params);
       case zcodeProtocolMethods.sessionSend:
         return await sendPrompt(this.context, request.params);
       case zcodeProtocolMethods.sessionStop:

@@ -455,6 +455,8 @@ export type ZCodeProtocolMessage = z.infer<typeof zcodeProtocolMessageSchema>;
 
 export const zcodeProtocolNotifications = {
   storageStartup: "startup/storageState",
+  /** raw SessionEvent 下投通道：与 session/event 并列，订阅方按 eventFormat 二选一。 */
+  sessionRawEvent: "session/rawEvent",
   providerRuntimeHeadersCancelled: "interaction/providerRuntimeHeadersCancelled",
   mcpTelemetry: "process/mcpTelemetry",
   mcpResourceSamples: "process/mcpResourceSamples",
@@ -1832,9 +1834,37 @@ export const zcodeSessionEventSchema = z.discriminatedUnion("type", [
 ]);
 export type ZCodeSessionEvent = z.infer<typeof zcodeSessionEventSchema>;
 
+/**
+ * 订阅/读取的事件格式："mapped" = 既有 25-type 折叠协议事件（desktop-continuous 兼容面）；
+ * "raw" = contracts `SessionEvent` 原样下投（tui-attach 瘦客户端用：TUI 共享层消费
+ * 完整内部事件词表，mapped 折叠会丢 dwf 进度/子代理/后台任务等事件）。
+ */
+export const zcodeSessionEventFormatSchema = z.enum(["mapped", "raw"]);
+export type ZCodeSessionEventFormat = z.infer<typeof zcodeSessionEventFormatSchema>;
+
+/**
+ * contracts `SessionEvent` 的线上形态：包络字段（id/sessionId/type/traceId/sequenceNumber）
+ * 在边界校验，payload 与其余前向兼容键 loose 透传——内部事件词表 ~100 种且持续增长，
+ * 逐型 zod 化不在本切片；timestamp 序列化后是 ISO 字符串（运行时侧 revive 为 Date）。
+ */
+export const zcodeSessionRawEventSchema = z
+  .object({
+    id: nonEmptyString,
+    sessionId: nonEmptyString,
+    turnId: nonEmptyString.optional(),
+    type: nonEmptyString,
+    timestamp: z.union([z.iso.datetime(), z.number()]),
+    traceId: z.string(),
+    sequenceNumber: z.number().int().nonnegative(),
+    payload: z.unknown().optional(),
+  })
+  .loose();
+export type ZCodeSessionRawEvent = z.infer<typeof zcodeSessionRawEventSchema>;
+
 export const zcodeSessionEventsResultSchema = z
   .object({
     events: z.array(zcodeSessionEventSchema),
+    rawEvents: z.array(zcodeSessionRawEventSchema).optional(),
   })
   .strict();
 export const zcodeSessionMessagesResultSchema = z
@@ -1861,6 +1891,7 @@ export const zcodeSessionSubscribeParamsSchema = z
     deliveryKind: zcodeDeliveryKindSchema,
     afterSeq: z.number().int().nonnegative().optional(),
     includeSnapshot: z.boolean().default(false),
+    eventFormat: zcodeSessionEventFormatSchema.optional(),
   })
   .strict();
 export type ZCodeSessionSubscribeParams = z.infer<typeof zcodeSessionSubscribeParamsSchema>;
@@ -1870,6 +1901,8 @@ export const zcodeSessionSubscribeResultSchema = z
     sessionId: nonEmptyString,
     eventSeq: z.number().int().nonnegative(),
     events: z.array(zcodeSessionEventSchema),
+    /** eventFormat==="raw" 时回放事件装在这里（events 仍只装 mapped）。 */
+    rawEvents: z.array(zcodeSessionRawEventSchema).optional(),
     snapshot: zcodeSessionStateSnapshotSchema.optional(),
   })
   .strict();
@@ -2041,9 +2074,30 @@ export const zcodeSessionEventsParamsSchema = z
     sessionId: nonEmptyString,
     afterSeq: z.number().int().nonnegative().optional(),
     limit: z.number().int().positive().optional(),
+    eventFormat: zcodeSessionEventFormatSchema.optional(),
   })
   .strict();
 export type ZCodeSessionEventsParams = z.infer<typeof zcodeSessionEventsParamsSchema>;
+
+/** attach 客户端 composer 输入召回：session store 是唯一所有者，skip 语义同本地端口。 */
+export const zcodeSessionRecallPreviousInputParamsSchema = z
+  .object({
+    sessionId: nonEmptyString,
+    skip: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export const zcodeSessionRecallPreviousInputResultSchema = z
+  .object({
+    entry: z.object({ text: z.string() }).strict().nullable(),
+  })
+  .strict();
+export const zcodeSessionRecordInputHistoryParamsSchema = z
+  .object({
+    sessionId: nonEmptyString,
+    text: z.string(),
+    kind: z.enum(["prompt", "slash_command", "steered_input"]).optional(),
+  })
+  .strict();
 
 export const zcodeSessionRuntimePreferencesScopeSchema = z.enum([
   "runtime-materialization",
@@ -4113,6 +4167,10 @@ export const zcodeProtocolMethods = {
   sessionResume: "session/resume",
   sessionList: "session/list",
   sessionSubagents: "session/subagents",
+  // 输入历史归 session store 所有（server 侧）；attach 客户端的 composer
+  // 召回与 slash 记录都走这两个 topic，不另建 client-local 双写路径。
+  sessionRecallPreviousInput: "session/recallPreviousInput",
+  sessionRecordInputHistory: "session/recordInputHistory",
   sessionRequestRuntimePreferences: "session/requestRuntimePreferences",
   subagentsReadRuntimeConfig: "subagents/readRuntimeConfig",
   sessionRead: "session/read",

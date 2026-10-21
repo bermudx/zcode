@@ -60,7 +60,10 @@ import {
   zcodeSessionGoalParamsSchema,
   zcodeSessionListParamsSchema,
   zcodeSessionMessagesParamsSchema,
+  zcodeProtocolNotifications,
   zcodeSessionReadParamsSchema,
+  zcodeSessionRecallPreviousInputParamsSchema,
+  zcodeSessionRecordInputHistoryParamsSchema,
   elideSessionSnapshotForIndex,
   zcodeSessionRuntimePreferencesResultSchema,
   zcodeSessionResumeParamsSchema,
@@ -87,6 +90,7 @@ import {
   type ZCodeModelContextBudgetStrategy,
   type ZCodeProtocolTrace,
   type ZCodeSessionEvent,
+  type ZCodeSessionRawEvent,
   type ZCodeSessionHistoryTarget,
   type ZCodeSessionResumeParams,
   type ZCodeSessionPersistence,
@@ -776,6 +780,36 @@ async function readProtocolSessionEvents(
   }
   flushPendingStreamingDeltaBatch();
   return options.limit ? visibleEvents.slice(-options.limit) : visibleEvents;
+}
+
+/**
+ * contracts SessionEvent 的线上序列化：timestamp 是 Date（JSON.stringify 得 ISO 串），
+ * 其余字段本就为持久化设计可 JSON 化。客户端按 zcodeSessionRawEventSchema 校验后
+ * 把 timestamp revive 回 Date 供 TUI 共享层使用。
+ */
+function serializeRawSessionEvent(event: SessionEvent): ZCodeSessionRawEvent {
+  return {
+    ...event,
+    timestamp:
+      event.timestamp instanceof Date
+        ? event.timestamp.toISOString()
+        : (event.timestamp as string | number),
+  } as ZCodeSessionRawEvent;
+}
+
+/**
+ * raw 格式回放：afterSeq 语义直接复用 events 自带的 sequenceNumber（与 mapped 协议 seq
+ * 无关），limit 取尾部截断，和 mapped 路径一致。
+ */
+async function readRawSessionEvents(
+  record: ZCodeProtocolSessionRecord,
+  options: { afterSeq?: number; limit?: number } = {},
+): Promise<ZCodeSessionRawEvent[]> {
+  const events = await record.eventStore.getEvents(record.app.sessionId as SessionId);
+  const rawEvents = events
+    .filter((event) => options.afterSeq === undefined || event.sequenceNumber > options.afterSeq)
+    .map(serializeRawSessionEvent);
+  return options.limit ? rawEvents.slice(-options.limit) : rawEvents;
 }
 
 async function getProtocolEventSeq(
@@ -1973,6 +2007,15 @@ export async function readMessages(context: ZCodeProtocolAgentServerContext, raw
 export async function readEvents(context: ZCodeProtocolAgentServerContext, rawParams: unknown) {
   const params = parseParams(zcodeSessionEventsParamsSchema, rawParams);
   const record = requireSession(context, params.sessionId);
+  if (params.eventFormat === "raw") {
+    return {
+      events: [],
+      rawEvents: await readRawSessionEvents(record, {
+        afterSeq: params.afterSeq,
+        limit: params.limit,
+      }),
+    };
+  }
   return {
     events: await readProtocolSessionEvents(context, record, record.deliveryKind, {
       afterSeq: params.afterSeq,
@@ -1991,6 +2034,28 @@ export async function subscribeSession(
   // 兼容保护：旧 replayable 流没有 unsubscribe RPC。这里只记录真正的 subscribe，
   // 不复用会被 session/read 写入的 deliveryKind，避免普通读取永久阻止 resident 回收。
   record.legacyStreamSubscribed = true;
+  const eventFormat = params.eventFormat ?? "mapped";
+  record.eventFormat = eventFormat;
+  if (eventFormat === "raw") {
+    // raw 续传：eventSeq 复用 SessionEvent.sequenceNumber——attach 客户端记下断线前
+    // 最后一条的 sequenceNumber，重连后按 afterSeq 补放，语义与 mapped seq 对应。
+    const rawEvents =
+      params.afterSeq === undefined ? [] : await readRawSessionEvents(record, {
+        afterSeq: params.afterSeq,
+      });
+    const events = await record.eventStore.getEvents(record.app.sessionId as SessionId);
+    return {
+      eventSeq: events.length > 0 ? events[events.length - 1]!.sequenceNumber : 0,
+      events: [],
+      rawEvents,
+      sessionId: params.sessionId,
+      snapshot: params.includeSnapshot
+        ? await snapshot(context, record, undefined, {
+            modelAvailability: "current",
+          })
+        : undefined,
+    };
+  }
   const events =
     params.afterSeq === undefined
       ? []
@@ -2007,6 +2072,31 @@ export async function subscribeSession(
         })
       : undefined,
   };
+}
+
+/** attach 客户端 composer ↑ 召回：输入历史归 session store（server 侧）所有。 */
+export async function recallPreviousInput(
+  context: ZCodeProtocolAgentServerContext,
+  rawParams: unknown,
+) {
+  const params = parseParams(zcodeSessionRecallPreviousInputParamsSchema, rawParams);
+  const record = requireSession(context, params.sessionId);
+  const entry = await record.app.recallPreviousInputHistory(params.skip ?? 0);
+  return { entry: entry ? { text: entry.text } : null };
+}
+
+/** attach 客户端 slash 命令入史：命令在 client 侧路由，记录仍写回 server 唯一存储。 */
+export async function recordInputHistory(
+  context: ZCodeProtocolAgentServerContext,
+  rawParams: unknown,
+) {
+  const params = parseParams(zcodeSessionRecordInputHistoryParamsSchema, rawParams);
+  const record = requireSession(context, params.sessionId);
+  await record.app.recordInputHistory(
+    { text: params.text },
+    params.kind ?? "slash_command",
+  );
+  return {};
 }
 
 export async function sendPrompt(context: ZCodeProtocolAgentServerContext, rawParams: unknown) {
@@ -3177,6 +3267,15 @@ export function onSessionEvent(
   // v4 通道：权威事件无条件喂给 v4 投影/发布器——v4 订阅不依赖旧协议的
   // deliveryKind 订阅态，帧节奏由 gateway 按订阅者 profile 自行调度。
   context.v4Gateway?.ingest(record.app.sessionId, event);
+  // raw 订阅（tui-attach）：SessionEvent 原样下投，绕过下方 mapped 折叠与 delta 合批；
+  // 断线续传用 sequenceNumber 做 afterSeq，与协议 seq 无关。
+  if (record.eventFormat === "raw") {
+    context.notify({
+      method: zcodeProtocolNotifications.sessionRawEvent,
+      params: serializeRawSessionEvent(event),
+    });
+    return;
+  }
   if (!record.deliveryKind) return;
   const deltaInfo = readStreamingDeltaBatchableEvent(event);
   if (deltaInfo && !shouldHideProtocolSessionEvent(record, event)) {
