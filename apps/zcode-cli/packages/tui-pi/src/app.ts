@@ -13,9 +13,11 @@ import {
 import type { CollaborationMode, SessionEvent, TurnId } from "@zcode/contracts";
 import { getZCodeCopy, type TuiCopy } from "@zcode/i18n";
 import type {
+  DraftAttachment,
   SubmitValueOptions,
   TuiModelOption,
   TuiOptions,
+  TuiPromptAttachment,
   TuiSelection,
   TuiStartupOptions,
   TuiSubmitPromptResult,
@@ -58,8 +60,10 @@ import {
   seedWorkflowMirror,
   shouldClearPromptDraftOnCtrlC,
   shouldExitOnCtrlD,
+  shouldHandleInputHistoryNavigation,
   submitDuringActiveTurn,
   submitIdleTurn,
+  toDraftAttachments,
   validContextUsage,
   workflowRunSeedFromSummary,
   type TuiWorkflowMirror,
@@ -111,6 +115,11 @@ export class PiTuiApp {
   private readonly sidebarShortcut = createSidebarShortcutState();
   private loaderMounted = false;
   private startupApplied = false;
+  private inputHistoryIndex = 0;
+  private inputHistoryDraft: string | undefined;
+  private inputHistoryDraftAttachments: DraftAttachment[] | undefined;
+  private nextAttachmentId = 0;
+  private suppressHistoryReset = false;
   private readonly fallback: {
     locale: NonNullable<TuiOptions["locale"]>;
     loginRequired: boolean;
@@ -150,7 +159,9 @@ export class PiTuiApp {
     });
     this.editor.onSubmit = (text) => this.handleEditorSubmit(text);
     this.editor.onChange = () => {
-      /* draft tracking happens via getText() at chord time */
+      // Editor.setText 与逐字输入都触发 onChange；restoreHistoryDraft 置
+      // suppressHistoryReset 压掉恢复动作自身的重置。
+      if (!this.suppressHistoryReset) this.resetInputHistory();
     };
 
     this.composerBox.addChild(this.editor);
@@ -375,7 +386,7 @@ export class PiTuiApp {
         messageInsertIndex: store.state.messages.length,
         options: this.options,
         requestPermission: this.requestPermission,
-        setDraftValue: (v) => this.editor.setText(v),
+        setDraftValue: (v) => this.setDraftValue(v),
         setLastError: (m) => store.set("lastError", m),
         setMessages: store.setter("messages"),
         setQueuedInputs: store.setter("queuedInputs"),
@@ -396,7 +407,7 @@ export class PiTuiApp {
         this.syncBusyIndicator();
       },
       setDraftAttachments: store.setter("draftAttachments"),
-      setDraftValue: (v) => this.editor.setText(v),
+      setDraftValue: (v) => this.setDraftValue(v),
       setLastError: (m) => store.set("lastError", m),
       setLiveModelText: (v) => store.set("liveModelText", v),
       setMessages: store.setter("messages"),
@@ -415,6 +426,93 @@ export class PiTuiApp {
     if (!trimmed) return;
     this.editor.addToHistory(trimmed);
     void this.submitValue(trimmed);
+  }
+
+  /* ---------- input history (port of app-input-history.ts) ---------- */
+
+  private get inputHistoryActive(): boolean {
+    return this.inputHistoryDraft !== undefined;
+  }
+
+  private setDraftValue(value: string): void {
+    this.editor.setText(value);
+    this.store.setter("draftAttachments")((current) =>
+      current.filter((attachment) => value.includes(attachment.placeholder)),
+    );
+    this.resetInputHistory();
+  }
+
+  private resetInputHistory(): void {
+    this.inputHistoryIndex = 0;
+    this.inputHistoryDraft = undefined;
+    this.inputHistoryDraftAttachments = undefined;
+  }
+
+  private restoreHistoryDraft(value: string, attachments?: TuiPromptAttachment[]): void {
+    const restored = toDraftAttachments(attachments, () => this.nextAttachmentId++);
+    for (const attachment of restored) {
+      this.nextAttachmentId = Math.max(this.nextAttachmentId, attachment.id + 1);
+    }
+    // 恢复历史草稿不算用户改稿：压住 setText 触发的 onChange 历史重置，
+    // 保留 inputHistoryIndex / stash 供继续 Up/Down 遍历。
+    this.suppressHistoryReset = true;
+    try {
+      this.editor.setText(value);
+    } finally {
+      this.suppressHistoryReset = false;
+    }
+    this.store.set("draftAttachments", restored);
+  }
+
+  private async recallPreviousInput(): Promise<void> {
+    const store = this.store;
+    if (!this.options.recallPreviousInput) {
+      store.set("status", this.copy.input.noHistorySource);
+      return;
+    }
+    if (this.inputHistoryDraft === undefined) {
+      this.inputHistoryDraft = this.editor.getText();
+      this.inputHistoryDraftAttachments = store.state.draftAttachments;
+    }
+    try {
+      const skip = this.inputHistoryIndex;
+      const previous = await this.options.recallPreviousInput(skip);
+      if (!previous?.text) {
+        store.set("status", this.copy.input.noPreviousInput);
+        return;
+      }
+      this.inputHistoryIndex = skip + 1;
+      this.restoreHistoryDraft(previous.text, previous.attachments);
+      store.set(
+        "status",
+        previous.attachments?.length
+          ? this.copy.input.restoredPreviousInputWithAttachments(previous.attachments.length)
+          : this.copy.input.restoredPreviousInput,
+      );
+    } catch (error) {
+      store.set("status", this.copy.input.restorePreviousInputFailed);
+      store.set("statusDetails", [error instanceof Error ? error.message : String(error)]);
+    }
+  }
+
+  private async recallNextInput(): Promise<void> {
+    const store = this.store;
+    if (this.inputHistoryDraft === undefined) return;
+    if (this.inputHistoryIndex <= 1) {
+      const stashedAttachments = this.inputHistoryDraftAttachments;
+      this.setDraftValue(this.inputHistoryDraft);
+      store.set("draftAttachments", stashedAttachments ?? []);
+      this.resetInputHistory();
+      store.set("status", this.copy.status.ready);
+      return;
+    }
+    this.inputHistoryIndex -= 1;
+    try {
+      const previous = await this.options.recallPreviousInput?.(this.inputHistoryIndex - 1);
+      if (previous?.text) this.restoreHistoryDraft(previous.text, previous.attachments);
+    } catch {
+      // 历史导航 best-effort，失败不回退已前进的下标（与 React 端一致）。
+    }
   }
 
   /* ---------- chords ---------- */
@@ -447,8 +545,7 @@ export class PiTuiApp {
       const draft = this.editor.getText();
       if (shouldClearPromptDraftOnCtrlC(draft)) {
         resetCtrlCExitGuard(this.ctrlCGuard);
-        this.editor.setText("");
-        store.set("draftAttachments", []);
+        this.setDraftValue("");
         store.set("status", PROMPT_DRAFT_CLEARED_STATUS);
         return { consume: true };
       }
@@ -462,12 +559,26 @@ export class PiTuiApp {
     }
     resetCtrlCExitGuard(this.ctrlCGuard);
 
-    // Empty-draft Up recalls cross-session history via the CLI port
+    // Empty-draft Up/Down walks cross-session history via the CLI port
     // (Editor's own history handles non-empty drafts itself).
-    if (matchesKey(data, "up") && this.editor.getText() === "" && this.options.recallPreviousInput) {
-      void Promise.resolve(this.options.recallPreviousInput()).then((entry) => {
-        if (entry?.text) this.editor.setText(entry.text);
-      });
+    if (
+      matchesKey(data, "up") &&
+      shouldHandleInputHistoryNavigation({
+        draftValue: this.editor.getText(),
+        inputHistoryActive: this.inputHistoryActive,
+      })
+    ) {
+      void this.recallPreviousInput();
+      return { consume: true };
+    }
+    if (
+      matchesKey(data, "down") &&
+      shouldHandleInputHistoryNavigation({
+        draftValue: this.editor.getText(),
+        inputHistoryActive: this.inputHistoryActive,
+      })
+    ) {
+      void this.recallNextInput();
       return { consume: true };
     }
 
