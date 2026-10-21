@@ -31,7 +31,9 @@ test("keyEventFromInput maps printable input with sequence", () => {
   assert.equal(lower?.shift, false);
 
   const upper = keyEventFromInput("A");
-  assert.equal(upper?.name, "A");
+  // opentui 语义：name 是未加 shift 的逻辑键（小写），大小写由 shift 表达；
+  // 共享 handleQuestionKey 以 key.name === "o" 等字面比较依赖这一约定。
+  assert.equal(upper?.name, "a");
   assert.equal(upper?.sequence, "A");
   assert.equal(upper?.shift, true);
 });

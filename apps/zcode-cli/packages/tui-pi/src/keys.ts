@@ -69,10 +69,13 @@ export const keyEventFromInput = (data: string): KeyEvent | undefined => {
   }
 
   // Printable input: single chars and multi-char runs (fast typing / IME bursts).
+  // opentui semantics: `name` is the unshifted key (letters lowercase), `shift`
+  // carries case — shared handlers compare `key.name === "o"` literally and
+  // re-apply shift themselves via printableKey().
   if (data.length > 0 && [...data].every((c) => c >= " " && c !== "\x7f")) {
     const single = data.length === 1;
     return makeKey({
-      name: single ? data : "",
+      name: single ? data.toLowerCase() : "",
       raw: data,
       sequence: data,
       shift: single && data !== data.toLowerCase(),
