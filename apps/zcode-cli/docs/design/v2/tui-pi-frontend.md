@@ -43,29 +43,37 @@ differential-rendering TUI 库）的前端 `@zcode/tui-pi`，与现有 OpenTUI/R
 - `types.ts`（`Tui*` 类型已由 `.` 导出；internals 面向实现代码）
 - `theme/`（palette、主题解析）
 
-约束：internals 只允许 `import type` 级 React/opentui 依赖（运行时擦除）。
-带运行时 React/opentui 导入的模块（`app-subagents.ts` hook、`app.tsx`、
-`app-view.tsx`、*.tsx 渲染组件、opentui 主题 `app-markdown-theme.ts`）不导出；
+约束：internals 的 React/opentui 依赖以 `import type` 为主，但闭包内存在少量
+运行时导入（`app-submit.ts` 的 `useCallback`、`app-keyboard-helpers.ts` 的
+`@mbears/opentui-core` `KeyEvent` 类型使用）。pi 前端 esbuild 打包时把这类第
+三方导入 external 化、经 node_modules 解析，因此对调用方仍表现为自包含。
+带 *.tsx 渲染组件或 hook 入口的模块（`app-subagents.ts` hook、`app.tsx`、
+`app-view.tsx`、opentui 主题 `app-markdown-theme.ts`）不导出；
 pi 前端自行实现对应渲染与 hook 逻辑。
 
 ## `@zcode/tui-pi` 结构
 
 `apps/zcode-cli/packages/tui-pi`，`runTui(options)` 签名与 `@zcode/tui` 一致。
+构建方式与 `@zcode/tui` 相同：`tsc` 产出类型，esbuild 把 `src/index.ts` 打包
+成自包含 `dist/index.js`——所有 `@zcode/*` 工作区依赖（含 `@zcode/tui` 的
+internals 闭包、`@zcode/shared` 的 TS 源码）内联，第三方依赖运行时经
+node_modules 解析。`@zcode/cli` bundle 把 `@zcode/tui-pi` 列为 external，
+运行时 `import("@zcode/tui-pi")` 直接加载该 dist。
 渲染器选 `TuiMainScreen`（主屏内联转写 + 终端 scrollback，与现行 UX 同形；
 pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 
 - `ProcessTerminal` + `TuiMainScreen`；stdin/stdout 非 TTY 时与现有前端同判退出 1。
-- 根 `Container` 纵向堆叠：transcript 容器 → queued-inputs → composer(Editor) →
-  statusline；交互面板（审批 / AskUserQuestion / TuiSelection / 子代理视图 /
-  信息面板）经 `tui.showOverlay` 模态呈现，Esc 返回。
+- 根 `Container` 纵向堆叠：transcript 容器 → 交互面板（审批 / AskUserQuestion /
+  TuiSelection，与 React 前端同形内联呈现）→ queued-inputs → composer(Editor) →
+  statusline。Esc 经全局输入监听关闭当前面板或触发双按中断。
 - composer 用内置 `Editor`：`CombinedAutocompleteProvider` 提供 `/` 命令与 `@`
   文件路径补全；`/model`、`/effort`、`/mode` 经 `getArgumentCompletions` 给参数
   补全（等价于现有的草稿建议面板）；编辑器自带 bracketed paste、历史导航、
   kill-ring、撤销。
 - 全局键经 `tui.addInputListener` 拦截（先于焦点组件）：`Ctrl+C`（有草稿→清空；
   否则 2s 双击退出）、`Ctrl+D`（空草稿退出）、双 `Esc`（2s 内中断当前 turn）、
-  `Ctrl+P`（轮换可用模型，silent 提交 `/model`）、`Ctrl+L`（草稿置 `/model ` 并
-  弹出参数补全）、`Ctrl+Y`（复制最后一条 agent 回复）、`Shift+Tab`（mode 轮换
+  `Ctrl+P`（轮换可用模型，silent 提交 `/model`）、`Ctrl+L`（直接弹出可过滤模型
+  选择面板，回车提交 `/model <ref>`）、`Ctrl+Y`（复制最后一条 agent 回复）、`Shift+Tab`（mode 轮换
   `plan→build→guarded→yolo`）、空草稿 `+`/`-`（展开/收起 workflow 卡）。
 - Editor 自带 history 导航与 `recallPreviousInput` 远端历史并存：草稿为空时
   Up/Down 先走 CLI 侧 `recallPreviousInput`（跨会话持久历史），与现有前端一致。
@@ -91,12 +99,12 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   `/login *-api-key` 文本在 transcript 中脱敏；`/compact` 渲染为
   compact-timeline row 且不回显 response。
 - `requestPermission`：CreateWorkflow/AmendWorkflow 沿用 CLI 自动放行例外；
-  AskUserQuestion 经 `AskUserQuestionInputSchema` 校验 → 问题向导 overlay
+  AskUserQuestion 经 `AskUserQuestionInputSchema` 校验 → 问题向导内联面板
   （选项、Other 输入、multiSelect、review 页，`decision:"modify"` 回传
-  answers/annotations）；其余 → 审批 overlay（Allow once / Always allow in
+  answers/annotations）；其余 → 审批内联面板（Allow once / Always allow in
   this project / Deny；`optionsPolicy`、`suggestedPermissionUpdates`、
   `approvalPermissionScopes` 全量遵守，Esc=Deny）。
-- `TuiSelection`：overlay 面板，`filterSelectionItems` 过滤，`input` 子状态
+- `TuiSelection`：内联面板，`filterSelectionItems` 过滤，`input` 子状态
   （masked、bracketed paste 路由进输入）、`pending` 子状态，item →
   `submitValue(item.command)`。
 - `applyResult` 同 `app-result.ts`：mode/model/locale/thoughtLevel/

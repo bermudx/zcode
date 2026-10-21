@@ -121,6 +121,9 @@ export interface RunDependencies extends PluginsCommandOverrides {
 }
 
 export type CliPermissionMode = "build" | "plan" | "edit" | "yolo" | "guarded";
+
+/** Interactive frontends selectable via --tui-frontend. */
+export type CliTuiFrontend = "opentui" | "pi";
 export type CliRuntimeMode = CliPermissionMode | "auto";
 
 export interface CliModeState {

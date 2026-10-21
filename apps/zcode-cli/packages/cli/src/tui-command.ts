@@ -12,7 +12,13 @@ import { resolveTuiStartupLocale } from "./tui-startup-locale.js";
 import { createWorkspacePathSuggestionProvider } from "./tui-workspace-paths.js";
 import { resolveWorkspaceGitBranch } from "./tui-workspace-git.js";
 import { createCliModeState, currentCliMode } from "./tui-command-state.js";
-import type { CliPermissionMode, CliResumeRequest, RunDependencies } from "./cli-types.js";
+import type {
+  CliPermissionMode,
+  CliResumeRequest,
+  CliTuiFrontend,
+  RunDependencies,
+} from "./cli-types.js";
+import { loadPiTuiRuntime } from "./tui-pi-runtime-loader.js";
 import { DEFAULT_CLI_WORKFLOW_MODE } from "./workflow-mode.js";
 
 export const runTuiCommand = async (
@@ -26,10 +32,15 @@ export const runTuiCommand = async (
   forceMcs = false,
   toolsearchMode: ToolSearchMode = "off",
   workflowMode: DynamicWorkflowMode = DEFAULT_CLI_WORKFLOW_MODE,
+  tuiFrontend: CliTuiFrontend = "opentui",
 ): Promise<number> => {
   try {
     const modeState = createCliModeState(mode);
-    const runTui = deps.runTui ?? (await loadTuiRuntime()).runTui;
+    const runTui =
+      deps.runTui ??
+      (tuiFrontend === "pi"
+        ? (await loadPiTuiRuntime()).runTui
+        : (await loadTuiRuntime()).runTui);
     const workspaceDirectory = (deps.cwd ?? process.cwd)();
     const env = deps.env ?? process.env;
     const developerMode = resolveZCodeRuntimeEnv(env) === "development";

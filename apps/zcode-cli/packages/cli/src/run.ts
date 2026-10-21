@@ -39,6 +39,7 @@ import type {
   CliPermissionMode,
   CliResumeRequest,
   CliTargetRequest,
+  CliTuiFrontend,
   RunDependencies,
 } from "./cli-types.js";
 
@@ -166,6 +167,16 @@ const normalizePresentationSurface = (value: string | undefined): PresentationSu
   if (value === undefined || value.toLowerCase() === "terminal") return "terminal";
   if (value.toLowerCase() === "desktop") return "zcode_desktop";
   throw new Error(`Unsupported --surface value: ${value}. Supported surfaces: terminal, desktop.`);
+};
+
+const TUI_FRONTENDS: readonly CliTuiFrontend[] = ["opentui", "pi"];
+
+const normalizeTuiFrontend = (value: string | undefined): CliTuiFrontend | undefined => {
+  if (value === undefined) return undefined;
+  const lowered = value.toLowerCase();
+  return (TUI_FRONTENDS as readonly string[]).includes(lowered)
+    ? (lowered as CliTuiFrontend)
+    : undefined;
 };
 
 const normalizeTargetRequest = (
@@ -450,6 +461,20 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
     return 1;
   }
   const toolsearchMode = parsedToolsearchMode.data;
+  const tuiFrontend = normalizeTuiFrontend(parsed.values["tui-frontend"]);
+  if (tuiFrontend === undefined && parsed.values["tui-frontend"] !== undefined) {
+    ctx.stderr.write("--tui-frontend must be one of opentui, pi.\n");
+    return 1;
+  }
+  if (
+    parsed.values["tui-frontend"] !== undefined &&
+    (typeof parsed.values.prompt === "string" ||
+      parsed.values.target !== undefined ||
+      commandName(parsed.positionals) !== "tui")
+  ) {
+    ctx.stderr.write("--tui-frontend can only be used with the tui command.\n");
+    return 1;
+  }
   const forceMcs = parsed.values["force-mcs"] === true;
   let targetRequest: CliTargetRequest | undefined;
   try {
@@ -651,6 +676,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
         forceMcs,
         toolsearchMode,
         workflowMode,
+        tuiFrontend,
       );
     default:
       ctx.stderr.write(`Unknown command: ${commandName(parsed.positionals)}\n\n`);

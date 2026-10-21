@@ -432,6 +432,9 @@ importers:
       '@zcode/tui':
         specifier: workspace:*
         version: link:../tui
+      '@zcode/tui-pi':
+        specifier: workspace:*
+        version: link:../tui-pi
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
@@ -836,6 +839,34 @@ importers:
       '@types/react':
         specifier: 19.2.0
         version: 19.2.0
+      tsx:
+        specifier: ^4.20.0
+        version: 4.21.0
+
+  apps/zcode-cli/packages/tui-pi:
+    dependencies:
+      '@earendil-works/pi-tui':
+        specifier: 1.3.0
+        version: 1.3.0
+      '@zcode/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@zcode/i18n':
+        specifier: workspace:*
+        version: link:../i18n
+      '@zcode/shared':
+        specifier: workspace:*
+        version: link:../../../../packages/shared
+      '@zcode/tui':
+        specifier: workspace:*
+        version: link:../tui
+    devDependencies:
+      '@mbears/opentui-core':
+        specifier: 0.2.15
+        version: 0.2.15(typescript@6.0.2)(web-tree-sitter@0.25.10)
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
       tsx:
         specifier: ^4.20.0
         version: 4.21.0
@@ -2428,6 +2459,10 @@ packages:
 
   '@dukelib/sheets-wasm@0.1.21':
     resolution: {integrity: sha512-YJpLUo/K7N9iGZv+A74D8o6XlT1VjMdlq9i/pIj/DwAO9/7jqppaV60VdL0TgJ0UzUlbhChWR+qQGNTmESINlw==}
+
+  '@earendil-works/pi-tui@1.3.0':
+    resolution: {integrity: sha512-AlKvEwEWyVtnuw7SVb4N/mUhlfIohyFslUNWarZVdLHHSdt3ca5EhMLwTzblBpDpaofSz+f+tAHie6CfxVrWKA==}
+    engines: {node: '>=22.19.0'}
 
   '@ecies/ciphers@0.2.6':
     resolution: {integrity: sha512-patgsRPKGkhhoBjETV4XxD0En4ui5fbX0hzayqI3M8tvNMGUoUvmyYAIWwlxBc1KX5cturfqByYdj5bYGRpN9g==}
@@ -8198,6 +8233,10 @@ packages:
     resolution: {integrity: sha512-CQ+bEO+Tva/qlmw24dCejulK5pMzVnUOFOijVogd3KQs07HnRIgp8TGipvCCRT06xeYEbpbgwaCxglFyiuIcmA==}
     engines: {node: '>=18'}
 
+  get-east-asian-width@1.6.0:
+    resolution: {integrity: sha512-QRbvDIbx6YklUe6RxeTeleMR0yv3cYH6PsPZHcnVn7xv7zO1BHN8r0XETu8n6Ye3Q+ahtSarc3WgtNWmehIBfA==}
+    engines: {node: '>=18'}
+
   get-intrinsic@1.3.0:
     resolution: {integrity: sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==}
     engines: {node: '>= 0.4'}
@@ -9345,6 +9384,11 @@ packages:
 
   marked@17.0.6:
     resolution: {integrity: sha512-gB0gkNafnonOw0obSTEGZTT86IuhILt2Wfx0mWH/1Au83kybTayroZ/V6nS25mN7u8ASy+5fMhgB3XPNrOZdmA==}
+    engines: {node: '>= 20'}
+    hasBin: true
+
+  marked@18.0.11:
+    resolution: {integrity: sha512-HnslJfsZkRPBDJRHvVtAaWlZHEpSu7u8LgQuJCELjRKuWR+hpq4A7sLq3p8HaI9ypVoXDXxV34CsQJEe1+J5Aw==}
     engines: {node: '>= 20'}
     hasBin: true
 
@@ -12928,6 +12972,11 @@ snapshots:
       yocto-spinner: 1.1.0
 
   '@dukelib/sheets-wasm@0.1.21': {}
+
+  '@earendil-works/pi-tui@1.3.0':
+    dependencies:
+      get-east-asian-width: 1.6.0
+      marked: 18.0.11
 
   '@ecies/ciphers@0.2.6(@noble/ciphers@1.3.0)':
     dependencies:
@@ -19124,6 +19173,8 @@ snapshots:
 
   get-east-asian-width@1.5.0: {}
 
+  get-east-asian-width@1.6.0: {}
+
   get-intrinsic@1.3.0:
     dependencies:
       call-bind-apply-helpers: 1.0.2
@@ -20385,6 +20436,8 @@ snapshots:
   marked@17.0.1: {}
 
   marked@17.0.6: {}
+
+  marked@18.0.11: {}
 
   matcher@3.0.0:
     dependencies:

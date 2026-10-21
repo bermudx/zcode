@@ -62,6 +62,7 @@ export const parseGlobalArgs = (argv: string[]) =>
         type: "boolean",
       },
       "toolsearch-mode": { type: "string" },
+      "tui-frontend": { type: "string" },
       "force-mcs": {
         type: "boolean",
       },

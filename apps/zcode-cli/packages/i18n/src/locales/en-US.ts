@@ -40,6 +40,7 @@ Options:
     Comma or space-separated tool names, e.g. "Bash Edit".
     "Bash(git *)" removes all of Bash; command patterns are not matched.
   --toolsearch-mode <auto|native|local|off> ToolSearch mode (default: off; this launch only)
+  --tui-frontend <opentui|pi> Interactive frontend for the tui command (default: opentui)
   --force-mcs      Force mid-conversation system projection for Anthropic providers
   --locale <locale>  UI locale: en-US, zh-CN, or auto
   --mode <mode>    Permission mode for prompts: build, edit, plan, yolo, or guarded (default: yolo for --prompt)
