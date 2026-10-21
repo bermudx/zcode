@@ -462,6 +462,15 @@ export class PiTuiApp {
     }
     resetCtrlCExitGuard(this.ctrlCGuard);
 
+    // Empty-draft Up recalls cross-session history via the CLI port
+    // (Editor's own history handles non-empty drafts itself).
+    if (matchesKey(data, "up") && this.editor.getText() === "" && this.options.recallPreviousInput) {
+      void Promise.resolve(this.options.recallPreviousInput()).then((entry) => {
+        if (entry?.text) this.editor.setText(entry.text);
+      });
+      return { consume: true };
+    }
+
     if (matchesKey(data, "ctrl+d")) {
       if (
         shouldExitOnCtrlD({
