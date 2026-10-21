@@ -7,6 +7,7 @@ import {
   Loader,
   Text,
   matchesKey,
+  type OverlayHandle,
   type TUI,
 } from "@earendil-works/pi-tui";
 import type { CollaborationMode, SessionEvent, TurnId } from "@zcode/contracts";
@@ -22,19 +23,27 @@ import type {
 } from "@zcode/tui/internals";
 import {
   CTRL_C_EXIT_PROMPT,
+  EMPTY_TUI_WORKFLOW_MIRROR,
   ESCAPE_PAUSE_CONFIRMATION_WINDOW_MS,
   ESCAPE_PAUSE_PROMPT,
   NO_ACTIVE_OUTPUT_STATUS,
   NO_SELECTABLE_MODEL_STATUS,
   ONLY_ONE_MODEL_STATUS,
   PROMPT_DRAFT_CLEARED_STATUS,
+  SIDEBAR_HIDDEN_STATUS,
+  SIDEBAR_LEADER_HINT,
+  SIDEBAR_SHOWN_STATUS,
   TUI_SWITCHABLE_MODES,
   applyMainSessionEvent,
+  applyWorkflowProgressToMirror,
   appendAgentResult,
+  appendWorkflowInterruptedNotices,
   createCtrlCExitGuard,
   createDoublePressGuard,
   createSelectionState,
+  createSidebarShortcutState,
   createTuiPermissionRequester,
+  interruptedWorkflowNotices,
   lastAgentReplyText,
   modelCommandQuery,
   modelCommandText,
@@ -45,17 +54,24 @@ import {
   resolveDoublePressIntent,
   resetCtrlCExitGuard,
   resetDoublePressGuard,
+  resolveSidebarShortcut,
+  seedWorkflowMirror,
   shouldClearPromptDraftOnCtrlC,
   shouldExitOnCtrlD,
   submitDuringActiveTurn,
   submitIdleTurn,
   validContextUsage,
+  workflowRunSeedFromSummary,
+  type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
 import { Composer } from "./composer.js";
+import { SessionInfoPanel } from "./info-panel.js";
+import { keyEventFromInput } from "./keys.js";
 import { ApprovalPanel, QueuedInputsRow, SelectionPanel } from "./panels.js";
 import { MessageRow, piMarkdownTheme, reconcileTranscript } from "./rows.js";
 import { AppStore } from "./store.js";
 import type { PiTheme } from "./theme.js";
+import { WorkflowCard } from "./workflow.js";
 
 const COPY_DEFAULT_LOCALE = "en-US" as const;
 
@@ -90,6 +106,9 @@ export class PiTuiApp {
   private approvalPanel: ApprovalPanel | undefined;
   private selectionPanel: SelectionPanel | undefined;
   private queuedRow: QueuedInputsRow | undefined;
+  private workflowCard: WorkflowCard;
+  private infoOverlay: OverlayHandle | undefined;
+  private readonly sidebarShortcut = createSidebarShortcutState();
   private loaderMounted = false;
   private startupApplied = false;
   private readonly fallback: {
@@ -138,6 +157,8 @@ export class PiTuiApp {
     this.statusBox.addChild(this.statusLine);
 
     this.tui.addChild(this.transcript);
+    this.workflowCard = new WorkflowCard(this.workflowMirror, this.theme);
+    this.tui.addChild(this.workflowCard);
     this.tui.addChild(this.interaction);
     this.tui.addChild(this.composerBox);
     this.tui.addChild(this.statusBox);
@@ -191,6 +212,49 @@ export class PiTuiApp {
       this.editor.refreshAutocomplete();
     }
     this.updateStatusLine();
+    void this.seedWorkflowRuns();
+  }
+
+  /**
+   * Cold workflow state: replay journal envelopes into the shared reducer first
+   * (real node/actor state), then seed display labels and interrupted-run
+   * notices from the summary list. Both queries failing must not block startup.
+   */
+  private async seedWorkflowRuns(): Promise<void> {
+    const { listWorkflowRuns, replayWorkflowRuns } = this.options;
+    if (replayWorkflowRuns) {
+      try {
+        const envelopes = await replayWorkflowRuns({
+          excludeRunIds: new Set(this.workflowMirror.state.runs.map((run) => run.runId)),
+        });
+        for (const envelope of envelopes) {
+          this.workflowMirror = applyWorkflowProgressToMirror(this.workflowMirror, envelope);
+        }
+        this.workflowCard.setMirror(this.workflowMirror);
+      } catch {
+        // 回放失败不该让 TUI 起不来。
+      }
+    }
+    if (!listWorkflowRuns) return;
+    let summaries: Awaited<ReturnType<NonNullable<typeof listWorkflowRuns>>>;
+    try {
+      summaries = await listWorkflowRuns();
+    } catch {
+      return;
+    }
+    if (summaries.length === 0) return;
+    this.workflowMirror = seedWorkflowMirror(
+      this.workflowMirror,
+      summaries.map(workflowRunSeedFromSummary),
+    );
+    this.workflowCard.setMirror(this.workflowMirror);
+    const resumable = interruptedWorkflowNotices(summaries);
+    if (resumable.length > 0) {
+      this.store.setter("messages")((current) =>
+        appendWorkflowInterruptedNotices(current, resumable, this.copy),
+      );
+    }
+    this.tui.requestRender();
   }
 
   /* ---------- event pipeline ---------- */
@@ -225,17 +289,14 @@ export class PiTuiApp {
   };
 
   private workflowMirrorSetter = (
-    value: unknown,
+    value: TuiWorkflowMirror | ((previous: TuiWorkflowMirror) => TuiWorkflowMirror),
   ): void => {
-    // Mirror kept only for workflow card rendering (moon feature); for now we
-    // retain it so reducers that read it back stay consistent.
-    if (typeof value === "function") {
-      this.workflowMirror = (value as (prev: unknown) => unknown)(this.workflowMirror);
-    } else {
-      this.workflowMirror = value;
-    }
+    this.workflowMirror =
+      typeof value === "function" ? value(this.workflowMirror) : value;
+    this.workflowCard.setMirror(this.workflowMirror);
+    this.tui.requestRender();
   };
-  private workflowMirror: unknown;
+  private workflowMirror: TuiWorkflowMirror = EMPTY_TUI_WORKFLOW_MIRROR;
 
   /* ---------- result application (port of useTuiApplyResult) ---------- */
 
@@ -367,6 +428,21 @@ export class PiTuiApp {
     // Autocomplete owns the keyboard while open.
     if (this.editor.isShowingAutocomplete()) return undefined;
 
+    // Ctrl+X leader for the session-info overlay (same chord as the React
+    // frontend's sidebar): Ctrl+X arms, B toggles.
+    const shortcutKey = keyEventFromInput(data);
+    if (shortcutKey) {
+      const intent = resolveSidebarShortcut(this.sidebarShortcut, shortcutKey, Date.now());
+      if (intent === "arm") {
+        store.set("status", SIDEBAR_LEADER_HINT);
+        return { consume: true };
+      }
+      if (intent === "toggle") {
+        this.toggleInfoPanel();
+        return { consume: true };
+      }
+    }
+
     if (matchesKey(data, "ctrl+c")) {
       const draft = this.editor.getText();
       if (shouldClearPromptDraftOnCtrlC(draft)) {
@@ -473,6 +549,10 @@ export class PiTuiApp {
     }
 
     if (matchesKey(data, "escape")) {
+      if (this.infoOverlay) {
+        this.closeInfoPanel();
+        return { consume: true };
+      }
       if (store.state.busy) {
         if (
           resolveDoublePressIntent(this.escGuard, Date.now(), ESCAPE_PAUSE_CONFIRMATION_WINDOW_MS) ===
@@ -490,7 +570,44 @@ export class PiTuiApp {
       return { consume: true };
     }
 
+    // Empty-draft "+"/"-" toggles workflow card expansion (spec parity).
+    if (
+      (data === "+" || data === "-") &&
+      this.editor.getText() === "" &&
+      this.workflowCard.runCount > 0
+    ) {
+      const expanded = this.workflowCard.toggleExpanded();
+      store.set("status", expanded ? "Workflow cards expanded." : "Workflow cards collapsed.");
+      this.tui.requestRender();
+      return { consume: true };
+    }
+
     return undefined;
+  }
+
+  private toggleInfoPanel(): void {
+    if (this.infoOverlay) {
+      this.closeInfoPanel();
+      this.store.set("status", SIDEBAR_HIDDEN_STATUS);
+      return;
+    }
+    const panel = new SessionInfoPanel(this.tui, this.store, this.theme, this.options, () =>
+      this.closeInfoPanel(),
+    );
+    this.infoOverlay = this.tui.showOverlay(panel, {
+      anchor: "right-center",
+      maxHeight: "80%",
+      width: "45%",
+    });
+    this.infoOverlay.focus();
+    this.store.set("status", SIDEBAR_SHOWN_STATUS);
+  }
+
+  private closeInfoPanel(): void {
+    this.infoOverlay?.hide();
+    this.infoOverlay = undefined;
+    this.tui.setFocus(this.editor);
+    this.tui.requestRender();
   }
 
   private cycleMode(): void {

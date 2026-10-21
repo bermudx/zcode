@@ -34,9 +34,15 @@ export * from "./app-permission.js";
 export * from "./app-keyboard-helpers.js";
 export * from "./app-keyboard-suggestions.js";
 export * from "./app-queued-inputs.js";
+export * from "./app-sidebar-shortcut.js";
 // types.js already exports TuiSwitchableMode; pull only the constants.
 export { TUI_SWITCHABLE_MODES } from "./app-mode.js";
 export * from "./app-workflow-mirror.js";
 export * from "./app-workflow-events.js";
+export {
+  appendWorkflowInterruptedNotices,
+  interruptedWorkflowNotices,
+  workflowRunSeedFromSummary,
+} from "./app-workflow-seed.js";
 export * from "./types.js";
 export * from "./theme/index.js";

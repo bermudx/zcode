@@ -110,6 +110,16 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - `applyResult` 同 `app-result.ts`：mode/model/locale/thoughtLevel/
   modelOptions/effortOptions/loginRequired、`restoredMessages` 回放、
   `resetSessionProjection`、`result.selection` → 面板、usage/projection/traceId。
+- workflow：镜像 setter 走共享 `applyWorkflowProgressToMirror`；挂载后先
+  `replayWorkflowRuns` 冷回放再 `listWorkflowRuns` 补 label 与 interrupted
+  notice（`workflowRunSeedFromSummary` / `interruptedWorkflowNotices` /
+  `appendWorkflowInterruptedNotices`）。`WorkflowCard` 内联渲染在转写与交互区
+  之间：每 run 一行（状态 | label | settled/used | actors），空草稿 `+`/`-`
+  切换展开 actors、reports 预览与 log tail。
+- 信息面板：Ctrl+X leader 复用 `resolveSidebarShortcut`（Ctrl+X → B 开/关），
+  `SessionInfoPanel` 经 `tui.showOverlay` 右栏呈现：mode/model/thought、ctx、
+  token 用量、最近事件、todos、修改文件、subagents（running/ended）、MCP
+  servers、最近网络请求；Esc 关闭。
 
 ## 验收
 
@@ -119,5 +129,5 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - `--tui-frontend` 非法值报错；缺省走 opentui 行为不变（回归）。
 - `node:test` 用例：投影（事件→Message[]）、提交分支、审批结果合成、
   选择/问题状态机、草稿命令解析、键位守卫；`VirtualTerminal` 冒烟渲染。
-- 已知裁剪（后续按需）：sidebar 信息面板、子代理转写浏览、workflow 卡、
+- 已知裁剪（后续按需）：子代理转写下钻浏览、workflow 卡与工具卡详情页联动、
   图片附件、i18n copy 全量接线；先以英文 status 文案起步，结构预留。
