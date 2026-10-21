@@ -20,7 +20,7 @@ import type { PiTheme } from "./theme.js";
 
 type SlashCommandSource = readonly TuiSlashCommandSuggestion[] | undefined;
 
-const toPiSlashCommands = (
+export const toPiSlashCommands = (
   commands: SlashCommandSource,
   models: () => readonly TuiModelOption[],
   efforts: () => readonly TuiEffortOption[],

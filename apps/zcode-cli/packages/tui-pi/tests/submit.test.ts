@@ -1,0 +1,129 @@
+// Submit branch semantics: idle → options.submitPrompt with optimistic user
+// row; busy → options.sendInput with steer results projected into the queue
+// area or restored back into the draft on rejection.
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import type { TuiPromptInput, TuiSendInputResult } from "@zcode/tui/internals";
+import { createHarness } from "./harness.js";
+
+test("idle submit calls submitPrompt and appends a local user row", async () => {
+  const prompts: TuiPromptInput[] = [];
+  const h = createHarness({
+    submitPrompt: async (input) => {
+      prompts.push(input);
+      return { response: "agent reply", traceId: "t1", turnId: "turn-9" };
+    },
+  });
+  h.store.set("messages", []);
+  const result = await h.app.submitValue("hello agent");
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0]!.text, "hello agent");
+  const roles = h.store.state.messages.map((message) => `${message.role}:${message.content}`);
+  assert.deepEqual(roles, ["user:hello agent", "agent:agent reply"]);
+  assert.equal(result?.turnId, "turn-9");
+  assert.equal(h.store.state.busy, false);
+  await h.stop();
+});
+
+test("submit clears the draft and toggles busy through the turn", async () => {
+  const h = createHarness({
+    submitPrompt: async () => {
+      assert.equal(h.store.state.busy, true);
+      return { response: "ok" };
+    },
+  });
+  h.feed("hello");
+  await h.app.submitValue(h.draftText());
+  assert.equal(h.draftText(), "");
+  assert.equal(h.store.state.busy, false);
+  await h.stop();
+});
+
+test("/login api-key text is redacted in the transcript row", async () => {
+  const h = createHarness({ submitPrompt: async () => ({ response: "ok" }) });
+  await h.app.submitValue("/login zai-coding-plan-api-key sk-secret-123");
+  const userRow = h.store.state.messages.find((message) => message.role === "user");
+  assert.ok(userRow);
+  assert.ok(!userRow.content.includes("sk-secret-123"));
+  await h.stop();
+});
+
+test("/compact renders a timeline row instead of echoing the response", async () => {
+  const h = createHarness({
+    submitPrompt: async () => ({ response: "compacted summary" }),
+  });
+  await h.app.submitValue("/compact");
+  const roles = h.store.state.messages.map((message) => message.role);
+  assert.ok(roles.includes("timeline"));
+  assert.ok(!roles.includes("agent"));
+  await h.stop();
+});
+
+test("busy submit steers through sendInput and shows the queue row", async () => {
+  const steered: TuiPromptInput[] = [];
+  const sendResult: TuiSendInputResult = {
+    kind: "queued",
+    pendingInputId: "p1",
+    queueLength: 1,
+    turnId: "turn-1" as never,
+  };
+  const h = createHarness({
+    sendInput: async (input) => {
+      steered.push(input);
+      return sendResult;
+    },
+    submitPrompt: async () => ({ response: "unused" }),
+  });
+  h.store.set("busy", true);
+  h.store.set("activeTurnId", "turn-1" as never);
+  const result = await h.app.submitValue("queued question");
+  assert.equal(result, undefined);
+  assert.equal(steered.length, 1);
+  assert.equal(steered[0]!.text, "queued question");
+  assert.equal(h.store.state.queuedInputs.length, 1);
+  assert.equal(h.store.state.queuedInputs[0]!.text, "queued question");
+  assert.equal(h.store.state.status, "Input queued.");
+  await h.stop();
+});
+
+test("rejected steer restores the draft and reports the reason", async () => {
+  const h = createHarness({
+    sendInput: async () => ({ kind: "rejected", reason: "turn_finished" }) as TuiSendInputResult,
+    submitPrompt: async () => ({ response: "unused" }),
+  });
+  h.store.set("busy", true);
+  h.store.set("activeTurnId", "turn-1" as never);
+  const result = await h.app.submitValue("try again");
+  assert.equal(result, undefined);
+  assert.equal(h.draftText(), "try again");
+  assert.match(h.store.state.status, /Input not queued/);
+  await h.stop();
+});
+
+test("busy without sendInput reports a still-responding status", async () => {
+  const h = createHarness({ submitPrompt: async () => ({ response: "unused" }) });
+  h.store.set("busy", true);
+  const result = await h.app.submitValue("wait");
+  assert.equal(result, undefined);
+  assert.equal(h.store.state.status, "Agent is still responding.");
+  await h.stop();
+});
+
+test("started_turn sendInput applies the result and inserts the user row", async () => {
+  const h = createHarness({
+    sendInput: async () =>
+      ({
+        kind: "started_turn",
+        result: { response: "steered reply", turnId: "turn-2" },
+      }) as TuiSendInputResult,
+    submitPrompt: async () => ({ response: "unused" }),
+  });
+  h.store.set("busy", true);
+  h.store.set("activeTurnId", "turn-1" as never);
+  const result = await h.app.submitValue("steer this");
+  assert.equal(result?.response, "steered reply");
+  const roles = h.store.state.messages.map((message) => `${message.role}:${message.content}`);
+  assert.deepEqual(roles, ["user:steer this", "agent:steered reply"]);
+  await h.stop();
+});
