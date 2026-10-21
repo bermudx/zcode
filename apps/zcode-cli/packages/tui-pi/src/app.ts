@@ -110,6 +110,7 @@ export class PiTuiApp {
   private readonly escGuard = createDoublePressGuard();
   private readonly removeInputListener: () => void;
   private unsubscribeSession: (() => void) | undefined;
+  private unsubscribeConnectionStatus: (() => void) | undefined;
   private approvalPanel: ApprovalPanel | undefined;
   private selectionPanel: SelectionPanel | undefined;
   private queuedRow: QueuedInputsRow | undefined;
@@ -192,6 +193,13 @@ export class PiTuiApp {
 
     this.unsubscribeSession = this.options.subscribeSessionEvents?.((event) =>
       this.applyEvent(event),
+    );
+    // tui-attach : état de connexion au shared core affiché dans la ligne de status.
+    this.unsubscribeConnectionStatus = this.options.subscribeConnectionStatus?.(
+      (status) => {
+        this.store.set("status", status);
+        this.tui.requestRender();
+      },
     );
 
     this.removeInputListener = this.tui.addInputListener((data) =>
@@ -779,6 +787,7 @@ export class PiTuiApp {
   async stop(): Promise<void> {
     this.removeInputListener();
     this.unsubscribeSession?.();
+    this.unsubscribeConnectionStatus?.();
     this.loader.stop();
     for (const approval of this.store.state.approvalQueue) {
       approval.cleanup();

@@ -10,7 +10,8 @@ pi-tui 渲染引擎上的第二个交互式前端（`zcode tui --tui-frontend=pi
 
 - 唯一公共入口是 `index.ts` 的 `runTui(options)`；调用方只提供
   `TuiOptions` 端口（submitPrompt / sendInput / recallPreviousInput /
-  subscribeSessionEvents / …），本模块不向 cli 反查实现细节。
+  subscribeSessionEvents / subscribeConnectionStatus / …），本模块
+  不向 cli 反查实现细节。
 - 业务状态单一所有者是 `AppStore` + 共享 reducers；pi 组件只渲染并
   路由焦点，不得新增第二条状态写入路径。
 - 键位语义与 OpenTUI 端一致：全局 input listener 先分派 chord；面板
@@ -21,3 +22,9 @@ pi-tui 渲染引擎上的第二个交互式前端（`zcode tui --tui-frontend=pi
 交集 hook 点：`packages/cli` 的 tui-command 装载器按
 `--tui-frontend` 选择动态 import 本包；startup/result 元数据经
 `TuiOptions` / `TuiStartupOptions` 传递。
+
+shared-core attach：`zcode tui --tui-frontend=pi --shared-core`
+（别名 `zcode attach`）把 TuiOptions 端口全部代理到 Unix socket 上
+的共享 app-server core；`subscribeConnectionStatus` 提供断线/重连
+状态，pi-tui 渲染在 composer 下方状态行（
+`Connexion au core perdue — reconnexion…` / `Reconnecté au core`）。

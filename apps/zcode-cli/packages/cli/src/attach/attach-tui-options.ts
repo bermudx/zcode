@@ -3,6 +3,7 @@
 // 的 slash 路由（client 侧），业务事实全部在 core。
 import type { SessionEvent } from "@zcode/contracts";
 import {
+  zcodeProtocolErrorCodes,
   zcodeProtocolMethods,
   zcodeProtocolNotifications,
   type ZCodeSessionRawEvent,
@@ -11,7 +12,7 @@ import type {
   TuiPromptInput,
   TuiSubmitPromptResult,
 } from "@zcode/tui";
-import { connectAttachClient, type AttachClient } from "./attach-client.js";
+import { connectAttachClient, AttachProtocolError, type AttachClient } from "./attach-client.js";
 import { AttachSessionHandle, asCommandCenterApp } from "./attach-session.js";
 import type { CommandCenterApp, CommandCenterDeps } from "../command-center.js";
 import { createCommandCenter } from "../command-center.js";
@@ -36,6 +37,8 @@ export interface AttachRuntimeOptions {
   logger?: AttachRuntimeLogger;
   locale?: TuiSubmitPromptResult["locale"];
   runtimePreferences?: Record<string, unknown>;
+  /** session/resume 冷恢复所需的 workspace ref（core 重启后 session/subscribe 找不到 record）。 */
+  workspace?: { workspacePath: string; workspaceKey: string; workspaceIdentity?: string };
 }
 
 export class AttachProtocolVersionError extends Error {
@@ -67,6 +70,19 @@ export class AttachRuntime {
   private reconnectDelay = RECONNECT_BACKOFF_START_MS;
   private connecting: Promise<AttachClient> | undefined;
   private stopped = false;
+  private readonly statusListeners = new Set<(status: string) => void>();
+
+  /** Écoute de l'état de connexion (port TuiOptions.subscribeConnectionStatus). */
+  onConnectionStatus(listener: (status: string) => void): () => void {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
+  }
+
+  private emitStatus(status: string): void {
+    for (const listener of this.statusListeners) {
+      listener(status);
+    }
+  }
 
   constructor(options: AttachRuntimeOptions) {
     this.options = options;
@@ -130,8 +146,8 @@ export class AttachRuntime {
   private onDisconnected(): void {
     if (this.stopped) return;
     this.client = undefined;
+    this.emitStatus("Connexion au core perdue — reconnexion…");
     for (const handle of this.sessions.values()) {
-      for (const sink of [handle]) void sink; // sinks live inside handle; emit via ingest
       handle.ingestRawEvent(
         connectionNoticeEvent(
           handle.sessionId,
@@ -160,21 +176,56 @@ export class AttachRuntime {
       this.scheduleReconnect();
       return;
     }
+    let recovered = 0;
+    const total = this.sessions.size;
     for (const handle of this.sessions.values()) {
-      try {
-        await handle.resubscribe();
+      if (await this.recoverSession(handle)) {
+        recovered++;
         handle.ingestRawEvent(
           connectionNoticeEvent(
             handle.sessionId,
             "Reconnected to shared core.",
           ) as unknown as ZCodeSessionRawEvent,
         );
-      } catch (error) {
+      } else {
         this.options.logger?.warn?.("attach resubscribe failed", {
-          error: error instanceof Error ? error.message : String(error),
           sessionId: handle.sessionId,
         });
-        this.scheduleReconnect();
+      }
+    }
+    if (total === 0 || recovered === total) {
+      this.emitStatus("Reconnecté au core");
+    } else {
+      // core 重连但会话不可恢复（新 core registry 无 record、store 未持久化）——
+      // 如实显示并继续退避：core 若在下一轮可恢复（异步物化），仍会补上。
+      this.emitStatus("Reconnecté au core — session indisponible, nouvelle tentative…");
+      this.scheduleReconnect();
+    }
+  }
+
+  /** subscribe 失败若是 sessionUnavailable，先经 session/resume 冷物化再重试一次。 */
+  private async recoverSession(handle: AttachSessionHandle): Promise<boolean> {
+    try {
+      await handle.resubscribe();
+      return true;
+    } catch (error) {
+      if (
+        !(error instanceof AttachProtocolError) ||
+        error.code !== zcodeProtocolErrorCodes.sessionUnavailable ||
+        !this.client ||
+        !this.options.workspace
+      ) {
+        return false;
+      }
+      try {
+        await this.client.request(zcodeProtocolMethods.sessionResume, {
+          sessionId: handle.sessionId,
+          workspace: this.options.workspace,
+        });
+        await handle.resubscribe();
+        return true;
+      } catch {
+        return false;
       }
     }
   }
@@ -207,7 +258,7 @@ export interface CreateAttachHandlerOptions {
   client: AttachClient;
   /** create 结果快照（含 protocol.version 已由入口校验）。 */
   initialHandle: AttachSessionHandle;
-  workspace: { workspacePath: string; workspaceIdentity?: string };
+  workspace: { workspacePath: string; workspaceKey: string; workspaceIdentity?: string };
   deps?: Partial<CommandCenterDeps>;
   logger?: AttachRuntimeLogger;
 }
@@ -238,20 +289,17 @@ export function createAttachPromptHandler(
   const getApp = async (): Promise<CommandCenterApp> => asCommandCenterApp(current);
 
   const newApp = async (): Promise<CommandCenterApp> => {
-    const result = (await client.request(zcodeProtocolMethods.sessionCreate, {
-      workspace: {
-        workspaceIdentity: options.workspace.workspaceIdentity,
-        workspacePath: options.workspace.workspacePath,
-      },
-    })) as { sessionId: string };
-    current = await toHandle(result.sessionId);
+    const created = (await client.request(zcodeProtocolMethods.sessionCreate, {
+      workspace: options.workspace,
+    })) as { session: { sessionId: string } };
+    current = await toHandle(created.session.sessionId);
     return asCommandCenterApp(current);
   };
 
   const resumeApp = async (sessionId?: string): Promise<CommandCenterApp> => {
     if (!sessionId) {
       const listed = (await client.request(zcodeProtocolMethods.sessionList, {
-        workspacePath: options.workspace.workspacePath,
+        workspace: options.workspace,
       })) as { sessions?: Array<{ id?: string; sessionId?: string }> };
       const last = listed.sessions?.at(-1);
       const id = last?.sessionId ?? last?.id;

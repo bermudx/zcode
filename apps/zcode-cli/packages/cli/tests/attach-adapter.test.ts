@@ -325,7 +325,7 @@ test("协议版本不匹配 → 退出码 2 与可操作错误", async () => {
   );
   const core = await startFakeCore(socketPath, (request) => {
     if (request.method === "session/create") {
-      return { sessionId: SID, snapshot: makeSnapshot(999) };
+      return makeSnapshot(999);
     }
     if (request.method === "runtime/capabilities") return {};
     return {};

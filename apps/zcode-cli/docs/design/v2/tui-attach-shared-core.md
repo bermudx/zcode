@@ -94,3 +94,58 @@ herdr pane 1..N                    每 workspace 一个
 - 集成：真 socket 起 server + 两客户端，走一轮 submit → 事件流 →
   steer → 退出。
 - 现有 tui-pi 用例不回归。
+
+## 实施状态（2026-10-21 实测）
+
+### 已实现
+
+- `zcode app-server --socket <path> --no-plugins`：Unix socket 监听，
+  多客户端并发独立协议会话；`--no-plugins` 关闭全部插件/MCP/
+  node-repl/browser-use/marketplace MCP 子进程。
+- `zcode tui --tui-frontend=pi --shared-core`：pi-tui 瘦客户端经
+  NDJSON socket attach 共享 core；`zcode attach` 为其别名命令。
+  原 `--attach <path>` 仍是 prompt 文件附件参数，不复用。
+- `ensureServer`：确定性 socket 路径
+  `<dataBaseDir>/.zcode/v2/sockets/core-<sha256(workspace-key).slice(0,16)>.sock`，
+  原子锁 + detached spawn + `.pid`/`.info` 元数据 + 就绪等待。
+- 协议新增：`session/rawEvent` 通知、`eventFormat: "raw"`（subscribe/
+  events）、`session/recallPreviousInput`、`session/recordInputHistory`。
+- 断线 UX：socket 断开 → pi-tui 状态行显示
+  `Connexion au core perdue — reconnexion…`；重连并按 `sequenceNumber`
+  续订成功 → `Reconnecté au core`；core 重启后会话不可冷恢复时显示
+  `Reconnecté au core — session indisponible`（先 `session/resume`
+  兜底，失败则如实提示并保持退避重试）。
+
+### 服务端生命周期
+
+- 起：首个 attach 客户端 `ensureServer` 自动 spawn（detached、
+  `--no-plugins`、`ZCODE_WORKSPACE_IDENTITY` 透传）。
+- 停：`kill $(cat <socket>.pid)`；SIGTERM 下 `.sock` 文件随监听关闭
+  移除，`.pid`/`.info` 由下一次 `ensureServer` 的死 pid 探测回收。
+- 客户端退出只断开本连接：core 与其会话照常存活。
+
+### 实测资源（N=2，`measure-attach.sh`，稳态 15s）
+
+| process  | RSS(MB) | children |
+|----------|---------|----------|
+| client-1 | 436     | 1*       |
+| client-2 | 431     | 0        |
+| server   | 416     | 0        |
+| 合计     | 1283    |          |
+
+\* client-1 的 1 个子进程即 detached server（父进程退出前仍挂在首个
+客户端进程树下）。
+
+对照验收线：server 416MB < 1.2GB、合计 1283MB < 1.6GB 达标；
+单客户端 ~433MB 超出 200MB 目标（瘦客户端仍加载完整 CLI bundle +
+pi-tui/OpenTUI，V8 基线占大头）。对比改造前每会话 1.8–2.2GB，
+2 客户端 + core ≈ 1.28GB（约 65% 降幅）。
+
+### 已知遗留（deferred）
+
+- dwf list/replay/resume、expert workflows、`listPlugins` 在 attach
+  模式以 "unavailable" 语义面向上层（可选端口未实现）。
+- core 重启后 ephemeral/零回合会话不可 `session/resume`（未落
+  store），状态行如实显示 session indisponible。
+- Windows 下 socket 走 named pipe 分支已实现但未实测。
+- 断线横幅的完整 banner 设计未做（当前为状态行最小版）。

@@ -335,6 +335,11 @@ export type TuiOptions = {
   slashCommands?: readonly TuiSlashCommandSuggestion[];
   submitPrompt: TuiSubmitPrompt;
   subscribeSessionEvents?: TuiSubscribeSessionEvents;
+  /**
+   * 瘦客户端 (tui-attach) 的连接状态：server 断开/重连时 pousse un libellé
+   * vers la ligne de status du composer. Optionnel : absent en mode in-process.
+   */
+  subscribeConnectionStatus?: (listener: (status: string) => void) => () => void;
   subscribeThemeMode?: (listener: (mode: UiThemeMode) => void) => () => void;
   setTerminalBackgroundColor?: (color: string) => void;
   writeClipboardText?: TuiWriteClipboardText;

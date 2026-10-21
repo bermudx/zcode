@@ -5,6 +5,7 @@
 import {
   ZCODE_PROTOCOL_VERSION,
   ZCODE_WORKSPACE_IDENTITY_ENV,
+  resolveWorkspaceKey,
   resolveZCodeRuntimeEnv,
   zcodeProtocolMethods,
   zcodeSessionStateSnapshotSchema,
@@ -47,8 +48,15 @@ export const runAttachCommand = async (
       workspaceIdentity: env[ZCODE_WORKSPACE_IDENTITY_ENV]?.trim() || undefined,
       workspacePath: workspaceDirectory,
     };
+    // session/create exige le ref complet : workspaceKey = identité résolue
+    // (workspaceIdentity || workspacePath), même helper que resolveSocketPath.
+    const workspaceRef = {
+      workspacePath: workspace.workspacePath,
+      workspaceIdentity: workspace.workspaceIdentity,
+      workspaceKey: resolveWorkspaceKey(workspace),
+    };
     const { socketPath } = await ensureServer({ env, version, workspace });
-    const runtime = new AttachRuntime({ socketPath });
+    const runtime = new AttachRuntime({ socketPath, workspace: workspaceRef });
     const client = await runtime.connect();
     const startupLocale = resolveTuiStartupLocale({
       deps,
@@ -56,14 +64,14 @@ export const runAttachCommand = async (
       workingDirectory: workspaceDirectory,
     });
     try {
-      // 握手：create 一个会话即得协议快照；版本断言先于任何会话状态依赖。
+      // 握手：session/create 直接返回协议快照；版本断言先于任何会话状态依赖。
       const created = (await client.request(zcodeProtocolMethods.sessionCreate, {
-        workspace,
-      })) as { sessionId: string; snapshot?: unknown };
+        workspace: workspaceRef,
+      })) as unknown;
       // 版本断言先于全量 schema 校验：snapshot.protocol.version 是 z.literal 断言位，
       // 直接 parse 会把版本漂移报成模糊 ZodError，先单独读出再给可操作错误。
       const advertisedVersion = (
-        created.snapshot as { protocol?: { version?: unknown } } | undefined
+        created as { protocol?: { version?: unknown } } | undefined
       )?.protocol?.version;
       if (advertisedVersion !== ZCODE_PROTOCOL_VERSION) {
         throw new AttachProtocolVersionError(
@@ -71,11 +79,11 @@ export const runAttachCommand = async (
             `Restart the core: kill $(cat '${socketPath}.pid')`,
         );
       }
-      const snapshot = zcodeSessionStateSnapshotSchema.parse(created.snapshot);
+      const snapshot = zcodeSessionStateSnapshotSchema.parse(created);
       const handle = new AttachSessionHandle({
         client: () => runtime.currentClient(),
         locale: startupLocale,
-        sessionId: created.sessionId,
+        sessionId: snapshot.session.sessionId,
         snapshot,
       });
       await handle.subscribe(undefined, false);
@@ -83,7 +91,7 @@ export const runAttachCommand = async (
         client,
         initialHandle: handle,
         runtime,
-        workspace,
+        workspace: workspaceRef,
       });
       const runTui =
         deps.runTui ??
@@ -133,6 +141,9 @@ export const runAttachCommand = async (
         stdin: ctx.stdin,
         stdout: ctx.stdout,
         submitPrompt: promptHandler,
+        // tui-attach : la ligne de status pi-tui lit ce port de niveau options,
+        // pas une propriété du handler — l'émission vient de runtime (reconnect).
+        subscribeConnectionStatus: (listener) => runtime.onConnectionStatus(listener),
         subscribeSessionEvents: promptHandler.subscribeSessionEvents,
         version,
         workspaceDirectory,
