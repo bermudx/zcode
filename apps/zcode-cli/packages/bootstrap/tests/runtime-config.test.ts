@@ -3,6 +3,10 @@ import { createConfig } from "@zcode/adapters/config";
 import { ZCODE_CUA_OFFICIAL_PLUGIN_ID, ZCODE_PLUGIN_ID_ENV_KEY } from "@zcode/shared";
 import { ProviderRegistry } from "@zcode/provider";
 import {
+  createConfigCliOverrides,
+  NO_PLUGINS_CONFIG_OVERRIDES,
+} from "../src/app/app-config-options.js";
+import {
   resolveAppRuntimeConfig as resolveProductionAppRuntimeConfig,
   runtimeConfigLogContext,
 } from "../src/app/runtime-config.js";
@@ -747,5 +751,60 @@ describe("resolveAppRuntimeConfig：dynamicWorkflowEnabled 透传", () => {
       workingDirectory,
     });
     expect(runtimeConfig.dynamicWorkflowToolsOnDemand).toBe(expected);
+  });
+
+  // attach 共享 core（app-server --socket --no-plugins）：session/create 携带的
+  // MCP 配置不允许重新启用 MCP，否则单客户端就能把无插件 core 拉回有子进程形态。
+  describe("noPlugins", () => {
+    it("maps noPlugins to the shared cli overrides patch", () => {
+      expect(createConfigCliOverrides({ noPlugins: true })).toEqual(
+        NO_PLUGINS_CONFIG_OVERRIDES,
+      );
+      expect(
+        createConfig({ cliOverrides: NO_PLUGINS_CONFIG_OVERRIDES, env: {}, skipUserConfig: true })
+          .config.plugins.enabled,
+      ).toBe(false);
+      expect(
+        createConfig({ cliOverrides: NO_PLUGINS_CONFIG_OVERRIDES, env: {}, skipUserConfig: true })
+          .config.features.mcp,
+      ).toBe(false);
+    });
+
+    it("drops plugin/built-in/client MCP servers and keeps mcp disabled", () => {
+      const resolved = resolveAppRuntimeConfig({
+        builtInMcpServers: {
+          node_repl: { type: "stdio", command: process.execPath, args: ["/runtime/node-repl.js"] },
+        },
+        cliStorageRoot: "/tmp/zcode-cli",
+        configResult: createConfigResult(),
+        options: {
+          noPlugins: true,
+          runtimeConfig: {
+            mcp: {
+              enabled: true,
+              servers: {
+                context7: { type: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"] },
+              },
+            },
+          },
+        },
+        pluginMcpServers: {
+          "plugin:chrome-devtools-mcp:chrome-devtools": {
+            type: "stdio",
+            command: "npx",
+            args: ["-y", "chrome-devtools-mcp@latest"],
+          },
+        },
+        subagentOutputRootDir: "/tmp/zcode-cli/agents-output",
+        workingDirectory,
+      });
+
+      expect(resolved.configuredMcpServers).toEqual({});
+      expect(resolved.runtimeConfig.mcp).toEqual({
+        enabled: false,
+        servers: {},
+        trustedOfficialCuaServerNames: [],
+      });
+    });
   });
 });

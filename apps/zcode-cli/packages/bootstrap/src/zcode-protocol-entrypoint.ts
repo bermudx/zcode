@@ -1,7 +1,8 @@
 import { createConfig } from "@zcode/adapters/config";
-import type { McpElicitationPort, McpNotificationPort } from "@zcode/contracts";
 import { createNodeModelSelectionFacade } from "@zcode/provider-node";
 import { createNodeLoggerFactory } from "@zcode/adapters/logging";
+import { Writable } from "node:stream";
+import type { Socket } from "node:net";
 import {
   createMcpAdapterConnectionPool,
   createMcpTelemetryTracker,
@@ -48,6 +49,11 @@ import { ZCodeProtocolNdjsonConnection } from "./zcode-protocol/transport.js";
 import { cleanupProtocolRuntime } from "./zcode-protocol/runtime-cleanup.js";
 import { startProtocolResourceSampler } from "./zcode-protocol/resource-sampler.js";
 import { acquireProtocolStartupResource } from "./zcode-protocol/startup-resource.js";
+import {
+  listenProtocolSocket,
+  type ProtocolSocketListener,
+} from "./zcode-protocol/socket-listener.js";
+import { NO_PLUGINS_CONFIG_OVERRIDES } from "./app/app-config-options.js";
 import { prepareZCodeTelemetryEnv, shutdownZCodeTelemetry } from "./telemetry-bootstrap.js";
 import type { ZCodeProcessResourceSampler } from "./process-resource-sampler.js";
 
@@ -81,10 +87,22 @@ export function applyProtocolProviderRegistry(
   };
 }
 
+/** socket 监听模式下一条已接入连接的全部归属物：协议 server 是该连接的会话 owner。 */
+interface AttachedProtocolConnection {
+  broker?: NodeReplBrowserBroker;
+  connection: ZCodeProtocolNdjsonConnection;
+  sampler?: ZCodeProcessResourceSampler;
+  server: ZCodeProtocolAgentServer;
+}
+
 export async function runZCodeProtocolAgent(
   options: RunZCodeProtocolAgentOptions = {},
 ): Promise<void> {
+  const socketPath = options.socketPath?.trim() || undefined;
   if (options.prepareStorageOnly) {
+    if (socketPath) {
+      throw new Error("--socket cannot be used with --prepare-storage.");
+    }
     const config = createConfig({ env: options.env });
     await prepareProtocolStartupStorage({
       dbPath: getSessionDbPath(config, options.cwd),
@@ -97,6 +115,10 @@ export async function runZCodeProtocolAgent(
   const presentationSurface = options.presentationSurface ?? "terminal";
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
+  // socket 模式下启动时还没有任何客户端；存储迁移进度帧只落日志，不向 stdout 写协议帧。
+  const storageStartupOutput = socketPath
+    ? new Writable({ write: (_chunk, _encoding, callback) => callback() })
+    : output;
   const loggerFactory = createNodeLoggerFactory({ env: options.env });
   const traceContext = createRootTraceContext({
     attributes: {
@@ -124,20 +146,29 @@ export async function runZCodeProtocolAgent(
   });
 
   let sessionStore: SqliteSessionStore | undefined;
-  let serverForCleanup: ZCodeProtocolAgentServer | undefined;
-  let nodeReplBrowserBroker: NodeReplBrowserBroker | undefined;
+  // 每条接入连接一个协议 server；该集合保留尚未 teardown 的 owner，供退出清理兜底。
+  const ownedServers = new Set<ZCodeProtocolAgentServer>();
+  const ownedBrokers = new Set<NodeReplBrowserBroker>();
+  const attachedConnections = new Set<AttachedProtocolConnection>();
+  // 进程级 MCP pool 的反向请求（elicitation / 官方 auth）归最近接入的协议会话 owner。
+  let latestProtocolServer: ZCodeProtocolAgentServer | undefined;
+  let socketListener: ProtocolSocketListener | undefined;
   let mcpConnectionPool: McpConnectionPool | undefined;
   let mcpPort: McpPort | undefined;
   let mcpTelemetryTracker: McpTelemetryTracker | undefined;
   let mcpResourceSink: ((samples: ZCodeMcpResourceSample[]) => void) | undefined;
   let mcpTelemetrySink: ((event: ZCodeMcpTelemetryEvent) => void) | undefined;
-  let processResourceSampler: ZCodeProcessResourceSampler | undefined;
   let providerRegistryRuntime:
     | Awaited<ReturnType<typeof startProcessProviderRegistryRuntime>>
     | undefined;
   try {
     // 数据库准备先于账号、Registry 和遥测，不把远端材料等待混进迁移门禁。
-    const configResult = createConfig({ env: options.env });
+    // --no-plugins 经既有 cliOverrides（最高优先级）关闭 plugins.enabled 与 features.mcp，
+    // 下面依赖这两个开关的连接池/遥测/broker 分支随之全部短路。
+    const configResult = createConfig({
+      env: options.env,
+      ...(options.noPlugins === true ? { cliOverrides: NO_PLUGINS_CONFIG_OVERRIDES } : {}),
+    });
     sessionStore = await acquireProtocolStartupResource({
       signal: options.lifecycle?.signal,
       logger,
@@ -145,7 +176,7 @@ export async function runZCodeProtocolAgent(
       create: () =>
         openProtocolStartupStorage({
           dbPath: getSessionDbPath(configResult),
-          output,
+          output: storageStartupOutput,
           onProgress: (progress) =>
             logger.info("SQLite startup state", {
               event: "zcode_protocol.startup.storage_state",
@@ -200,9 +231,11 @@ export async function runZCodeProtocolAgent(
         sourceTitle: "electron",
       });
     // 官方 MCP 身份头端口（spec §7.1/§7.2）：连接池构造早于 server，故用惰性 holder 回填。
-    // server 就绪前该端口返回 official_auth_unavailable；HTTP tools/call 会匿名交给服务端
-    // 返回结构化权限错误，stdio 则把 reason 下发给插件。连接与工具发现都不受影响。
-    let officialMcpAuthContext: OfficialMcpAuthRequestContext | undefined;
+    // 多连接 socket 模式下归最近接入的协议会话 owner；server 就绪前该端口返回
+    // official_auth_unavailable；HTTP tools/call 会匿名交给服务端返回结构化权限错误，
+    // stdio 则把 reason 下发给插件。连接与工具发现都不受影响。
+    const resolveContext = (): OfficialMcpAuthRequestContext | undefined =>
+      latestProtocolServer?.officialMcpAuthRequestContext;
     // stdio 官方 MCP 没有 url 可供校验，targetOrigin 只能由宿主给出。
     // 与下面 trustedOrigins 的 resolveZCodeApiOrigin 必须是同一个表达式，否则两侧判定分叉。
     const resolveZCodeApiOrigin = (): string =>
@@ -210,7 +243,7 @@ export async function runZCodeProtocolAgent(
     const workspaceIdentity = (options.env ?? process.env)[ZCODE_WORKSPACE_IDENTITY_ENV]?.trim();
     const officialMcpAuth = {
       authHeadersPort: createOfficialMcpAuthHeadersPort({
-        resolveContext: () => officialMcpAuthContext,
+        resolveContext,
         // workspaceKey 必须遵守仓库约定 `workspaceIdentity?.trim() || workspacePath`，
         // 否则同路径不同 identity 的远端 workspace 在审计上下文里无法区分。
         // 注意：agent 进程当前没有 identity 来源，因此实际多为 undefined，key 退化为 path；
@@ -236,24 +269,21 @@ export async function runZCodeProtocolAgent(
       }),
     };
     // MCP elicitation 归属到协议 server 的会话；pool 先于 server 创建，端口延迟绑定。
-    let elicitationServer: {
-      requestMcpElicitation: McpElicitationPort["requestElicitation"];
-      handleMcpNotification: McpNotificationPort["onNotification"];
-    } | null = null;
+    // socket 多连接下归最近接入的 owner；--no-plugins 时本分支整体不构造。
     mcpConnectionPool =
       configResult.config.features.mcp === false
         ? undefined
         : createMcpAdapterConnectionPool({
             elicitation: {
               requestElicitation: (request, elicitationOptions) =>
-                elicitationServer
-                  ? elicitationServer.requestMcpElicitation(request, elicitationOptions)
+                latestProtocolServer
+                  ? latestProtocolServer.requestMcpElicitation(request, elicitationOptions)
                   : Promise.resolve({ action: "decline" as const }),
             },
             // server 通知同样延迟绑定到协议 server。
             notifications: {
               onNotification: (notification) =>
-                elicitationServer?.handleMcpNotification(notification),
+                latestProtocolServer?.handleMcpNotification(notification),
             },
             clientVersion: options.version ?? "0.0.0",
             env: options.env,
@@ -273,106 +303,257 @@ export async function runZCodeProtocolAgent(
       activeProviderRegistryRuntime.runtime.registryService,
     );
     options.lifecycle?.signal.throwIfAborted();
-    const server = (serverForCleanup = new ZCodeProtocolAgentServer({
-      createZCodeApp: (appOptions = {}) =>
-        createZCodeApp({
-          ...applyProtocolProviderRegistry(
-            applyProtocolPresentationSurface(appOptions, presentationSurface),
-            activeProviderRegistryRuntime.runtime.registryService,
-            activeProviderRegistryRuntime.configuredDefaultModelSelection,
-          ),
-          // 只读同进程已应用快照；不为子任务另发 Host RPC，也不在 ModelFactory 偷换模型。
-          resolveEffectiveModelSelection: (selection) => {
-            const view = modelSelectionFacade.getView(undefined, undefined, { selection });
-            return {
-              effectiveSelection: view.effectiveSelection ?? null,
-              selectionIssue: view.selectionIssue,
-            };
-          },
-          env: {
-            ...telemetryEnv,
-            ...appOptions.env,
-            ...(telemetryDeviceMid ? { ZCODE_TELEMETRY_DEVICE_MID: telemetryDeviceMid } : {}),
-          },
-          ...(nodeReplBrowserBroker ? { nodeReplBrowserBroker } : {}),
-          ...(mcpConnectionPool
-            ? {
-                mcpPortFactory: () =>
-                  mcpConnectionPool!.acquireLease({
-                    leaseId: appOptions.sessionId,
-                    sessionId: appOptions.sessionId,
-                  }),
-              }
-            : {}),
-          providerEndpointRoutingPort,
-          sourceTitle: "electron",
-          onToolExecResource: (params) =>
-            connection.send({ method: zcodeProtocolNotifications.toolExecResource, params }),
-        }),
-      cwd: options.cwd,
-      env: options.env,
-      loggerFactory,
-      mcpPort,
-      mcpTelemetry: mcpTelemetryTracker,
-      sessionStore,
-      syncAccountProviderConfig: activeProviderRegistryRuntime.syncAccountProviderConfig,
-      refreshProviderRegistry: async (reason) => {
-        await activeProviderRegistryRuntime.runtime.registryService.refresh(reason);
-      },
-      version: options.version,
-    }));
-    officialMcpAuthContext = server.officialMcpAuthRequestContext;
-    elicitationServer = server;
-    if (configResult.config.features.mcp !== false) {
-      nodeReplBrowserBroker = createNodeReplBrowserBroker({
-        browserControlPort: server.browserControlPort,
+
+    const detachConnection = async (entry: AttachedProtocolConnection): Promise<void> => {
+      if (!attachedConnections.delete(entry)) return;
+      entry.sampler?.stop();
+      try {
+        entry.server.disposeProjections();
+      } catch (error) {
+        logger.warn("ZCode Protocol projection dispose failed", {
+          errorType: error instanceof Error ? error.name : typeof error,
+          event: "zcode_protocol.connection.projection_dispose.failed",
+          module: "bootstrap.zcode_protocol",
+        });
+      }
+      try {
+        await entry.server.shutdown();
+      } catch (error) {
+        logger.warn("ZCode Protocol connection server shutdown failed", {
+          errorType: error instanceof Error ? error.name : typeof error,
+          event: "zcode_protocol.connection.shutdown.failed",
+          module: "bootstrap.zcode_protocol",
+        });
+      }
+      ownedServers.delete(entry.server);
+      if (latestProtocolServer === entry.server) {
+        latestProtocolServer = [...attachedConnections].at(-1)?.server;
+      }
+      if (entry.broker) {
+        ownedBrokers.delete(entry.broker);
+        try {
+          await entry.broker.close();
+        } catch (error) {
+          logger.warn("ZCode Protocol connection broker close failed", {
+            errorType: error instanceof Error ? error.name : typeof error,
+            event: "zcode_protocol.connection.broker_close.failed",
+            module: "bootstrap.zcode_protocol",
+          });
+        }
+      }
+    };
+
+    // 每接入一条传输连接就建一套独立的协议会话 owner（server+connection），
+    // 复用同一份进程级 Host 资源；socket 与 stdio 共用这条装配路径。
+    const attachConnection = async (
+      connectionInput: NodeJS.ReadableStream,
+      connectionOutput: NodeJS.WritableStream,
+    ): Promise<AttachedProtocolConnection> => {
+      // connection/broker 迟于 server 构造；createZCodeApp 闭包惰性读这两个绑定。
+      let connection!: ZCodeProtocolNdjsonConnection;
+      let connectionBroker: NodeReplBrowserBroker | undefined;
+      const server = new ZCodeProtocolAgentServer({
+        createZCodeApp: (appOptions = {}) =>
+          createZCodeApp({
+            ...applyProtocolProviderRegistry(
+              applyProtocolPresentationSurface(appOptions, presentationSurface),
+              activeProviderRegistryRuntime.runtime.registryService,
+              activeProviderRegistryRuntime.configuredDefaultModelSelection,
+            ),
+            // 只读同进程已应用快照；不为子任务另发 Host RPC，也不在 ModelFactory 偷换模型。
+            resolveEffectiveModelSelection: (selection) => {
+              const view = modelSelectionFacade.getView(undefined, undefined, { selection });
+              return {
+                effectiveSelection: view.effectiveSelection ?? null,
+                selectionIssue: view.selectionIssue,
+              };
+            },
+            env: {
+              ...telemetryEnv,
+              ...appOptions.env,
+              ...(telemetryDeviceMid ? { ZCODE_TELEMETRY_DEVICE_MID: telemetryDeviceMid } : {}),
+            },
+            ...(connectionBroker ? { nodeReplBrowserBroker: connectionBroker } : {}),
+            ...(mcpConnectionPool
+              ? {
+                  mcpPortFactory: () =>
+                    mcpConnectionPool!.acquireLease({
+                      leaseId: appOptions.sessionId,
+                      sessionId: appOptions.sessionId,
+                    }),
+                }
+              : {}),
+            ...(options.noPlugins === true ? { noPlugins: true } : {}),
+            providerEndpointRoutingPort,
+            sourceTitle: "electron",
+            onToolExecResource: (params) =>
+              connection.send({ method: zcodeProtocolNotifications.toolExecResource, params }),
+          }),
+        cwd: options.cwd,
+        env: options.env,
+        loggerFactory,
+        mcpPort,
+        mcpTelemetry: mcpTelemetryTracker,
+        sessionStore,
+        syncAccountProviderConfig: activeProviderRegistryRuntime.syncAccountProviderConfig,
+        refreshProviderRegistry: async (reason) => {
+          await activeProviderRegistryRuntime.runtime.registryService.refresh(reason);
+        },
+        version: options.version,
+      });
+      ownedServers.add(server);
+      latestProtocolServer = server;
+      try {
+        if (configResult.config.features.mcp !== false) {
+          connectionBroker = await acquireProtocolStartupResource({
+            signal: options.lifecycle?.signal,
+            logger,
+            create: async () => {
+              const broker = createNodeReplBrowserBroker({
+                browserControlPort: server.browserControlPort,
+                logger,
+                platform: process.platform,
+              });
+              await broker.ready;
+              return broker;
+            },
+            disposeLate: (broker) => broker.close(),
+          });
+          ownedBrokers.add(connectionBroker);
+        }
+        connection = new ZCodeProtocolNdjsonConnection({
+          signal: options.lifecycle?.signal,
+          clearPostResponseMessages: () => server.clearPostResponseMessages(),
+          handleMessage: (message) => server.handleMessage(message),
+          input: connectionInput,
+          logger,
+          onTransportClosed: (error) => server.disconnectClient(error),
+          output: connectionOutput,
+          takePostResponseBatch: (requestId) => server.takePostResponseBatch(requestId),
+        });
+        server.setNotificationSink((notification) => connection.send(notification));
+      } catch (error) {
+        ownedServers.delete(server);
+        if (connectionBroker) ownedBrokers.delete(connectionBroker);
+        if (latestProtocolServer === server) {
+          latestProtocolServer = [...attachedConnections].at(-1)?.server;
+        }
+        try {
+          server.disposeProjections();
+        } catch {
+          /* 装配失败路径的清理异常不能掩盖原始错误 */
+        }
+        try {
+          await server.shutdown();
+        } catch {
+          /* 同上 */
+        }
+        await connectionBroker?.close().catch(() => undefined);
+        throw error;
+      }
+      const entry: AttachedProtocolConnection = {
+        ...(connectionBroker ? { broker: connectionBroker } : {}),
+        connection,
+        server,
+      };
+      attachedConnections.add(entry);
+      // 传输关闭（客户端断开 / abort）→ 该连接的协议会话 owner 走现有终止语义：
+      // disconnectClient 取消前台执行，shutdown 回收该连接创建的全部 app 资源。
+      void connection.waitForClose().then(
+        () => detachConnection(entry),
+        () => detachConnection(entry),
+      );
+      entry.sampler = startProtocolResourceSampler(
+        server,
+        (message) => connection.send(message),
         logger,
-        platform: process.platform,
-      });
-      const broker = nodeReplBrowserBroker;
-      await acquireProtocolStartupResource({
-        signal: options.lifecycle?.signal,
-        logger,
-        create: () => broker.ready,
-      });
-    }
-    const connection = new ZCodeProtocolNdjsonConnection({
-      signal: options.lifecycle?.signal,
-      clearPostResponseMessages: () => server.clearPostResponseMessages(),
-      handleMessage: (message) => server.handleMessage(message),
-      input,
-      logger,
-      onTransportClosed: (error) => server.disconnectClient(error),
-      output,
-      takePostResponseBatch: (requestId) => server.takePostResponseBatch(requestId),
-    });
-    server.setNotificationSink((notification) => connection.send(notification));
-    mcpResourceSink = (samples) =>
-      connection.send({
-        method: zcodeProtocolNotifications.mcpResourceSamples,
-        params: samples,
-      });
+      );
+      connection.start();
+      return entry;
+    };
+
+    mcpResourceSink = (samples) => {
+      for (const entry of attachedConnections) {
+        entry.connection.send({
+          method: zcodeProtocolNotifications.mcpResourceSamples,
+          params: samples,
+        });
+      }
+    };
     mcpTelemetrySink = (event) => {
       // 五分钟资源通知取代旧内存通知；tracker 内部孤儿事实仍保留原判据。
       if (event.kind === "memory") return;
-      connection.send({
-        method: zcodeProtocolNotifications.mcpTelemetry,
-        params: event,
-      });
+      for (const entry of attachedConnections) {
+        entry.connection.send({
+          method: zcodeProtocolNotifications.mcpTelemetry,
+          params: event,
+        });
+      }
     };
-    connection.start();
     mcpTelemetryTracker?.start();
-    processResourceSampler = startProtocolResourceSampler(
-      server,
-      (message) => connection.send(message),
-      logger,
-    );
-    startupTimer.complete("ZCode Protocol agent startup completed", {
-      event: "zcode_protocol.startup.completed",
-      stage: "total",
-    });
-    scheduleStartupLogRetentionCleanup(loggerFactory, logger);
-    await connection.waitForClose();
+
+    if (socketPath) {
+      const attachSocket = (socket: Socket): void => {
+        if (socket.destroyed || socket.closed) return;
+        void attachConnection(socket, socket).then(
+          (entry) => {
+            // 建链期间客户端已断开：transport 不会重播已发射的 close，直接走 teardown。
+            if (socket.destroyed || socket.closed) void detachConnection(entry);
+          },
+          (error) => {
+            logger.warn("ZCode Protocol socket client attach failed", {
+              errorType: error instanceof Error ? error.name : typeof error,
+              event: "zcode_protocol.socket.client_attach.failed",
+              module: "bootstrap.zcode_protocol",
+            });
+            socket.destroy();
+          },
+        );
+      };
+      socketListener = await acquireProtocolStartupResource({
+        signal: options.lifecycle?.signal,
+        logger,
+        create: () =>
+          listenProtocolSocket({
+            socketPath,
+            signal: options.lifecycle?.signal,
+            logger,
+            onConnection: attachSocket,
+          }),
+        disposeLate: (listener) => listener.close(),
+      });
+      startupTimer.complete("ZCode Protocol agent startup completed", {
+        context: { socketPath },
+        event: "zcode_protocol.startup.completed",
+        stage: "total",
+      });
+      scheduleStartupLogRetentionCleanup(loggerFactory, logger);
+      logger.info("ZCode Protocol socket server listening", {
+        event: "zcode_protocol.socket.listening",
+        module: "bootstrap.zcode_protocol",
+        socketPath,
+      });
+      // 关闭信号只有两个来源：lifecycle abort（信号/调用方）或 listener 自身失败。
+      const abort = options.lifecycle?.signal;
+      await Promise.race([
+        socketListener.closed,
+        new Promise<void>((resolve) => {
+          if (!abort) return;
+          if (abort.aborted) return resolve();
+          abort.addEventListener("abort", () => resolve(), { once: true });
+        }),
+      ]);
+      await socketListener.close();
+      await Promise.allSettled([...attachedConnections].map((entry) => detachConnection(entry)));
+    } else {
+      const entry = await attachConnection(input, output);
+      startupTimer.complete("ZCode Protocol agent startup completed", {
+        event: "zcode_protocol.startup.completed",
+        stage: "total",
+      });
+      scheduleStartupLogRetentionCleanup(loggerFactory, logger);
+      await entry.connection.waitForClose();
+    }
   } catch (error) {
     options.lifecycle?.requestShutdown(
       error instanceof Error ? error : new Error("Protocol runtime failed", { cause: error }),
@@ -384,13 +565,35 @@ export async function runZCodeProtocolAgent(
     throw error;
   } finally {
     options.lifecycle?.requestShutdown();
+    await socketListener?.close().catch(() => undefined);
     await cleanupProtocolRuntime({
       logger,
       deadlineAt: options.lifecycle?.deadlineAt,
-      server: serverForCleanup,
-      processResourceSampler,
+      server: {
+        disposeProjections: () => {
+          for (const server of ownedServers) {
+            try {
+              server.disposeProjections();
+            } catch {
+              /* 清理兜底：单个 owner 的投影释放失败不阻塞其余资源回收 */
+            }
+          }
+        },
+        shutdown: async () => {
+          await Promise.allSettled([...ownedServers].map((server) => server.shutdown()));
+        },
+      },
+      processResourceSampler: {
+        stop: () => {
+          for (const entry of attachedConnections) entry.sampler?.stop();
+        },
+      },
       mcpTelemetryTracker,
-      nodeReplBrowserBroker,
+      nodeReplBrowserBroker: {
+        close: async () => {
+          await Promise.allSettled([...ownedBrokers].map((broker) => broker.close()));
+        },
+      },
       mcpPort,
       mcpConnectionPool,
       sessionStore,

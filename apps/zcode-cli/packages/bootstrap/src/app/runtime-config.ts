@@ -91,11 +91,16 @@ export function resolveAppRuntimeConfig(input: {
   // Protocol session/create 传入的 mcp.servers 只包含 UI MCP 设置里的用户配置，
   // 不包含插件注册的 MCP。宿主内建 server 最后合并并保留其 identity，避免用户或第三方
   // 用同名配置劫持 mcp__node_repl__*；普通 plugin MCP 仍允许显式用户配置覆盖。
-  const configuredMcpServers = {
-    ...pluginMcpServers,
-    ...(options.runtimeConfig?.mcp?.servers ?? configResult.config.mcp.servers),
-    ...builtInMcpServers,
-  };
+  // noPlugins（attach 共享 core）时整表清空：客户端携带的 mcp 配置不允许重新启用 MCP，
+  // connectMcpServer / listMcpServers 读的是同一张表。
+  const configuredMcpServers =
+    options.noPlugins === true
+      ? {}
+      : {
+          ...pluginMcpServers,
+          ...(options.runtimeConfig?.mcp?.servers ?? configResult.config.mcp.servers),
+          ...builtInMcpServers,
+        };
   const trustedOfficialCuaServerNames = resolveTrustedOfficialCuaServerNames(
     configuredMcpServers,
     pluginMcpServers ?? {},
@@ -155,11 +160,16 @@ export function resolveAppRuntimeConfig(input: {
       ...configResult.config.modelAnomalyGuard,
       ...options.runtimeConfig?.modelAnomalyGuard,
     },
-    mcp: {
-      enabled: options.runtimeConfig?.mcp?.enabled ?? configResult.config.features.mcp,
-      servers: autoConnectMcpServers,
-      trustedOfficialCuaServerNames: [...trustedOfficialCuaServerNames],
-    },
+    // noPlugins 是入口级硬门：runtimeConfig.mcp.enabled 不能由 session/create 参数重新打开，
+    // 否则 attach 共享 core 会被单个客户端的会话参数偷拉回有 MCP 子进程的形态。
+    mcp:
+      options.noPlugins === true
+        ? { enabled: false, servers: {}, trustedOfficialCuaServerNames: [] }
+        : {
+            enabled: options.runtimeConfig?.mcp?.enabled ?? configResult.config.features.mcp,
+            servers: autoConnectMcpServers,
+            trustedOfficialCuaServerNames: [...trustedOfficialCuaServerNames],
+          },
     hooks: mergeRuntimeHooks(
       options.runtimeConfig?.hooks
         ? withHookConfigSource(options.runtimeConfig.hooks, { kind: "internal" })

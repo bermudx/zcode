@@ -15,7 +15,7 @@ Usage:
 With no command, zcode opens the full-screen TUI.
 
 Commands:
-  app-server Run the ZCode Protocol stdio app server
+  app-server Run the ZCode Protocol app server (stdio, or --socket <path> listener)
   commands   List custom slash commands (\`commands list\`)
   doctor     Inspect runtime and packaging assumptions
   login [zai|bigmodel]  Sign in through browser authorization
@@ -32,6 +32,8 @@ Options:
   --memory-bench   With --prompt, enable automatic Memory extraction and wait before exiting (requires Memory enabled)
   --browser-use <mode> Enable Browser Use backend (supported: headless)
   --surface <surface>  Presentation surface for headless prompts/app-server: terminal or desktop
+  --socket <path>    With app-server/agent-server, listen on a Unix socket instead of stdio
+  --no-plugins       With app-server/agent-server, disable all plugins and MCP servers
   --browser-executable <path> Chrome/Chromium executable for headless Browser Use
   --attach <path>  Attach a local file to --prompt; repeat for multiple files
   --cwd <path>     Run this command from the given directory

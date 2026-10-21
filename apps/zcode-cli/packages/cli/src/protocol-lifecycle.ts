@@ -14,6 +14,12 @@ export function createProtocolProcessLifecycle(
     stderr?: NodeJS.WritableStream;
     timeoutMs?: number;
     exitProcess?: (code: number) => void;
+    /**
+     * 默认 true：stdin EOF/close 视为 Host 断开，触发协议关闭。
+     * socket 监听模式（`app-server --socket`）由 attach 客户端 detached 拉起，
+     * stdin 恒为 /dev/null——EOF 不能当成关闭信号，进程退出只由信号与内部关闭驱动。
+     */
+    closeOnInputEnd?: boolean;
   } = {},
 ) {
   const source = options.input ?? process.stdin;
@@ -58,15 +64,18 @@ export function createProtocolProcessLifecycle(
     // on 而不是 once：重复信号不绕过清理，也不重置首次 deadline。
     process.on(signal, listener);
   }
-  source.on("end", onInputEnd);
-  source.on("close", onInputEnd);
-  source.on("error", onIoError);
   output.on("error", onIoError);
   output.on("close", onOutputClose);
   input.on("error", onIoError);
-  // 启动阶段就消费原始 stdin 来观察父端 EOF；背压缓冲保留尚未被协议消费的字节。
-  source.pipe(input);
-  if ((source as NodeJS.ReadableStream & { readableEnded?: boolean }).readableEnded) onInputEnd();
+  if (options.closeOnInputEnd !== false) {
+    source.on("end", onInputEnd);
+    source.on("close", onInputEnd);
+    source.on("error", onIoError);
+    // 启动阶段就消费原始 stdin 来观察父端 EOF；背压缓冲保留尚未被协议消费的字节。
+    source.pipe(input);
+    if ((source as NodeJS.ReadableStream & { readableEnded?: boolean }).readableEnded)
+      onInputEnd();
+  }
 
   return {
     input,

@@ -198,6 +198,12 @@ export interface ZCodeAppOptions {
   permissionBroker?: PermissionBrokerPort;
   eventSink?: SessionEventSink;
   onOffPeakLifecycleEvent?: (event: import("@zcode/shared").OffPeakLifecycleNotification) => void;
+  /**
+   * `app-server --no-plugins`（attach 共享 core）：全量禁用插件与 MCP server，
+   * 覆盖 session/create 里客户端携带的 mcp 配置，保证零插件零 MCP 子进程。
+   * 只由可信 CLI 入口设置；不读取 workspace/project 配置。
+   */
+  noPlugins?: boolean;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform | string;
   projectConfigPath?: string;
@@ -840,6 +846,13 @@ export interface RunZCodeProtocolAgentOptions {
   };
   /** Desktop 内部命令：只运行原存储准备并退出。 */
   prepareStorageOnly?: boolean;
+  /** Unix socket 监听模式：每连接一个协议会话，共享进程级 Host 资源。 */
+  socketPath?: string;
+  /**
+   * 零插件运行：禁掉全部插件与 MCP server（office、node-repl/browser-use、
+   * marketplace MCP），不产生任何插件/MCP 子进程。对每个 session app 透传。
+   */
+  noPlugins?: boolean;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   input?: NodeJS.ReadableStream;

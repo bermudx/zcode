@@ -62,6 +62,12 @@ const BROWSER_USE_SCOPE_ERROR =
 const SURFACE_SCOPE_ERROR =
   "--surface can only be used with --prompt, --target, app-server, or agent-server.";
 const MEMORY_BENCH_SCOPE_ERROR = "--memory-bench can only be used with -p/--prompt.";
+const SOCKET_SCOPE_ERROR = "--socket can only be used with app-server or agent-server.";
+const NO_PLUGINS_SCOPE_ERROR =
+  "--no-plugins can only be used with app-server or agent-server.";
+const EMPTY_SOCKET_ERROR = "--socket requires a non-empty path.";
+const SOCKET_STDIO_CONFLICT_ERROR = "--socket cannot be used with --stdio.";
+const SOCKET_PREPARE_STORAGE_ERROR = "--socket cannot be used with --prepare-storage.";
 
 const pluginsCommandFlags = (
   values: ReturnType<typeof parseGlobalArgs>["values"],
@@ -260,12 +266,20 @@ const runDoctor = (ctx: RunContext, options: GlobalOptions, workingDirectory: st
   return 0;
 };
 
+interface ProtocolServerCommandOptions {
+  prepareStorageOnly?: boolean;
+  /** `app-server --socket <path>`：Unix socket 监听模式（attach 共享 core）。 */
+  socketPath?: string;
+  /** `app-server --no-plugins`：禁用全部插件与 MCP server（office/node-repl/marketplace）。 */
+  noPlugins?: boolean;
+}
+
 const runZCodeProtocolCommand = async (
   ctx: RunContext,
   options: GlobalOptions,
   deps: RunDependencies,
   presentationSurface: PresentationSurface,
-  prepareStorageOnly = false,
+  serverOptions: ProtocolServerCommandOptions = {},
 ): Promise<number> => {
   try {
     const env = prepareCliRuntimeEnv(deps.env ?? process.env);
@@ -299,7 +313,9 @@ const runZCodeProtocolCommand = async (
       input: deps.protocolInput ?? ctx.stdin,
       output: ctx.stdout,
       presentationSurface,
-      prepareStorageOnly,
+      prepareStorageOnly: serverOptions.prepareStorageOnly,
+      ...(serverOptions.socketPath ? { socketPath: serverOptions.socketPath } : {}),
+      ...(serverOptions.noPlugins === true ? { noPlugins: true } : {}),
       version,
     });
     return 0;
@@ -502,6 +518,18 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
     return 1;
   }
 
+  const protocolServerCommand =
+    commandName(parsed.positionals) === "app-server" ||
+    commandName(parsed.positionals) === "agent-server";
+  if (parsed.values.socket !== undefined && !protocolServerCommand) {
+    ctx.stderr.write(`${SOCKET_SCOPE_ERROR}\n`);
+    return 1;
+  }
+  if (parsed.values["no-plugins"] === true && !protocolServerCommand) {
+    ctx.stderr.write(`${NO_PLUGINS_SCOPE_ERROR}\n`);
+    return 1;
+  }
+
   if (parsed.values.help === true) {
     writeHelp(ctx.stdout, options.locale, options.detectedLocale);
     return 0;
@@ -631,14 +659,34 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       ctx.stdout.write(`${version}\n`);
       return 0;
     case "agent-server":
-    case "app-server":
+    case "app-server": {
+      const socketPath = parsed.values.socket as string | undefined;
+      if (socketPath !== undefined) {
+        if (socketPath.trim().length === 0) {
+          ctx.stderr.write(`${EMPTY_SOCKET_ERROR}\n`);
+          return 1;
+        }
+        if (parsed.values.stdio === true) {
+          ctx.stderr.write(`${SOCKET_STDIO_CONFLICT_ERROR}\n`);
+          return 1;
+        }
+        if (parsed.values["prepare-storage"] === true) {
+          ctx.stderr.write(`${SOCKET_PREPARE_STORAGE_ERROR}\n`);
+          return 1;
+        }
+      }
       return await runZCodeProtocolCommand(
         ctx,
         options,
         commandDeps,
         presentationSurface,
-        parsed.values["prepare-storage"] === true,
+        {
+          prepareStorageOnly: parsed.values["prepare-storage"] === true,
+          ...(socketPath !== undefined ? { socketPath } : {}),
+          ...(parsed.values["no-plugins"] === true ? { noPlugins: true } : {}),
+        },
       );
+    }
     case "doctor":
       return runDoctor(ctx, options, workingDirectory);
     case "login":

@@ -80,6 +80,12 @@ export const parseGlobalArgs = (argv: string[]) =>
       stdio: {
         type: "boolean",
       },
+      socket: {
+        type: "string",
+      },
+      "no-plugins": {
+        type: "boolean",
+      },
       surface: {
         type: "string",
       },

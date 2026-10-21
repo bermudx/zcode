@@ -7,6 +7,16 @@ export function isMessageEnabled(env: NodeJS.ProcessEnv): boolean {
   return env.ZCODE_MESSAGE_ENABLED === "1" || env.ZCODE_MESSAGE_ENABLED === "true";
 }
 
+/**
+ * `--no-plugins`（attach 共享 core）的固定 config 覆盖：插件发现与 MCP 功能位一起关。
+ * plugins.enabled=false 让 NodePluginAdapter 返回空 outcome（无 plugin MCP、无内置
+ * node_repl/browser-use 宿主）；features.mcp=false 关掉连接池、遥测 tracker 与 broker。
+ */
+export const NO_PLUGINS_CONFIG_OVERRIDES: RuntimeConfigPatch = {
+  features: { mcp: false },
+  plugins: { enabled: false },
+};
+
 export function createConfigCliOverrides(options: ZCodeAppOptions): RuntimeConfigPatch | undefined {
   const overrides: RuntimeConfigPatch = {};
   const permission: NonNullable<RuntimeConfigPatch["permission"]> = {};
@@ -29,6 +39,10 @@ export function createConfigCliOverrides(options: ZCodeAppOptions): RuntimeConfi
     overrides.ui = {
       locale: options.uiLocale,
     };
+  }
+  if (options.noPlugins === true) {
+    overrides.features = { ...overrides.features, ...NO_PLUGINS_CONFIG_OVERRIDES.features };
+    overrides.plugins = { ...overrides.plugins, ...NO_PLUGINS_CONFIG_OVERRIDES.plugins };
   }
 
   return Object.keys(overrides).length > 0 ? overrides : undefined;

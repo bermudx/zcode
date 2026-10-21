@@ -15,7 +15,7 @@ export const zhCN: ZCodeCopy = {
 不传 command 时，zcode 会打开全屏 TUI。
 
 命令:
-  app-server 运行 ZCode Protocol stdio app server
+  app-server 运行 ZCode Protocol app server（stdio，或 --socket <path> 监听）
   commands   列出自定义 slash commands（\`commands list\`）
   doctor     检查运行时和打包假设
   login [zai|bigmodel]  通过浏览器授权登录
@@ -32,6 +32,8 @@ export const zhCN: ZCodeCopy = {
   --memory-bench   配合 --prompt 开启自动 Memory 提取并等待后退出（需已开启 Memory）
   --browser-use <mode> 启用 Browser Use backend（当前支持：headless）
   --surface <surface>  设置无头 prompt/app-server 的呈现面：terminal 或 desktop
+  --socket <path>    用于 app-server/agent-server：监听 Unix socket 而非 stdio
+  --no-plugins       用于 app-server/agent-server：禁用全部插件与 MCP server
   --browser-executable <path> headless Browser Use 使用的 Chrome/Chromium 路径
   --attach <path>  给 --prompt 附加本地文件；可重复传入
   --cwd <path>     从指定目录运行命令

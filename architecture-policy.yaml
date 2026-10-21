@@ -775,6 +775,27 @@ modules:
       - apps/zcode-cli/packages/tui-pi/src/contract.ts
     layers:
       app: .
+  # app-server-attach：tui-attach-shared-core 切片 A（socket 监听 + no-plugins + spawn helper）。
+  # 三个 root 跨 shared/bootstrap/cli 的未接管包，文件级 root 与 embedded-browser-permission 同例；
+  # 五件套契约落在 packages/shared/src/app-server-attach/。
+  - id: app-server-attach
+    roots:
+      - packages/shared/src/app-server-attach
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/socket-listener.ts
+      - apps/zcode-cli/packages/cli/src/app-server-spawn.ts
+      - apps/zcode-cli/packages/cli/src/protocol-lifecycle.ts
+    managed: true
+    requires:
+      - shared
+      - zcode-cli
+    publicEntrypoints:
+      - packages/shared/src/app-server-attach/index.ts
+      - packages/shared/src/app-server-attach/contract.ts
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/socket-listener.ts
+      - apps/zcode-cli/packages/cli/src/app-server-spawn.ts
+      - apps/zcode-cli/packages/cli/src/protocol-lifecycle.ts
+    layers:
+      adapters: .
 
 global:
   # 临时时间戳（2026-09-10）：unmanaged-new-file 只约束此日期之后首次入库的文件。

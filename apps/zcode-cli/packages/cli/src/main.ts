@@ -24,9 +24,12 @@ async function main(): Promise<void> {
   const isProtocol = argv[0] === STORAGE_MIGRATION_COMMAND || isProtocolServerInvocation(argv);
   const isTui = isTuiInvocation(argv);
   if (isProtocol) installProtocolStderrBoundary(process.stderr);
+  // socket 监听模式的 app-server 由 attach 客户端以 stdio 全断开方式 detached 拉起；
+  // stdin 的 EOF/close 不能当 Host 断开处理，否则服务端启动即自杀。
+  const socketListenerMode = argv.includes("--socket") || argv.some((arg) => arg.startsWith("--socket="));
   const lifecycle =
     isProtocol && argv[0] !== STORAGE_MIGRATION_COMMAND && !argv.includes("--prepare-storage")
-      ? createProtocolProcessLifecycle()
+      ? createProtocolProcessLifecycle({ closeOnInputEnd: !socketListenerMode })
       : undefined;
   // app-server/agent-server 的 stdout 是严格的 ZCode Protocol 帧通道，三方 SDK 的
   // console.debug 等普通输出不能直接写入 stdout。必须在加载 run/bootstrap 之前将
