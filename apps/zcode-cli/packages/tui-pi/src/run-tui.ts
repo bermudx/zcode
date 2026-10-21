@@ -3,7 +3,6 @@
 
 import {
   KeybindingsManager,
-  ProcessTerminal,
   TUI_KEYBINDINGS,
   TuiMainScreen,
   setKeybindings,
@@ -16,11 +15,15 @@ import {
 import type { TerminalColors } from "@earendil-works/pi-tui";
 import type { UiThemeMode } from "@zcode/contracts";
 import { PiTuiApp } from "./app.js";
+import {
+  queryTerminalColorsAtStartup,
+  STARTUP_QUERY_TIMEOUT_MS,
+} from "./terminal-startup.js";
+import { QuietProcessTerminal } from "./terminal-input-filter.js";
 import { createPiTheme } from "./theme.js";
 
 const NON_TTY_ERROR =
   "zcode interactive frontend requires a TTY. Use --prompt for headless runs.";
-const THEME_QUERY_TIMEOUT_MS = 250;
 const BRIGHTNESS_THRESHOLD = 128;
 
 /** pi-tui reports {r,g,b}; brightness rule mirrors @zcode/tui's hex inference. */
@@ -37,16 +40,20 @@ export async function runPiTui(options: TuiOptions): Promise<number> {
     return 1;
   }
 
-  const terminal = new ProcessTerminal();
+  const terminal = new QuietProcessTerminal();
   const tui = new TuiMainScreen(terminal);
 
   // Theme resolution mirrors the React frontend: explicit initialThemeMode /
   // stored preference first, else sniff the terminal's reported colors.
+  // 查询与回复排空必须在 raw 模式下完成（见 terminal-startup.ts 头注）：
+  // canonical 窗口内发查询会被行纪律把回复回显到屏幕。
   let detectedMode = options.initialThemeMode ?? null;
   if (!detectedMode) {
-    const colors = await tui
-      .queryTerminalColors({ timeoutMs: THEME_QUERY_TIMEOUT_MS })
-      .catch(() => null);
+    const colors = await queryTerminalColorsAtStartup({
+      stdin: options.stdin,
+      stdout: options.stdout,
+      timeoutMs: STARTUP_QUERY_TIMEOUT_MS,
+    }).catch(() => null);
     if (colors) detectedMode = inferModeFromColors(colors);
   }
   setActiveTuiThemeMode(resolveTuiThemeMode(options.theme, detectedMode));
