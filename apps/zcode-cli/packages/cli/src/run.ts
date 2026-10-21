@@ -30,6 +30,9 @@ import { runPrompt } from "./prompt-command.js";
 import { runPluginsCommand, type PluginsCommandFlags } from "./plugins-command.js";
 import { runSkillsCommand } from "./skills-command.js";
 import { runTuiCommand } from "./tui-command.js";
+import { listCustomCommandsForTui } from "./tui-command-data.js";
+import { resolveTuiStartupLocale } from "./tui-startup-locale.js";
+import { createWorkspacePathSuggestionProvider } from "./tui-workspace-paths.js";
 import { runAttachCommand } from "./attach/attach-command.js";
 import {
   DEFAULT_CLI_WORKFLOW_MODE,
@@ -613,6 +616,9 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
 
   const commandDeps: RunDependencies = {
     ...deps,
+    createAttachPathSuggestions: createWorkspacePathSuggestionProvider,
+    listAttachCustomCommands: listCustomCommandsForTui,
+    resolveAttachStartupLocale: resolveTuiStartupLocale,
     cwd: () => workingDirectory,
     env,
     logger:

@@ -16,10 +16,8 @@ import { createNodeClipboardImageReader } from "../clipboard-image.js";
 import { createNodeClipboardTextWriter } from "../clipboard-text.js";
 import { listSlashCommandSuggestions } from "../command-center.js";
 import { ensureServer } from "../app-server-spawn.js";
-import { listCustomCommandsForTui } from "../tui-command-data.js";
+import { resolveLocale } from "@zcode/i18n";
 import { resolveWorkspaceGitBranch } from "../tui-workspace-git.js";
-import { resolveTuiStartupLocale } from "../tui-startup-locale.js";
-import { createWorkspacePathSuggestionProvider } from "../tui-workspace-paths.js";
 import { loadPiTuiRuntime } from "../tui-pi-runtime-loader.js";
 import { loadTuiRuntime } from "../tui-runtime-loader.js";
 import { DEFAULT_CLI_WORKFLOW_MODE } from "../workflow-mode.js";
@@ -58,11 +56,11 @@ export const runAttachCommand = async (
     const { socketPath } = await ensureServer({ env, version, workspace });
     const runtime = new AttachRuntime({ socketPath, workspace: workspaceRef });
     const client = await runtime.connect();
-    const startupLocale = resolveTuiStartupLocale({
-      deps,
-      options,
-      workingDirectory: workspaceDirectory,
-    });
+    // 瘦客户端（zcode-attach）不带 config 适配器：locale 用轻量路径；
+    // monolith 经 deps.resolveAttachStartupLocale 注入完整 createConfig 实现。
+    const startupLocale =
+      deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
+      resolveLocale(options.locale, options.detectedLocale);
     try {
       // 握手：session/create 直接返回协议快照；版本断言先于任何会话状态依赖。
       const created = (await client.request(zcodeProtocolMethods.sessionCreate, {
@@ -106,12 +104,18 @@ export const runAttachCommand = async (
         initialMode: handle.getMode(),
         listMcpServers: async () => ({}),
         listModelOptions: promptHandler.listModelOptions,
-        listWorkspacePathSuggestions: createWorkspacePathSuggestionProvider({
-          workspaceDirectory,
-        }),
+        ...(deps.createAttachPathSuggestions
+          ? {
+              listWorkspacePathSuggestions: deps.createAttachPathSuggestions({
+                workspaceDirectory,
+              }),
+            }
+          : {}),
         loadStartupOptions: async () => {
           const [customCommands, workspaceGitBranch] = await Promise.all([
-            listCustomCommandsForTui(deps).catch(() => undefined),
+            (deps.listAttachCustomCommands?.(deps) ?? Promise.resolve(undefined)).catch(
+              () => undefined,
+            ),
             (deps.resolveWorkspaceGitBranch ?? resolveWorkspaceGitBranch)({
               workspaceDirectory,
             }).catch(() => undefined),

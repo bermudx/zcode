@@ -12,6 +12,7 @@ const executableFileMode = 0o755;
 const packageJsonFile = "package.json";
 const rootPackageVersionError = "Root package.json must define a non-empty string version.";
 const desktopAgentBuildFlag = "--desktop-agent";
+const clientOnlyBuildFlag = "--client-only";
 export const resolveBuildExternal = () => [
   "@zcode/tui",
   "@zcode/tui-pi",
@@ -131,6 +132,8 @@ export const resolveBuildOptions = (args = [], env = process.env) => {
   const e2eCoverage = env.ZCODE_E2E_COVERAGE === "1";
 
   return {
+    // --client-only 只产出 zcode-attach.cjs 瘦客户端，供探针/分包迭代。
+    clientOnly: args.includes(clientOnlyBuildFlag),
     // desktop-agent 正常发布仍需压缩且不携带 map；E2E coverage
     // 专用构建必须保留原始符号和 source map，c8 才能回映到各 package 的 TS 源码。
     minify: desktopAgent && !e2eCoverage,
@@ -156,6 +159,51 @@ export const resolveBuildAliases = ({
   "@zcode/core": resolve(cliDirectory, "../core/dist/index.js"),
 });
 
+const resolveBundleOptions = async ({
+  cliDirectory,
+  cliVersion,
+  entryPoint,
+  minify,
+  outfile,
+  rootDirectory,
+  sourcemap,
+}) => ({
+  banner: {
+    js: "#!/usr/bin/env node",
+  },
+  bundle: true,
+  define: {
+    __CLI_VERSION__: JSON.stringify(cliVersion),
+  },
+  entryPoints: [entryPoint],
+  // Ink 7 and yoga-layout use top-level await, so the CJS CLI bundle loads the TUI
+  // through Node's native dynamic import path instead of forcing esbuild to lower it.
+  // playwright-core 依赖运行时 package assets 与 require.resolve，相比内联 bundle 必须保持外置。
+  // managed headless adapter 只在显式 --browser-use=headless 时延迟加载，不影响 app-server/普通 CLI。
+  // koffi 会按当前平台动态 require 原生 `.node` 文件；内联会让 esbuild 遍历所有
+  // 平台产物并直接报 "No loader is configured for .node"。运行时仍从依赖包加载，
+  // SEA 资源由 build-sea 的 native asset 收集阶段单独处理。
+  external: resolveBuildExternal(),
+  format: "cjs",
+  // 桌面 app 集成只内置 zcode.cjs，旧 desktop-agent 构建复用 CLI 调试产物，
+  // 未压缩且会留下指向未随包复制的 sourcemap。桌面 agent 模式压缩 JS，同时保留
+  // 函数/类名，避免依赖 name 的诊断与注册逻辑被 esbuild 标识符压缩影响。
+  keepNames: minify,
+  legalComments: "none",
+  logLevel: "info",
+  minify,
+  metafile: true,
+  plugins: [createZodDedupePlugin({ expectedV4Version: await readZodBuildVersion() })],
+  outfile,
+  platform: "node",
+  sourcemap,
+  // target 取所有承载运行时里最低的 Node 版本：桌面用 Electron 内置 Node 24，
+  // 远端 SSH 复用已部署的独立 Node v22.16 跑同一份 zcode.cjs。降到 node22 保证这份产物
+  // 在两端都不会用到目标运行时不支持的语法/特性。
+  target: "node22",
+  alias: resolveBuildAliases({ cliDirectory, rootDirectory }),
+});
+
 export const buildCli = async ({
   cliDirectory = cliRoot,
   rootDirectory = projectRoot,
@@ -176,42 +224,17 @@ export const buildCli = async ({
     env,
   });
 
-  await build({
-    banner: {
-      js: "#!/usr/bin/env node",
-    },
-    bundle: true,
-    define: {
-      __CLI_VERSION__: JSON.stringify(cliVersion),
-    },
-    entryPoints: [resolve(cliDirectory, "src/main.ts")],
-    // Ink 7 and yoga-layout use top-level await, so the CJS CLI bundle loads the TUI
-    // through Node's native dynamic import path instead of forcing esbuild to lower it.
-    // playwright-core 依赖运行时 package assets 与 require.resolve，相比内联 bundle 必须保持外置。
-    // managed headless adapter 只在显式 --browser-use=headless 时延迟加载，不影响 app-server/普通 CLI。
-    // koffi 会按当前平台动态 require 原生 `.node` 文件；内联会让 esbuild 遍历所有
-    // 平台产物并直接报 "No loader is configured for .node"。运行时仍从依赖包加载，
-    // SEA 资源由 build-sea 的 native asset 收集阶段单独处理。
-    external: resolveBuildExternal(),
-    format: "cjs",
-    // 桌面 app 集成只内置 zcode.cjs，旧 desktop-agent 构建复用 CLI 调试产物，
-    // 未压缩且会留下指向未随包复制的 sourcemap。桌面 agent 模式压缩 JS，同时保留
-    // 函数/类名，避免依赖 name 的诊断与注册逻辑被 esbuild 标识符压缩影响。
-    keepNames: minify,
-    legalComments: "none",
-    logLevel: "info",
-    minify,
-    metafile: true,
-    plugins: [createZodDedupePlugin({ expectedV4Version: await readZodBuildVersion() })],
-    outfile,
-    platform: "node",
-    sourcemap,
-    // target 取所有承载运行时里最低的 Node 版本：桌面用 Electron 内置 Node 24，
-    // 远端 SSH 复用已部署的独立 Node v22.16 跑同一份 zcode.cjs。降到 node22 保证这份产物
-    // 在两端都不会用到目标运行时不支持的语法/特性。
-    target: "node22",
-    alias: resolveBuildAliases({ cliDirectory, rootDirectory }),
-  });
+  await build(
+    await resolveBundleOptions({
+      cliDirectory,
+      cliVersion,
+      entryPoint: resolve(cliDirectory, "src/main.ts"),
+      minify,
+      outfile,
+      rootDirectory,
+      sourcemap,
+    }),
+  );
 
   if (!sourcemap) {
     await rm(sourcemapFile, { force: true });
@@ -222,7 +245,45 @@ export const buildCli = async ({
   await stageThirdPartyNotices(resolve(cliDirectory, "dist"), resolve(rootDirectory, "../.."));
 };
 
+/** zcode-attach 瘦客户端：attach/ 协议客户端 + pi-tui 入口，无 bootstrap/core/adapters。 */
+export const buildAttach = async ({
+  cliDirectory = cliRoot,
+  rootDirectory = projectRoot,
+  minify = false,
+  sourcemap = true,
+  version = readRootPackageVersion({
+    root: rootDirectory,
+  }),
+} = {}) => {
+  const cliVersion = await version;
+  const outfile = resolve(cliDirectory, "dist/zcode-attach.cjs");
+  const sourcemapFile = `${outfile}.map`;
+
+  await build(
+    await resolveBundleOptions({
+      cliDirectory,
+      cliVersion,
+      entryPoint: resolve(cliDirectory, "src/attach/attach-main.ts"),
+      minify,
+      outfile,
+      rootDirectory,
+      sourcemap,
+    }),
+  );
+
+  if (!sourcemap) {
+    await rm(sourcemapFile, { force: true });
+  }
+  await chmod(outfile, executableFileMode);
+};
+
 const entryPath = process.argv[1];
 if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
-  await buildCli(resolveBuildOptions(process.argv.slice(2)));
+  const options = resolveBuildOptions(process.argv.slice(2));
+  if (options.clientOnly) {
+    await buildAttach(options);
+  } else {
+    await buildCli(options);
+    await buildAttach(options);
+  }
 }

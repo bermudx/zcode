@@ -105,6 +105,19 @@ herdr pane 1..N                    每 workspace 一个
 - `zcode tui --tui-frontend=pi --shared-core`：pi-tui 瘦客户端经
   NDJSON socket attach 共享 core；`zcode attach` 为其别名命令。
   原 `--attach <path>` 仍是 prompt 文件附件参数，不复用。
+- `zcode-attach`（`dist/zcode-attach.cjs`，esbuild 独立入口
+  `src/attach-main.ts`）：仅含 attach 链路 + tui-pi/TuiOptions 适配的
+  客户端专用二进制，进程名 `zcode-attach`。不内联 bootstrap/core/
+  adapters/plugin 机制——`listWorkspacePathSuggestions` 省略、
+  slash 建议退回内置命令、locale 用 `auto`，重量级助手经
+  `RunDependencies` 依赖注入由 monolith 提供（`zcode attach` 路径
+  不受影响）。构建：`pnpm --filter @zcode/cli build` 同时产出，
+  或 `build:attach`（`--client-only`）单独构建。
+- `ZCODE_SERVER_BIN`：core spawn 可执行文件覆盖（默认 PATH 里的
+  `zcode`；优先级 `spawnSpec` 测试注入 > `ZCODE_SERVER_BIN` > PATH）。
+  仅供瘦客户端/探针指定 core 入口；路径不存在或不可执行时
+  `ensureServer` 在原 spawn/就绪等待错误中原样抛出。烟测
+  `tests/attach-binary.smoke.test.ts` 覆盖。
 - `ensureServer`：确定性 socket 路径
   `<dataBaseDir>/.zcode/v2/sockets/core-<sha256(workspace-key).slice(0,16)>.sock`，
   原子锁 + detached spawn + `.pid`/`.info` 元数据 + 就绪等待。
@@ -124,7 +137,9 @@ herdr pane 1..N                    每 workspace 一个
   移除，`.pid`/`.info` 由下一次 `ensureServer` 的死 pid 探测回收。
 - 客户端退出只断开本连接：core 与其会话照常存活。
 
-### 实测资源（N=2，`measure-attach.sh`，稳态 15s）
+### 实测资源（`measure-attach.sh`，稳态 15s）
+
+客户端为 monolith `zcode attach`（N=2）：
 
 | process  | RSS(MB) | children |
 |----------|---------|----------|
@@ -133,13 +148,30 @@ herdr pane 1..N                    每 workspace 一个
 | server   | 416     | 0        |
 | 合计     | 1283    |          |
 
-\* client-1 的 1 个子进程即 detached server（父进程退出前仍挂在首个
-客户端进程树下）。
+客户端为 `zcode-attach` 专用二进制（`ATTACH_BIN` 指定，N=2）：
 
-对照验收线：server 416MB < 1.2GB、合计 1283MB < 1.6GB 达标；
-单客户端 ~433MB 超出 200MB 目标（瘦客户端仍加载完整 CLI bundle +
-pi-tui/OpenTUI，V8 基线占大头）。对比改造前每会话 1.8–2.2GB，
-2 客户端 + core ≈ 1.28GB（约 65% 降幅）。
+| process  | RSS(MB) | children |
+|----------|---------|----------|
+| client-1 | 160     | 0        |
+| client-2 | 161     | 1*       |
+| server   | 406     | 0        |
+| 合计     | 727     |          |
+
+同配置 N=5：
+
+| process  | RSS(MB) | children |
+|----------|---------|----------|
+| client-1..5 | 160–166 | 1*    |
+| server   | 406     | 0        |
+| 合计     | 1219    |          |
+
+\* detached server 在拉起它的客户端退出前仍挂在其进程树下。
+
+对照验收线：`zcode-attach` 客户端 160–166MB < 200MB、server
+406MB < 1.2GB、N=5 合计 1219MB < 3GB 全部达标。monolith
+`zcode attach` 路径单客户端 ~433MB（仍加载完整 CLI bundle），
+需要省内存时用 `zcode-attach`。对比改造前每会话 1.8–2.2GB，
+5 客户端 + core ≈ 1.22GB。
 
 ### 已知遗留（deferred）
 

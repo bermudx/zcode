@@ -138,7 +138,8 @@ export async function ensureServer(
     // 复用已有 server 而不是重复 spawn/误删它的 socket。
     if (await probeSocket(socketPath)) return { socketPath, started: false };
 
-    const spec = options.spawnSpec ?? { file: "zcode" };
+    // spawnSpec（测试注入）> ZCODE_SERVER_BIN（瘦客户端/探针指定 core 入口）> PATH zcode。
+    const spec = options.spawnSpec ?? { file: env?.ZCODE_SERVER_BIN?.trim() || "zcode" };
     const args = [
       ...(spec.argsPrefix ?? []),
       "app-server",

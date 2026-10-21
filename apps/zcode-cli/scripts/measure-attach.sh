@@ -6,6 +6,8 @@
 #
 # 用法：N=2 SETTLE_SECONDS=15 apps/zcode-cli/scripts/measure-attach.sh
 #   ZCODE            被测 zcode 入口（默认 PATH 里的 zcode）
+#   ATTACH_BIN       客户端入口（默认 "$ZCODE attach"；测瘦客户端时指向
+#                    zcode-attach.cjs 或其 shim，如 ATTACH_BIN=zcode-attach）
 #   N                客户端数量（默认 2）
 #   SETTLE_SECONDS   attach 完成后的稳态等待（默认 15）
 #   KEEP=1           结束后不清理进程与工作目录（调试）
@@ -29,6 +31,16 @@ fi
 printf '#!/bin/sh\nexec "%s" "$@"\n' "$ZCODE_RESOLVED" > "$BASE/bin/zcode"
 chmod +x "$BASE/bin/zcode"
 
+# 客户端命令：ATTACH_BIN 用瘦客户端入口；core 端 spawn 始终走 PATH zcode。
+ATTACH_BIN_RESOLVED="$(command -v "${ATTACH_BIN:-}" || true)"
+if [ -n "$ATTACH_BIN_RESOLVED" ]; then
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$ATTACH_BIN_RESOLVED" > "$BASE/bin/zcode-attach"
+  chmod +x "$BASE/bin/zcode-attach"
+  CLIENT_CMD="'$BASE/bin/zcode-attach'"
+else
+  CLIENT_CMD="'$BASE/bin/zcode' attach"
+fi
+
 SCRIPT_BIN="$(command -v script || true)"
 if [ -z "$SCRIPT_BIN" ]; then
   echo "measure-attach: 'script' (util-linux) not found; a PTY is required." >&2
@@ -38,6 +50,7 @@ fi
 ENV_ARGS=(
   "HOME=$BASE/home"
   "PATH=$BASE/bin:$PATH"
+  "ZCODE_SERVER_BIN=$BASE/bin/zcode"
   "ZCODE_DATA_BASE_DIR=$BASE/data"
   "XDG_CONFIG_HOME=$BASE/home/.config"
   "XDG_DATA_HOME=$BASE/home/.local/share"
@@ -83,7 +96,7 @@ rm -f "$BASE"/data/.zcode/v2/sockets/*.sock 2>/dev/null
 SCRIPT_PIDS=()
 for i in $(seq 1 "$N"); do
   setsid env "${ENV_ARGS[@]}" "$SCRIPT_BIN" -qefc \
-    "cd '$BASE/workspace' && '$ZCODE' attach" "$BASE/logs/client$i.log" </dev/null >/dev/null 2>&1 &
+    "cd '$BASE/workspace' && $CLIENT_CMD" "$BASE/logs/client$i.log" </dev/null >/dev/null 2>&1 &
   SCRIPT_PIDS+=($!)
 done
 
