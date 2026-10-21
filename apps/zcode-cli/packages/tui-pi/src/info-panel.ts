@@ -11,6 +11,7 @@ import type { AppStore } from "./store.js";
 import type { PiTheme } from "./theme.js";
 
 const MAX_SECTION_ITEMS = 8;
+const MAX_STATUS_DETAILS = 2;
 
 const truncate = (text: string, width: number): string =>
   text.length > width && width > 1 ? `${text.slice(0, width - 1)}…` : text;
@@ -77,6 +78,9 @@ export class SessionInfoPanel implements Component, Focusable {
       lines.push(`    ${theme.muted("tokens")} ${theme.text(String(s.usage.totalTokens))}`);
     }
     if (s.lastEvent) lines.push(`    ${theme.muted("last")} ${theme.dim(truncate(s.lastEvent, inner - 6))}`);
+    for (const detail of s.statusDetails.slice(0, MAX_STATUS_DETAILS)) {
+      lines.push(`    ${theme.dim(truncate(detail, inner))}`);
+    }
 
     if (s.todos.length > 0) {
       lines.push(sectionHeader(theme, `Todos (${s.todos.length})`));

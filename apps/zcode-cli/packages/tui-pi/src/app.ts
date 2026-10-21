@@ -18,6 +18,7 @@ import type {
   TuiModelOption,
   TuiOptions,
   TuiPromptAttachment,
+  TuiPromptInput,
   TuiSelection,
   TuiStartupOptions,
   TuiSubmitPromptResult,
@@ -79,6 +80,11 @@ import { WorkflowCard } from "./workflow.js";
 
 const COPY_DEFAULT_LOCALE = "en-US" as const;
 
+// TuiPromptInput 允许 string 与 { text } 两种形态；pi 前端统一规整为
+// 对象形式，下游只需按单一路径读取 input.text（附件、modelSelection 透传）。
+const promptInputObject = (input: TuiPromptInput): TuiPromptInput =>
+  typeof input === "string" ? { text: input } : input;
+
 export type PiTuiAppDeps = {
   options: TuiOptions;
   tui: TUI;
@@ -101,7 +107,7 @@ export class PiTuiApp {
   private readonly editor: Composer;
   private readonly rows: MessageRow[] = [];
   private readonly mdTheme;
-  private readonly copy: TuiCopy;
+  private copy: TuiCopy;
   private readonly requestPermission;
   private readonly ctrlCGuard = createCtrlCExitGuard();
   private readonly escGuard = createDoublePressGuard();
@@ -120,6 +126,7 @@ export class PiTuiApp {
   private inputHistoryDraftAttachments: DraftAttachment[] | undefined;
   private nextAttachmentId = 0;
   private suppressHistoryReset = false;
+  private submitPipelineCache: TuiOptions | undefined;
   private readonly fallback: {
     locale: NonNullable<TuiOptions["locale"]>;
     loginRequired: boolean;
@@ -151,6 +158,10 @@ export class PiTuiApp {
 
     this.statusLine = new Text("", 1, 0);
     this.loader = new Loader(this.tui, this.theme.accent, this.theme.muted, "");
+    // pi-tui 的 Loader 在构造时经 setIndicator→start() 就启动常驻 setInterval，
+    // 不挂载也会一直 tick 并阻止进程退出——先停掉，busy 挂载时由
+    // syncBusyIndicator 调 start() 重新启动。
+    this.loader.stop();
 
     this.editor = new Composer(this.tui, this.theme, {
       options: this.options,
@@ -215,6 +226,7 @@ export class PiTuiApp {
     }
     if (startup.locale) {
       this.fallback.locale = startup.locale;
+      this.copy = getZCodeCopy(startup.locale).tui;
     }
     if (startup.modelOptions) store.set("modelOptions", [...startup.modelOptions]);
     if (startup.effortOptions) store.set("effortOptions", [...startup.effortOptions]);
@@ -317,7 +329,10 @@ export class PiTuiApp {
     if (result.mode) store.set("mode", result.mode);
     else store.set("mode", this.fallback.mode);
     store.set("model", result.model ?? this.fallback.model);
-    if (result.locale) this.fallback.locale = result.locale;
+    if (result.locale) {
+      this.fallback.locale = result.locale;
+      this.copy = resultCopy;
+    }
     if (result.loginRequired !== undefined) {
       store.set("loginRequired", result.loginRequired);
       this.fallback.loginRequired = result.loginRequired;
@@ -369,6 +384,21 @@ export class PiTuiApp {
 
   /* ---------- submit ---------- */
 
+  private submitPipeline(): TuiOptions {
+    if (!this.submitPipelineCache) {
+      const { sendInput, submitPrompt } = this.options;
+      this.submitPipelineCache = {
+        ...this.options,
+        sendInput: sendInput
+          ? (input, sendOptions) => sendInput(promptInputObject(input), sendOptions)
+          : undefined,
+        submitPrompt: (input, promptOptions) =>
+          submitPrompt(promptInputObject(input), promptOptions),
+      };
+    }
+    return this.submitPipelineCache;
+  }
+
   submitValue = async (
     value: string,
     submitOptions?: SubmitValueOptions,
@@ -384,7 +414,7 @@ export class PiTuiApp {
         applySessionEvent: this.applyEvent,
         draftAttachments: store.state.draftAttachments,
         messageInsertIndex: store.state.messages.length,
-        options: this.options,
+        options: this.submitPipeline(),
         requestPermission: this.requestPermission,
         setDraftValue: (v) => this.setDraftValue(v),
         setLastError: (m) => store.set("lastError", m),
@@ -400,7 +430,7 @@ export class PiTuiApp {
       applyResult: this.applyResult,
       applySessionEvent: this.applyEvent,
       draftAttachments: store.state.draftAttachments,
-      options: this.options,
+      options: this.submitPipeline(),
       requestPermission: this.requestPermission,
       setBusy: (v) => {
         store.set("busy", v);
@@ -708,18 +738,19 @@ export class PiTuiApp {
   private toggleInfoPanel(): void {
     if (this.infoOverlay) {
       this.closeInfoPanel();
-      this.store.set("status", SIDEBAR_HIDDEN_STATUS);
       return;
     }
     const panel = new SessionInfoPanel(this.tui, this.store, this.theme, this.options, () =>
       this.closeInfoPanel(),
     );
+    // nonCapturing：React sidebar 不抢 composer 焦点，开着信息面板时输入仍进
+    // 编辑器；Esc 由 dispatchChord 的全局 chord 关闭。
     this.infoOverlay = this.tui.showOverlay(panel, {
       anchor: "right-center",
       maxHeight: "80%",
+      nonCapturing: true,
       width: "45%",
     });
-    this.infoOverlay.focus();
     this.store.set("status", SIDEBAR_SHOWN_STATUS);
   }
 
@@ -727,6 +758,7 @@ export class PiTuiApp {
     this.infoOverlay?.hide();
     this.infoOverlay = undefined;
     this.tui.setFocus(this.editor);
+    this.store.set("status", SIDEBAR_HIDDEN_STATUS);
     this.tui.requestRender();
   }
 
@@ -846,6 +878,7 @@ export class PiTuiApp {
   async stop(): Promise<void> {
     this.removeInputListener();
     this.unsubscribeSession?.();
+    this.loader.stop();
     for (const approval of this.store.state.approvalQueue) {
       approval.cleanup();
       approval.reject(new Error("TUI closed"));
