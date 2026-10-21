@@ -16,8 +16,8 @@
     "clean": "node ../../scripts/clean-dist.mjs",
     "test": "tsx --disable-warning=DEP0205 --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint src",
-    "lint:fix": "oxlint --write src"
+    "lint": "oxlint src --no-ignore",
+    "lint:fix": "oxlint --write src --no-ignore"
   },
   "dependencies": {
     "@earendil-works/pi-tui": "1.3.0",
