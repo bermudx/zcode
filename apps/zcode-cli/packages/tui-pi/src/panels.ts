@@ -18,10 +18,12 @@ import {
   handleApprovalKey,
   handleSelectionKey,
   previewPermissionInput,
+  selectionInputDisplayValue,
   truncateDisplay,
+  visibleSelectionItemWindow,
 } from "@zcode/tui/internals";
-import { keyEventFromInput } from "./keys.js";
-import type { AppStore } from "./store.js";
+import { keyEventForChar, keyEventFromInput, pastedCharsFromInput } from "./keys.js";
+import type { AppStore, SetState } from "./store.js";
 import type { PiTheme } from "./theme.js";
 
 const PANEL_INDENT = "  ";
@@ -46,9 +48,11 @@ export class ApprovalPanel implements Component, Focusable {
   handleInput(data: string): void {
     const key = keyEventFromInput(data);
     if (!key) return;
+    // 问题向导每键经 setApprovalQueue 产出新 approval 对象，且 updater 以
+    // item === approval 做身份匹配——构造时捕获的引用一次更新即过期，传当前队首。
     handleApprovalKey(
       key,
-      this.approval,
+      this.store.state.approvalQueue[0] ?? this.approval,
       this.store.setter("approvalQueue"),
       this.setStatus,
     );
@@ -170,17 +174,48 @@ export class SelectionPanel implements Component, Focusable {
   invalidate(): void {}
 
   handleInput(data: string): void {
+    // pi-tui 把终端 bracketed paste 包标记后走普通输入通道发给焦点组件（无
+    // 独立 paste 事件），这里逐字回放给共享 handler：可打印字符进 filter /
+    // input.value，pending 子态由 handler 自然丢弃——与 React 端
+    // applySelectionPaste 的路由一致。
+    const pasted = pastedCharsFromInput(data);
+    if (pasted) {
+      for (const char of pasted) {
+        handleSelectionKey(
+          keyEventForChar(char),
+          this.selection,
+          this.setSelection,
+          this.setStatus,
+          this.submitValue,
+          this.cancelPendingSelection,
+        );
+      }
+      return;
+    }
     const key = keyEventFromInput(data);
     if (!key) return;
     handleSelectionKey(
       key,
       this.selection,
-      this.store.setter("selection"),
+      this.setSelection,
       this.setStatus,
       this.submitValue,
       this.cancelPendingSelection,
     );
   }
+
+  // 共享 handler 以 React setState 语义产出新 SelectionState；pi 面板长期持
+  // 有构造时的同一对象（render、多字粘贴的逐字 input.value 追加都直接读
+  // 它），必须就地写回字段并同步 store，否则捕获引用一次更新即过期。
+  private setSelection: SetState<SelectionState | undefined> = (action) => {
+    const next = typeof action === "function" ? action(this.selection) : action;
+    if (next === undefined) {
+      this.store.set("selection", undefined);
+      return;
+    }
+    if (next !== this.selection) Object.assign(this.selection, next);
+    this.store.set("selection", this.selection);
+  };
 
   private setStatus = (status: string): void => {
     this.store.set("status", status);
@@ -205,15 +240,11 @@ export class SelectionPanel implements Component, Focusable {
 
     if (selection.input) {
       const input = selection.input;
-      const display = input.mask
-        ? "•".repeat(Math.min(input.value.length, 16)) + (input.value.length > 16 ? "…" : "")
-        : input.value;
+      const display = selectionInputDisplayValue(input);
       lines.push(`${PANEL_INDENT}${theme.muted(truncate(input.primary, width))}`);
       if (input.secondary)
         lines.push(`${PANEL_INDENT}${theme.dim(truncate(input.secondary, width))}`);
-      lines.push(
-        `${PANEL_INDENT}${theme.text(`${input.placeholder && !display ? input.placeholder : display}`)}${theme.accent(CURSOR)}`,
-      );
+      lines.push(`${PANEL_INDENT}${theme.text(display)}${theme.accent(CURSOR)}`);
       if (input.help) lines.push(`${PANEL_INDENT}${theme.muted(input.help)}`);
       lines.push(theme.muted(`${PANEL_INDENT}Enter submit · Esc back`));
       return lines;
@@ -228,17 +259,13 @@ export class SelectionPanel implements Component, Focusable {
     if (visible.length === 0) {
       lines.push(`${PANEL_INDENT}${theme.muted(selection.emptyMessage)}`);
     }
-    const start = Math.max(
-      0,
-      Math.min(
-        selection.selectedIndex - MAX_SELECTION_VISIBLE + 1,
-        visible.length - MAX_SELECTION_VISIBLE,
-      ),
+    const itemWindow = visibleSelectionItemWindow(
+      visible,
+      selection.selectedIndex,
+      MAX_SELECTION_VISIBLE,
     );
-    const windowItems = visible.slice(start, start + MAX_SELECTION_VISIBLE);
-    windowItems.forEach((item, index) => {
-      const absolute = start + index;
-      const selected = absolute === selection.selectedIndex;
+    itemWindow.items.forEach((item, index) => {
+      const selected = index === itemWindow.selectedIndex;
       const marker = selected ? theme.accent("▸") : " ";
       const primary = item.disabledReason
         ? theme.dim(truncate(item.primary, width - 24))
@@ -254,7 +281,7 @@ export class SelectionPanel implements Component, Focusable {
     if (visible.length > MAX_SELECTION_VISIBLE) {
       lines.push(
         theme.muted(
-          `${PANEL_INDENT}… ${start + 1}-${start + windowItems.length} of ${visible.length}`,
+          `${PANEL_INDENT}… ${itemWindow.startIndex + 1}-${itemWindow.startIndex + itemWindow.items.length} of ${visible.length}`,
         ),
       );
     }

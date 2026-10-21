@@ -45,6 +45,33 @@ const makeKey = (input: {
   source: "raw",
 });
 
+const PASTE_START_MARKER = "\x1b[200~";
+const PASTE_END_MARKER = "\x1b[201~";
+
+// pi-tui 把终端 bracketed paste 重包 \x1b[200~…\x1b[201~ 标记后经普通输入通道
+// 发给焦点组件（React 端走独立 paste 事件）。这里拆标记并按 React 端
+// pastedInputText 同样的过滤（只保留可打印字符）还原成逐字流；空数组也算
+// 一次粘贴，调用方照样消费掉。
+export const pastedCharsFromInput = (data: string): string[] | undefined => {
+  if (!data.startsWith(PASTE_START_MARKER) || !data.endsWith(PASTE_END_MARKER)) return undefined;
+  const inner = data.slice(PASTE_START_MARKER.length, data.length - PASTE_END_MARKER.length);
+  return [...inner].filter((char) => char >= " " && char !== "\x7f");
+};
+
+// 与 keyEventFromInput 的可打印单字符分支同形：name 取未加 shift 的小写键名，
+// shift 表达大小写；空格走 space 分支。共享 handler 的 printableKey 按
+// name === "space" / name.length === 1 / sequence 兜底取值。
+export const keyEventForChar = (char: string): KeyEvent => {
+  if (char === " ")
+    return makeKey({ name: "space", raw: " ", sequence: " " }) as unknown as KeyEvent;
+  return makeKey({
+    name: char.toLowerCase(),
+    raw: char,
+    sequence: char,
+    shift: char !== char.toLowerCase(),
+  }) as unknown as KeyEvent;
+};
+
 export const keyEventFromInput = (data: string): KeyEvent | undefined => {
   if (matchesKey(data, "shift+tab"))
     return makeKey({ name: "tab", raw: data, shift: true }) as unknown as KeyEvent;
