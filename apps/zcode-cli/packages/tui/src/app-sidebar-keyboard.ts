@@ -15,7 +15,6 @@ import {
 
 export function handleSidebarShortcutKey(input: {
   consumeKey: (key: KeyEvent) => void;
-  copyLastAssistantReply: () => void;
   key: KeyEvent;
   nowMs: number;
   setStatus: Dispatch<SetStateAction<string>>;
@@ -53,11 +52,5 @@ export function handleSidebarShortcutKey(input: {
     );
     return true;
   }
-  if (sidebarIntent === "copy-last-reply") {
-    input.consumeKey(input.key);
-    input.copyLastAssistantReply();
-    return true;
-  }
-
   return false;
 }

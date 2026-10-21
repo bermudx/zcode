@@ -13,6 +13,7 @@ export function useModelCommandController(
   options: Pick<TuiOptions, "modelOptions" | "initialResult" | "listModelOptions">,
 ): {
   filteredOptions: readonly TuiModelOption[];
+  modelOptions: readonly TuiModelOption[];
   reconcileDraft: (value: string) => ModelCommandSelectionState | undefined;
   selectedOption: (submittedValue: string) => TuiModelOption | undefined;
   selection: ModelCommandSelectionState | undefined;
@@ -62,6 +63,7 @@ export function useModelCommandController(
 
   return {
     filteredOptions,
+    modelOptions,
     reconcileDraft,
     selectedOption,
     selection,

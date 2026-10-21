@@ -135,21 +135,25 @@ export async function submitDuringActiveTurn(input: {
   setQueuedInputs: React.Dispatch<React.SetStateAction<QueuedInput[]>>;
   setStatus: (status: string) => void;
   signal?: AbortSignal;
+  submitOptions?: SubmitValueOptions;
   text: string;
   modelSelection?: ModelSelection;
-}): Promise<void> {
+}): Promise<TuiSubmitPromptResult | undefined> {
   if (!input.options.sendInput) {
     input.setStatus("Agent is still responding.");
-    return;
+    return undefined;
   }
-  input.setDraftValue("");
+  const preserveDraft = input.submitOptions?.preserveDraft === true;
+  const silent = input.submitOptions?.silent === true;
+  const promptAttachments = preserveDraft ? [] : input.draftAttachments;
+  if (!preserveDraft) input.setDraftValue("");
   const compactCommand =
-    input.draftAttachments.length === 0 ? compactCommandFromText(input.text) : undefined;
+    promptAttachments.length === 0 ? compactCommandFromText(input.text) : undefined;
   const localUserMessage = createLocalUserMessage(redactSensitivePromptForTranscript(input.text));
   try {
     input.setStatus("Queueing input...");
     const result = await input.options.sendInput(
-      toPromptInput(input.text, input.draftAttachments, input.modelSelection),
+      toPromptInput(input.text, promptAttachments, input.modelSelection),
       {
         abortSignal: input.signal,
         delivery: "auto",
@@ -159,16 +163,16 @@ export async function submitDuringActiveTurn(input: {
       },
     );
     if (result.kind === "started_turn" || result.kind === "command_result") {
-      if (!compactCommand) {
+      if (!compactCommand && !silent) {
         input.setMessages((current) =>
           insertLocalUserMessageAt(current, localUserMessage, input.messageInsertIndex),
         );
       }
       input.applyResult(
-        compactCommand ? { ...result.result, response: "" } : result.result,
+        compactCommand || silent ? { ...result.result, response: "" } : result.result,
         result.kind === "command_result",
       );
-      return;
+      return result.result;
     }
     if (result.kind !== "queued") {
       input.setDraftValue(input.text);
@@ -189,12 +193,14 @@ export async function submitDuringActiveTurn(input: {
           : "Input queued."
         : `Input not queued: ${result.reason}.`,
     );
+    return undefined;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     input.setLastError(message);
     input.setDraftValue(input.text);
     input.setMessages((current) => appendSystemErrorMessage(current, message));
     input.setStatus(`Input not queued: ${message}.`);
+    return undefined;
   }
 }
 
@@ -218,14 +224,19 @@ export async function submitIdleTurn(input: {
   text: string;
   modelSelection?: ModelSelection;
   turnRef: React.MutableRefObject<AbortController | undefined>;
-}): Promise<void> {
-  const promptInput = toPromptInput(input.text, input.draftAttachments, input.modelSelection);
+}): Promise<TuiSubmitPromptResult | undefined> {
+  const preserveDraft = input.submitOptions?.preserveDraft === true;
+  const silent = input.submitOptions?.silent === true;
+  const promptAttachments = preserveDraft ? [] : input.draftAttachments;
+  const promptInput = toPromptInput(input.text, promptAttachments, input.modelSelection);
   const compactCommand =
-    input.draftAttachments.length === 0 ? compactCommandFromText(input.text) : undefined;
+    promptAttachments.length === 0 ? compactCommandFromText(input.text) : undefined;
   const abortController = new AbortController();
   input.turnRef.current = abortController;
-  input.setDraftValue("");
-  input.setDraftAttachments([]);
+  if (!preserveDraft) {
+    input.setDraftValue("");
+    input.setDraftAttachments([]);
+  }
   input.setBusy(true);
   input.setLastError(undefined);
   input.setStatus("Thinking...");
@@ -245,7 +256,7 @@ export async function submitIdleTurn(input: {
         }),
       ),
     );
-  } else {
+  } else if (!silent) {
     input.setMessages((current) => [
       ...current,
       { content: redactSensitivePromptForTranscript(input.text), role: "user" },
@@ -258,12 +269,13 @@ export async function submitIdleTurn(input: {
       onEvent: input.applySessionEvent,
       requestPermission: input.requestPermission,
     });
-    input.applyResult(compactCommand ? { ...result, response: "" } : result);
+    input.applyResult(compactCommand || silent ? { ...result, response: "" } : result);
+    return result;
   } catch (error) {
     if (abortController.signal.aborted) {
       input.setLastError(undefined);
       input.setStatus(input.submitOptions?.abortStatus ?? "Operation cancelled.");
-      return;
+      return undefined;
     }
     const message = error instanceof Error ? error.message : String(error);
     input.setLastError(message);
@@ -273,6 +285,7 @@ export async function submitIdleTurn(input: {
         ? failLatestStartedCompactTimeline(current, message)
         : appendSystemErrorMessage(current, message),
     );
+    return undefined;
   } finally {
     input.setBusy(false);
     if (input.turnRef.current === abortController) {

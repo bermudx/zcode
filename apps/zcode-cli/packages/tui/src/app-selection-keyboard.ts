@@ -70,10 +70,7 @@ export function visibleSelectionItemWindow(
   const clampedSelectedIndex = clampIndex(selectedIndex, items.length);
   const visibleCount = Math.min(maxVisible, items.length);
   const maxStartIndex = items.length - visibleCount;
-  const startIndex = Math.min(
-    Math.max(0, clampedSelectedIndex - visibleCount + 1),
-    maxStartIndex,
-  );
+  const startIndex = Math.min(Math.max(0, clampedSelectedIndex - visibleCount + 1), maxStartIndex);
 
   return {
     items: items.slice(startIndex, startIndex + visibleCount),
@@ -87,7 +84,7 @@ export function handleSelectionKey(
   selection: SelectionState,
   setSelection: React.Dispatch<React.SetStateAction<SelectionState | undefined>>,
   setStatus: (status: string) => void,
-  submitValue: (value: string, options?: SubmitValueOptions) => Promise<void>,
+  submitValue: (value: string, options?: SubmitValueOptions) => Promise<unknown>,
   cancelPendingSelection?: () => void,
 ): void {
   if (selection.pending) {
@@ -186,7 +183,7 @@ function handleSelectionInputKey(
   selection: SelectionState,
   setSelection: React.Dispatch<React.SetStateAction<SelectionState | undefined>>,
   setStatus: (status: string) => void,
-  submitValue: (value: string, options?: SubmitValueOptions) => Promise<void>,
+  submitValue: (value: string, options?: SubmitValueOptions) => Promise<unknown>,
 ): void {
   const input = selection.input;
   if (!input) return;
@@ -233,7 +230,7 @@ function submitSelectedItem(
   visible: TuiSelectionItem[],
   setSelection: React.Dispatch<React.SetStateAction<SelectionState | undefined>>,
   setStatus: (status: string) => void,
-  submitValue: (value: string, options?: SubmitValueOptions) => Promise<void>,
+  submitValue: (value: string, options?: SubmitValueOptions) => Promise<unknown>,
 ): void {
   const item = visible[clampIndex(selection.selectedIndex, visible.length)];
   if (!item) {

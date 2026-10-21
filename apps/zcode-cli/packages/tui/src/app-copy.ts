@@ -1,5 +1,6 @@
 import type { TuiWriteClipboardText } from "./types.js";
 import type { TuiCopy } from "@zcode/i18n";
+import React from "react";
 import {
   LAST_REPLY_COPIED_STATUS,
   LAST_REPLY_COPY_FAILED_STATUS,
@@ -77,15 +78,12 @@ export type LastReplyCopyOptions = {
 };
 
 /**
- * `Ctrl+X Y` 的复制目标与 AppView 渲染的"最近回复"一致：liveModelText 尚未落进
+ * `Ctrl+Y` 的复制目标与 AppView 渲染的"最近回复"一致：liveModelText 尚未落进
  * messages，按同样方式补一条尾部 agent 消息再取最后一条回复文本。
  */
 export function copyLastAssistantReply(input: LastReplyCopyOptions): void {
   const transcript = input.liveModelText
-    ? [
-        ...input.messages,
-        { content: input.liveModelText, role: "agent" as const, streaming: true },
-      ]
+    ? [...input.messages, { content: input.liveModelText, role: "agent" as const, streaming: true }]
     : input.messages;
   const text = lastAgentReplyText(transcript);
   if (!text) {
@@ -103,6 +101,51 @@ export function copyLastAssistantReply(input: LastReplyCopyOptions): void {
       input.setStatusDetails([error instanceof Error ? error.message : String(error)]);
     },
   );
+}
+
+export function useTuiCopyActions({
+  copy,
+  copySelection,
+  hasCopyableSelection,
+  liveModelText,
+  messages,
+  options,
+  setStatus,
+  setStatusDetails,
+}: {
+  copy: TuiCopy["copy"];
+  copySelection: () => Promise<SelectionCopyResult>;
+  hasCopyableSelection: () => boolean;
+  liveModelText: string;
+  messages: readonly Message[];
+  options: { writeClipboardText?: TuiWriteClipboardText };
+  setStatus: (status: string) => void;
+  setStatusDetails: (details: string[]) => void;
+}): {
+  copyCurrentSelection: () => boolean;
+  copyLastReply: () => void;
+} {
+  const copyCurrentSelection = React.useCallback((): boolean => {
+    if (!hasCopyableSelection()) return false;
+    void copySelection().then((result) => {
+      const copyStatus = selectionCopyStatus(result, copy);
+      if (copyStatus.status) setStatus(copyStatus.status);
+      if (copyStatus.details) setStatusDetails(copyStatus.details);
+    });
+    return true;
+  }, [copy, copySelection, hasCopyableSelection, setStatus, setStatusDetails]);
+  const copyLastReply = React.useCallback(() => {
+    copyLastAssistantReply({
+      liveModelText,
+      messages,
+      setStatus,
+      setStatusDetails,
+      unavailableStatus: copy.unavailable,
+      writeClipboardText: options.writeClipboardText,
+    });
+  }, [copy, liveModelText, messages, options.writeClipboardText, setStatus, setStatusDetails]);
+
+  return { copyCurrentSelection, copyLastReply };
 }
 
 export function selectionCopyStatus(

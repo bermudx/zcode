@@ -69,7 +69,7 @@ test("lastAgentReplyText joins text parts and excludes thought/tool parts", () =
   assert.equal(lastAgentReplyText([message]), "part one\n\npart two");
 });
 
-test("Ctrl-X Y copies the last assistant reply to the clipboard", async () => {
+test("Ctrl-Y copies the last assistant reply to the clipboard", async () => {
   const written: string[] = [];
   let view: Awaited<ReturnType<typeof testRender>> | undefined;
 
@@ -121,14 +121,7 @@ test("Ctrl-X Y copies the last assistant reply to the clipboard", async () => {
 
     await act(async () => {
       assert.ok(view);
-      view.mockInput.pressKey("x", { ctrl: true });
-      await flushKeyEvents();
-      await view.renderOnce();
-    });
-
-    await act(async () => {
-      assert.ok(view);
-      view.mockInput.pressKey("y");
+      view.mockInput.pressKey("y", { ctrl: true });
       await flushKeyEvents();
       await view.renderOnce();
     });
@@ -150,7 +143,7 @@ test("Ctrl-X Y copies the last assistant reply to the clipboard", async () => {
   }
 });
 
-test("Ctrl-X Y with no assistant reply does not touch the clipboard", async () => {
+test("Ctrl-Y with no assistant reply does not touch the clipboard", async () => {
   const written: string[] = [];
   let view: Awaited<ReturnType<typeof testRender>> | undefined;
 
@@ -187,14 +180,7 @@ test("Ctrl-X Y with no assistant reply does not touch the clipboard", async () =
   try {
     await act(async () => {
       assert.ok(view);
-      view.mockInput.pressKey("x", { ctrl: true });
-      await flushKeyEvents();
-      await view.renderOnce();
-    });
-
-    await act(async () => {
-      assert.ok(view);
-      view.mockInput.pressKey("y");
+      view.mockInput.pressKey("y", { ctrl: true });
       await flushKeyEvents();
       await view.renderOnce();
     });

@@ -17,8 +17,9 @@ import type {
   TuiPromptInput,
 } from "./types.js";
 
-const MODEL_COMMAND_NAME = "/model";
-const MODEL_COMMAND_WITH_SPACE = `${MODEL_COMMAND_NAME} `;
+export const MODEL_COMMAND_NAME = "/model";
+export const MODEL_COMMAND_DRAFT = `${MODEL_COMMAND_NAME} `;
+const MODEL_COMMAND_WITH_SPACE = MODEL_COMMAND_DRAFT;
 const EFFORT_COMMAND_NAMES = ["/effort", "/variant"] as const;
 
 export {

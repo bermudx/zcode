@@ -36,18 +36,21 @@ export function useSubmitValue(input: {
   setStatus: (status: string) => void;
   setStatusDetails: React.Dispatch<React.SetStateAction<string[]>>;
   turnRef: React.MutableRefObject<AbortController | undefined>;
-}): (submittedValue: string, options?: SubmitValueOptions) => Promise<void> {
+}): (
+  submittedValue: string,
+  options?: SubmitValueOptions,
+) => Promise<TuiSubmitPromptResult | undefined> {
   return React.useCallback(
     async (submittedValue: string, options: SubmitValueOptions = {}) => {
       const text = input.resolveSubmittedText(submittedValue).trim();
       const modelSelection = input.resolveSubmittedModel?.(submittedValue);
       if (!text) {
         input.setStatus(input.emptyPromptStatus);
-        return;
+        return undefined;
       }
 
       if (input.busy) {
-        await submitDuringActiveTurn({
+        return await submitDuringActiveTurn({
           activeTurnId: input.activeTurnId,
           applyResult: input.applyResult,
           applySessionEvent: input.applySessionEvent,
@@ -61,13 +64,13 @@ export function useSubmitValue(input: {
           setQueuedInputs: input.setQueuedInputs,
           setStatus: input.setStatus,
           signal: input.turnRef.current?.signal,
+          submitOptions: options,
           text,
           modelSelection,
         });
-        return;
       }
 
-      await submitIdleTurn({
+      return await submitIdleTurn({
         applyResult: input.applyResult,
         applySessionEvent: input.applySessionEvent,
         draftAttachments: input.draftAttachmentsRef.current,

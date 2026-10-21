@@ -27,12 +27,14 @@ Each active turn owns a root cancellation scope:
 TUI:
 
 - During normal input, `Esc` must not exit the TUI or mutate the draft input.
-  It only shows a local status hint that `Esc` pauses active output and
-  confirmed double `Ctrl-C` exits the fullscreen TUI.
+  The first `Esc` shows a local hint that pressing `Esc` again within 2 seconds
+  pauses active output; the second consecutive `Esc` performs the pause.
+  Confirmed double `Ctrl-C` exits the fullscreen TUI.
 - During approval or clarification prompts, `Esc` keeps its local meaning:
   deny the approval or cancel editing the `Other` answer.
-- During a busy turn with no focused approval prompt, `Esc` aborts the current
-  turn, treats that as pausing active output, and keeps the TUI open.
+- During a busy turn with no focused approval prompt, two consecutive `Esc`
+  presses within 2 seconds abort the current turn, treat that as pausing active
+  output, and keep the TUI open. A lone `Esc` only arms the confirmation.
 - `Ctrl-C` first belongs to the focused normal prompt input when that input has
   draft content. It clears the entire draft text and any draft attachments,
   resets the pending exit confirmation, keeps the TUI open, and does not abort
@@ -106,7 +108,8 @@ Required coverage:
 
 - TUI `Esc` during idle prompt input does not close the TUI and preserves the
   draft input.
-- TUI `Esc` pauses an active prompt without closing the TUI.
+- TUI `Esc` `Esc` within 2 seconds pauses an active prompt without closing the
+  TUI; a lone `Esc` only shows the pause hint.
 - TUI `Esc` during approval keeps denying the approval.
 - TUI `Ctrl-C` with a non-empty normal prompt draft clears the draft and draft
   attachments without closing or aborting active output.

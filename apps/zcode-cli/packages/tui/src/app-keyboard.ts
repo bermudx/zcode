@@ -1,24 +1,23 @@
 import type { KeyEvent } from "@mbears/opentui-core";
 import type { TuiWorkflowExpansionControls } from "./app-workflow-controller.js";
 import { useKeyboard } from "@mbears/opentui-react";
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { handleApprovalKey } from "./app-approval.js";
+import { handleComposerEditKey, handleComposerEscapeKey } from "./app-composer-keyboard.js";
 import { handleSelectionKey } from "./app-input.js";
 import {
-  CTRL_C_EXIT_PROMPT,
-  PROMPT_DRAFT_CLEARED_STATUS,
   completeEffortCommand,
   completeModeCommand,
   completeModelCommand,
   completeSlashCommand,
+  consumeKeyEvent as consumeKey,
   createCtrlCExitGuard,
+  createDoublePressGuard,
   type CtrlCExitGuard,
   isModeSwitchKey,
   resetCtrlCExitGuard,
-  resolveCtrlCExitIntent,
-  shouldClearPromptDraftOnCtrlC,
-  shouldExitOnCtrlD,
+  resetDoublePressGuard,
   shouldHandleInputHistoryNavigation,
   workflowExpansionActionFor,
 } from "./app-keyboard-helpers.js";
@@ -30,7 +29,6 @@ import type {
   ApprovalPrompt,
   DraftAttachment,
   EffortCommandSelectionState,
-  Message,
   ModeCommandSelectionState,
   ModelCommandSelectionState,
   SelectionState,
@@ -39,19 +37,32 @@ import type {
   SlashSelectionState,
 } from "./app-model.js";
 import type { SidebarSectionId } from "./app-sidebar-layout.js";
-import type { TuiEffortOption, TuiModeOption, TuiModelOption } from "./types.js";
-import { latestRetryableCompactCommand } from "./app-compact-timeline.js";
+import type {
+  TuiEffortOption,
+  TuiModeOption,
+  TuiModelOption,
+  TuiSubmitPromptResult,
+} from "./types.js";
 
 export {
   CTRL_C_EXIT_CONFIRMATION_WINDOW_MS,
+  ESCAPE_PAUSE_CONFIRMATION_WINDOW_MS,
+  ESCAPE_PAUSE_PROMPT,
+  NO_SELECTABLE_MODEL_STATUS,
+  ONLY_ONE_MODEL_STATUS,
   completeEffortCommand,
   completeModeCommand,
   completeModelCommand,
   completeSlashCommand,
   createCtrlCExitGuard,
+  createDoublePressGuard,
   isModeSwitchKey,
+  modelPickerIndex,
+  nextSelectableModelOption,
   resetCtrlCExitGuard,
+  resetDoublePressGuard,
   resolveCtrlCExitIntent,
+  resolveDoublePressIntent,
   shouldHandleInputHistoryNavigation,
 } from "./app-keyboard-helpers.js";
 
@@ -60,8 +71,8 @@ type UseTuiKeyboardControlsOptions = {
   abortControllerRef: MutableRefObject<AbortController | undefined>;
   approvalQueue: ApprovalPrompt[];
   busy: boolean;
-  copyCurrentSelection: () => boolean;
   copyLastAssistantReply: () => void;
+  currentModel: string;
   draftValue: string;
   workflowExpansion?: TuiWorkflowExpansionControls;
   filteredEffortOptions: readonly TuiEffortOption[];
@@ -71,7 +82,7 @@ type UseTuiKeyboardControlsOptions = {
   handleFileMentionKey: (key: KeyEvent) => boolean;
   hasDraftAttachments: () => boolean;
   inputHistoryActive: boolean;
-  messages: readonly Message[];
+  modelOptions: readonly TuiModelOption[];
   effortSelection: EffortCommandSelectionState | undefined;
   modelSelection: ModelCommandSelectionState | undefined;
   modeSelection: ModeCommandSelectionState | undefined;
@@ -90,7 +101,10 @@ type UseTuiKeyboardControlsOptions = {
   setSlashSelection: Dispatch<SetStateAction<SlashSelectionState | undefined>>;
   setStatus: Dispatch<SetStateAction<string>>;
   slashSelection: SlashSelectionState | undefined;
-  submitValue: (value: string, options?: SubmitValueOptions) => Promise<void>;
+  submitValue: (
+    value: string,
+    options?: SubmitValueOptions,
+  ) => Promise<TuiSubmitPromptResult | undefined>;
   switchMode: () => void;
   toggleSidebar: () => boolean;
   toggleSidebarSection: (section: SidebarSectionId) => boolean;
@@ -101,8 +115,8 @@ export function useTuiKeyboardControls({
   abortControllerRef,
   approvalQueue,
   busy,
-  copyCurrentSelection,
   copyLastAssistantReply,
+  currentModel,
   draftValue,
   workflowExpansion,
   filteredEffortOptions,
@@ -112,7 +126,7 @@ export function useTuiKeyboardControls({
   handleFileMentionKey,
   hasDraftAttachments,
   inputHistoryActive,
-  messages,
+  modelOptions,
   effortSelection,
   modelSelection,
   modeSelection,
@@ -137,19 +151,35 @@ export function useTuiKeyboardControls({
   toggleSidebarSection,
 }: UseTuiKeyboardControlsOptions): void {
   const ctrlCExitGuardRef = useRef<CtrlCExitGuard>(createCtrlCExitGuard());
+  const escapePauseGuardRef = useRef(createDoublePressGuard());
+  const modelPickerDraftRef = useRef<string | undefined>(undefined);
   const sidebarShortcutRef = useRef<SidebarShortcutState>(createSidebarShortcutState());
+
+  // 选择器由提交路径关闭时 modelSelection 变回 undefined，此时旧草稿不应再被恢复。
+  useEffect(() => {
+    if (!modelSelection) modelPickerDraftRef.current = undefined;
+  }, [modelSelection]);
+
+  const rememberModelPickerDraft = useCallback((draft: string) => {
+    modelPickerDraftRef.current = draft;
+  }, []);
+  const restoreModelPickerDraft = useCallback(() => {
+    const draft = modelPickerDraftRef.current;
+    modelPickerDraftRef.current = undefined;
+    return draft;
+  }, []);
 
   useKeyboard(
     useCallback(
       (key: KeyEvent) => {
         if (key.eventType === "release") return;
+        if (key.name !== "escape") resetDoublePressGuard(escapePauseGuardRef.current);
 
         if (readOnlyView) {
           resetCtrlCExitGuard(ctrlCExitGuardRef.current);
           if (
             handleSidebarShortcutKey({
               consumeKey,
-              copyLastAssistantReply,
               key,
               nowMs: Date.now(),
               setStatus,
@@ -162,9 +192,6 @@ export function useTuiKeyboardControls({
           if (key.name === "escape") {
             consumeKey(key);
             readOnlyView.back();
-          } else if ((key.name === "c" || key.name === "y") && key.ctrl) {
-            consumeKey(key);
-            copyCurrentSelection();
           } else if (
             !["up", "down", "left", "right", "pageup", "pagedown", "home", "end"].includes(key.name)
           ) {
@@ -193,7 +220,6 @@ export function useTuiKeyboardControls({
         if (
           handleSidebarShortcutKey({
             consumeKey,
-            copyLastAssistantReply,
             key,
             nowMs: Date.now(),
             setStatus,
@@ -206,63 +232,35 @@ export function useTuiKeyboardControls({
           return;
         }
 
-        if (key.name === "c" && key.ctrl) {
-          consumeKey(key);
-          if (copyCurrentSelection()) {
-            resetCtrlCExitGuard(ctrlCExitGuardRef.current);
-            return;
-          }
+        const composerInput = {
+          abortControllerRef,
+          busy,
+          copyLastAssistantReply,
+          ctrlCExitGuard: ctrlCExitGuardRef.current,
+          currentModel,
+          draftValue,
+          effortSelection,
+          escapePauseGuard: escapePauseGuardRef.current,
+          hasDraftAttachments,
+          key,
+          modelOptions,
+          modelSelection,
+          modeSelection,
+          onExit,
+          rememberModelPickerDraft,
+          restoreModelPickerDraft,
+          setDraftAttachments,
+          setDraftValue,
+          setEffortSelection,
+          setModelSelection,
+          setModeSelection,
+          setSlashSelection,
+          setStatus,
+          slashSelection,
+          submitValue,
+        };
 
-          if (shouldClearPromptDraftOnCtrlC(draftValue)) {
-            resetCtrlCExitGuard(ctrlCExitGuardRef.current);
-            setDraftValue("");
-            setDraftAttachments([]);
-            setStatus(PROMPT_DRAFT_CLEARED_STATUS);
-            return;
-          }
-
-          // A single Ctrl-C used to exit immediately, which made long sessions easy to lose.
-          if (resolveCtrlCExitIntent(ctrlCExitGuardRef.current, Date.now()) === "confirm_exit") {
-            abortControllerRef.current?.abort();
-            onExit(0);
-            return;
-          }
-
-          setStatus(CTRL_C_EXIT_PROMPT);
-          return;
-        }
-
-        resetCtrlCExitGuard(ctrlCExitGuardRef.current);
-
-        if (
-          key.name === "d" &&
-          key.ctrl &&
-          shouldExitOnCtrlD({ draftValue, hasAttachments: hasDraftAttachments() })
-        ) {
-          consumeKey(key);
-          abortControllerRef.current?.abort();
-          onExit(0);
-          return;
-        }
-
-        if (key.name === "y" && key.ctrl) {
-          consumeKey(key);
-          if (!copyCurrentSelection()) setStatus("No selected text to copy.");
-          return;
-        }
-
-        if (key.name === "r" && key.ctrl) {
-          const compactRetryCommand = latestRetryableCompactCommand(messages);
-          if (compactRetryCommand) {
-            consumeKey(key);
-            if (busy) {
-              setStatus("Agent is still responding.");
-              return;
-            }
-            void submitValue(compactRetryCommand, { preserveSelection: true });
-            return;
-          }
-        }
+        if (handleComposerEditKey(composerInput)) return;
 
         // Mode switching belongs to the composer, including while @ suggestions
         // are open; file completion must only receive the remaining Tab keys.
@@ -297,36 +295,7 @@ export function useTuiKeyboardControls({
           return;
         }
 
-        if (key.name === "escape") {
-          consumeKey(key);
-          if (modelSelection) {
-            setModelSelection(undefined);
-            setStatus("Model suggestions dismissed.");
-            return;
-          }
-          if (effortSelection) {
-            setEffortSelection(undefined);
-            setStatus("Effort suggestions dismissed.");
-            return;
-          }
-          if (modeSelection) {
-            setModeSelection(undefined);
-            setStatus("Mode suggestions dismissed.");
-            return;
-          }
-          if (slashSelection) {
-            setSlashSelection(undefined);
-            setStatus("Slash suggestions dismissed.");
-            return;
-          }
-          if (busy) {
-            abortControllerRef.current?.abort();
-            setStatus("Pausing current output...");
-            return;
-          }
-          setStatus("No active output to pause. Press Ctrl-C twice to exit.");
-          return;
-        }
+        if (handleComposerEscapeKey(composerInput)) return;
 
         if (
           handleSuggestionNavigationKey({
@@ -381,14 +350,6 @@ export function useTuiKeyboardControls({
           return;
         }
 
-        if (key.name === "u" && key.ctrl) {
-          consumeKey(key);
-          setDraftValue("");
-          setDraftAttachments([]);
-          setStatus(PROMPT_DRAFT_CLEARED_STATUS);
-          return;
-        }
-
         if ((key.name === "v" && (key.ctrl || key.meta)) || key.raw === "\x16") {
           consumeKey(key);
           void pasteClipboardImage();
@@ -400,8 +361,8 @@ export function useTuiKeyboardControls({
         approvalQueue,
         workflowExpansion,
         busy,
-        copyCurrentSelection,
         copyLastAssistantReply,
+        currentModel,
         draftValue,
         effortSelection,
         filteredEffortOptions,
@@ -411,7 +372,7 @@ export function useTuiKeyboardControls({
         handleFileMentionKey,
         hasDraftAttachments,
         inputHistoryActive,
-        messages,
+        modelOptions,
         modelSelection,
         modeSelection,
         onExit,
@@ -440,9 +401,4 @@ export function useTuiKeyboardControls({
   // 粘贴与键盘走两条通道：bracketed paste 是独立 paste 事件，须单独订阅，
   // 否则选择面板（composer 已被替换）打开时粘贴无人消费，长文本无法录入。
   useSelectionPaste({ approvalQueue, readOnlyView, selection, setSelection });
-}
-
-function consumeKey(key: KeyEvent): void {
-  key.preventDefault();
-  key.stopPropagation();
 }

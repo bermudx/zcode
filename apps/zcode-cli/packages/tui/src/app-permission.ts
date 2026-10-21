@@ -5,7 +5,7 @@ import {
   CREATE_WORKFLOW_TOOL_NAME,
   type PermissionBrokerResult,
 } from "@zcode/contracts";
-import type React from "react";
+import React from "react";
 import type { ApprovalPrompt } from "./app-model.js";
 import { createQuestionPromptState } from "./app-question-state.js";
 import type { TuiRequestPermission } from "./types.js";
@@ -26,6 +26,20 @@ function createWorkflowBypassResult(toolName: string): PermissionBrokerResult {
     reason: `${toolName} auto-allowed in CLI (confirmation gate bypass)`,
     resolvedAt: new Date(),
   };
+}
+
+export function useTuiPermissionRequester(input: {
+  setApprovalQueue: React.Dispatch<React.SetStateAction<ApprovalPrompt[]>>;
+  setStatus: (status: string) => void;
+}): TuiRequestPermission {
+  return React.useMemo(
+    () =>
+      createTuiPermissionRequester({
+        setApprovalQueue: input.setApprovalQueue,
+        setStatus: input.setStatus,
+      }),
+    [input.setApprovalQueue, input.setStatus],
+  );
 }
 
 export function createTuiPermissionRequester(input: {

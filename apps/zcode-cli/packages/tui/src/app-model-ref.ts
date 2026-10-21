@@ -35,3 +35,7 @@ export function modelDisplayParts(modelSelection: string): ModelDisplayParts {
 export function modelOptionValue(model: TuiModelOption): string {
   return `${model.ref.providerId}/${model.ref.modelId}`;
 }
+
+export function modelCommandText(model: TuiModelOption): string {
+  return `/model ${modelOptionValue(model)}`;
+}

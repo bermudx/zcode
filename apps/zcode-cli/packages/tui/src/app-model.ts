@@ -160,7 +160,9 @@ export type SelectionState = TuiSelection & {
 
 export type SubmitValueOptions = {
   abortStatus?: string;
+  preserveDraft?: boolean;
   preserveSelection?: boolean;
+  silent?: boolean;
 };
 
 export type SlashCommand = NonNullable<TuiOptions["slashCommands"]>[number];

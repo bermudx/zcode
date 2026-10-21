@@ -1,6 +1,5 @@
 const SIDEBAR_LEADER_TIMEOUT_MS = 2_000;
-export const SIDEBAR_LEADER_HINT =
-  "Press B for sidebar, M for files, A for APIs, Y to copy last reply.";
+export const SIDEBAR_LEADER_HINT = "Press B for sidebar, M for files, A for APIs.";
 export const SIDEBAR_HIDDEN_STATUS = "Sidebar hidden.";
 export const SIDEBAR_SHOWN_STATUS = "Sidebar shown.";
 export const SIDEBAR_APIS_COLLAPSED_STATUS = "APIs collapsed.";
@@ -20,13 +19,7 @@ export type SidebarShortcutState = {
   leaderArmedUntilMs?: number;
 };
 
-type SidebarShortcutIntent =
-  | "arm"
-  | "copy-last-reply"
-  | "pass"
-  | "toggle-apis"
-  | "toggle-files"
-  | "toggle";
+type SidebarShortcutIntent = "arm" | "pass" | "toggle-apis" | "toggle-files" | "toggle";
 
 export function createSidebarShortcutState(): SidebarShortcutState {
   return {};
@@ -38,8 +31,7 @@ export function resolveSidebarShortcut(
   nowMs: number,
   timeoutMs = SIDEBAR_LEADER_TIMEOUT_MS,
 ): SidebarShortcutIntent {
-  const leaderActive =
-    state.leaderArmedUntilMs !== undefined && nowMs <= state.leaderArmedUntilMs;
+  const leaderActive = state.leaderArmedUntilMs !== undefined && nowMs <= state.leaderArmedUntilMs;
 
   if (leaderActive && isSidebarToggleKey(key)) {
     state.leaderArmedUntilMs = undefined;
@@ -53,11 +45,6 @@ export function resolveSidebarShortcut(
     state.leaderArmedUntilMs = undefined;
     return "toggle-apis";
   }
-  if (leaderActive && isCopyLastReplyKey(key)) {
-    state.leaderArmedUntilMs = undefined;
-    return "copy-last-reply";
-  }
-
   if (isSidebarLeaderKey(key)) {
     state.leaderArmedUntilMs = nowMs + timeoutMs;
     return "arm";
@@ -83,15 +70,8 @@ function isApisToggleKey(key: SidebarShortcutKey): boolean {
   return isPlainLeaderFollowupKey(key, "a");
 }
 
-function isCopyLastReplyKey(key: SidebarShortcutKey): boolean {
-  return isPlainLeaderFollowupKey(key, "y");
-}
-
 function isPlainLeaderFollowupKey(key: SidebarShortcutKey, name: string): boolean {
   return (
-    key.name.toLowerCase() === name &&
-    key.ctrl !== true &&
-    key.meta !== true &&
-    key.option !== true
+    key.name.toLowerCase() === name && key.ctrl !== true && key.meta !== true && key.option !== true
   );
 }

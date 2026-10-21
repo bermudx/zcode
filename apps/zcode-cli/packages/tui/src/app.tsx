@@ -3,16 +3,12 @@ import { getZCodeCopy } from "@zcode/i18n";
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import { AppView } from "./app-view.js";
 import type { PromptInputEditor } from "./app-input-pane.js";
-import {
-  copyLastAssistantReply,
-  selectionCopyStatus,
-  type SelectionCopyResult,
-} from "./app-copy.js";
+import { useTuiCopyActions, type SelectionCopyResult } from "./app-copy.js";
 import { useClipboardImagePaste } from "./app-clipboard-image.js";
 import { useFileMentionController } from "./app-file-mentions.js";
 import { useTuiKeyboardControls } from "./app-keyboard.js";
 import { useTuiModeSwitcher } from "./app-mode.js";
-import { createTuiPermissionRequester } from "./app-permission.js";
+import { useTuiPermissionRequester } from "./app-permission.js";
 import { appendAgentResult } from "./app-submit.js";
 import { useSubmitValue } from "./app-submit-controller.js";
 import { filterSlashCommands, reconcileSlashSelection } from "./app-input.js";
@@ -225,10 +221,7 @@ export function TuiApp({
     workspaceDirectory: options.workspaceDirectory,
   });
 
-  const requestPermission = useMemo(
-    () => createTuiPermissionRequester({ setApprovalQueue, setStatus }),
-    [],
-  );
+  const requestPermission = useTuiPermissionRequester({ setApprovalQueue, setStatus });
 
   const resolveSubmittedText = useCallback(
     (submittedValue: string) => {
@@ -316,25 +309,16 @@ export function TuiApp({
     setStatus,
   });
 
-  const copyCurrentSelection = useCallback((): boolean => {
-    if (!hasCopyableSelection()) return false;
-    void copySelection().then((result) => {
-      const copyStatus = selectionCopyStatus(result, copy.tui.copy);
-      if (copyStatus.status) setStatus(copyStatus.status);
-      if (copyStatus.details) setStatusDetails(copyStatus.details);
-    });
-    return true;
-  }, [copy, copySelection, hasCopyableSelection]);
-  const copyLastReply = useCallback(() => {
-    copyLastAssistantReply({
-      liveModelText,
-      messages,
-      setStatus,
-      setStatusDetails,
-      unavailableStatus: copy.tui.copy.unavailable,
-      writeClipboardText: options.writeClipboardText,
-    });
-  }, [copy, liveModelText, messages, options.writeClipboardText]);
+  const { copyCurrentSelection, copyLastReply } = useTuiCopyActions({
+    copy: copy.tui.copy,
+    copySelection,
+    hasCopyableSelection,
+    liveModelText,
+    messages,
+    options,
+    setStatus,
+    setStatusDetails,
+  });
   const switchMode = useTuiModeSwitcher({
     mode,
     setMode,
@@ -347,8 +331,8 @@ export function TuiApp({
     abortControllerRef,
     approvalQueue,
     busy,
-    copyCurrentSelection,
     copyLastAssistantReply: copyLastReply,
+    currentModel: model,
     effortSelection: effortCommand.selection,
     filteredEffortOptions: effortCommand.filteredOptions,
     filteredSlashCommands,
@@ -362,7 +346,7 @@ export function TuiApp({
     recallPreviousInput,
     draftValue: draft,
     inputHistoryActive: inputHistoryDraftRef.current !== undefined,
-    messages,
+    modelOptions: modelCommand.modelOptions,
     modelSelection: modelCommand.selection,
     modeSelection: modeCommand.selection,
     selection,

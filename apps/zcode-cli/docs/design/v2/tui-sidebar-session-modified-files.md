@@ -50,8 +50,8 @@ independently so long-running sessions can reclaim vertical space.
 - `Ctrl+X B` toggles the whole sidebar.
 - `Ctrl+X M` toggles the `Modified Files` section.
 - `Ctrl+X A` toggles the `APIs` section.
-- `Ctrl+X Y` copies the last assistant reply text to the clipboard; it is a
-  leader follow-up, not a sidebar action.
+- `Ctrl+X Y` is not bound. The last assistant reply is copied with `Ctrl+Y`
+  (see `tui-selection-copy.md`).
 - Section expansion state is local TUI presentation state. It is not persisted
   and does not affect runtime, session, tool, ZCode app-server, storage, permission, or
   provider contracts.
@@ -70,5 +70,5 @@ independently so long-running sessions can reclaim vertical space.
 - Sidebar component tests cover expanded and collapsed modified-file/API
   rendering, count colors, empty state, and bounded `more` rows.
 - Sidebar component tests cover section header click handlers.
-- Shortcut tests cover `Ctrl+X M`, `Ctrl+X A`, and `Ctrl+X Y` in addition to
-  the existing sidebar toggle path.
+- Shortcut tests cover `Ctrl+X M` and `Ctrl+X A` in addition to the existing
+  sidebar toggle path; `Ctrl+X Y` falls through as an unrelated key.

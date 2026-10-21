@@ -13,6 +13,10 @@ users can insert intentional line breaks with `Shift+Enter`.
 - `Ctrl+C` clears the whole prompt draft when the input box has content. With an
   empty prompt draft it falls through to the protected double-press TUI exit
   flow defined in `turn-cancellation.md`.
+- `Ctrl+C` never copies a selection (`tui-selection-copy.md`).
+- `Ctrl+U` is not a TUI-level shortcut; it is left to the focused input editor
+  and the TUI never clears the whole draft on it.
+- `Ctrl+R` has no TUI-level shortcut.
 - Long draft text wraps by word inside the input area.
 - The input area defaults to two visible editor rows and grows up to six
   visible editor rows, then scrolls internally so the transcript and sidebar
@@ -60,3 +64,5 @@ once the draft exceeds six visible rows.
   output, leaving multiline editing keys to the textarea otherwise.
 - Keyboard tests assert `Ctrl+C` clears a non-empty draft without exiting, and
   keeps empty-input `Ctrl+C` on the double-press exit guard.
+- Keyboard tests assert `Ctrl+C` does not invoke selection copy and that
+  `Ctrl+U`/`Ctrl+R` have no TUI-level draft or retry behavior.

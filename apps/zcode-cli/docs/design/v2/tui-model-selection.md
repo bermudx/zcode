@@ -11,6 +11,12 @@ contract.
 
 - Typing `/model` or `/model ` in the composer opens a model popup above the
   input area.
+- `Ctrl+L` opens the same popup with the current model highlighted. It saves
+  the draft that was present before opening; `Esc` restores that draft.
+- `Ctrl+P` cycles to the next selectable model without opening the popup. It
+  skips disabled models, preserves the current composer draft, and reports the
+  switch through TUI status text instead of adding transcript rows. When fewer
+  than two selectable models exist, it reports that no cycle is possible.
 - Non-popup clients that submit `/model` show the current session model and
   configured selectable models as text.
 - `/model list` is the explicit list form.
@@ -99,6 +105,10 @@ model switches directly.
 - TUI model popup filters model options by id, alias, name, and command text.
 - TUI model popup supports Up/Down navigation, Enter submission through
   `/model <id>`, Tab completion into the draft, and Esc dismissal.
+- Keyboard tests assert `Ctrl+L` opens the popup at the current model and
+  restores the previous draft on `Esc`.
+- Keyboard tests assert `Ctrl+P` submits the next enabled model, skips disabled
+  models, preserves the draft, and does not emit a `/model` transcript row.
 - CLI TUI wiring passes the initial model and thought level into the first TUI
   render when they can be resolved.
 - TUI sidebar tests assert that `provider/model` renders as separate `Provider`

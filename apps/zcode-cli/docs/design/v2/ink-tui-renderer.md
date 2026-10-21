@@ -105,9 +105,11 @@ capability checks:
 - The startup screen owns Ctrl+C only while initialization is pending. Before
   mounting the ready app, unmount the startup tree and release its keyboard
   listener. After handoff, only the app handles the two-press exit sequence.
-- Escape never exits the fullscreen TUI. It pauses active output by cancelling
-  the active turn when one is running, keeps approval/selection local cancel
-  semantics, and is otherwise a no-op status hint.
+- Escape never exits the fullscreen TUI. With no approval, selection, or
+  suggestion popup focused, the first Escape arms a 2-second pause
+  confirmation and the second consecutive Escape cancels the active turn. It
+  keeps approval/selection local cancel semantics, and is otherwise a no-op
+  status hint.
 
 ## Failure Behavior
 
@@ -128,5 +130,6 @@ The TUI test suite should cover:
 - The module split preserving the public `runTui()` API.
 - Terminal cleanup restoring raw mode and pausing stdin.
 - Ctrl+C first-press confirmation and second-press exit behavior.
+- Escape first-press pause hint and second-press cancellation within 2 seconds.
 - Transcript layout caching, shared measurement/content calculation, and visible
   row rendering for long scrollback.

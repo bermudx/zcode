@@ -295,14 +295,12 @@ test("Ctrl-X leader toggles sidebar sections while unrelated keys clear the lead
   assert.equal(resolveSidebarShortcut(state, key("b"), 8_000), "pass");
 });
 
-test("Ctrl-X leader resolves Y to the last-reply copy intent", () => {
+test("Ctrl-X leader does not reserve Y for copying", () => {
   const state = createSidebarShortcutState();
 
   assert.equal(resolveSidebarShortcut(state, key("x", { ctrl: true }), 1_000), "arm");
-  assert.equal(resolveSidebarShortcut(state, key("y"), 1_500), "copy-last-reply");
-  assert.equal(resolveSidebarShortcut(state, key("y"), 1_600), "pass");
+  assert.equal(resolveSidebarShortcut(state, key("y"), 1_500), "pass");
 
-  // Ctrl+Y stays the selection-copy key, not a leader follow-up.
   assert.equal(resolveSidebarShortcut(state, key("x", { ctrl: true }), 2_000), "arm");
   assert.equal(resolveSidebarShortcut(state, key("y", { ctrl: true }), 2_100), "pass");
 });

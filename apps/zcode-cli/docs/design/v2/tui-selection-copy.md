@@ -9,14 +9,14 @@ selection ends.
 
 - Dragging across selectable TUI text and releasing the mouse copies the selected
   text to the clipboard.
-- `Ctrl+C` copies the current OpenTUI selection when one exists; otherwise it
-  starts the TUI exit confirmation. The user must press `Ctrl+C` again in the
-  confirmation window to exit.
-- `Ctrl+Y` copies the current OpenTUI selection without exiting.
-- `Ctrl+X Y` (the `Ctrl+X` leader, then `Y`) copies the text of the most recent
-  assistant reply — the last agent message's text parts, or `content` when the
-  message has no parts — without needing a selection. Thought and tool parts
-  are excluded. When no reply exists yet, a status hint is shown instead.
+- `Ctrl+C` never copies a selection. It keeps its draft-clearing and protected
+  double-press exit behavior from `tui-multiline-input.md`.
+- `Ctrl+Y` copies the text of the most recent assistant reply — the last agent
+  message's text parts, or `content` when the message has no parts — without
+  needing a selection. Thought and tool parts are excluded. When no reply exists
+  yet, a status hint is shown instead.
+- `Ctrl+X Y` is not a copy shortcut. `Ctrl+X` remains the sidebar leader for its
+  own follow-up keys.
 - Empty selections are ignored and cleared.
 - Clipboard failures surface as TUI status text instead of crashing the session.
 
@@ -40,5 +40,7 @@ native fallback covers terminals that do not accept OSC 52.
 
 - TUI unit tests cover exact selected text preservation, empty selection
   handling, unavailable writer behavior, and selection clearing.
+- Keyboard tests assert `Ctrl+C` does not copy, `Ctrl+Y` copies the last
+  assistant reply, and `Ctrl+X Y` does not copy.
 - CLI unit tests cover OSC 52 output and native command invocation without
   touching the real system clipboard.

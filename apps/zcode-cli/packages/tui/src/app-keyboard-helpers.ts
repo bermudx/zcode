@@ -1,6 +1,6 @@
 import type { KeyEvent } from "@mbears/opentui-core";
 import { clampIndex } from "./app-input.js";
-import { modelOptionValue } from "./app-model-ref.js";
+import { modelCommandText, modelOptionValue } from "./app-model-ref.js";
 import type {
   EffortCommandSelectionState,
   ModeCommandSelectionState,
@@ -30,7 +30,7 @@ export function completeModelCommand(
   if (!modelSelection || models.length === 0) return false;
   const model = models[clampIndex(modelSelection.selectedIndex, models.length)];
   if (!model) return false;
-  setDraftValue(`/model ${modelOptionValue(model)}`);
+  setDraftValue(modelCommandText(model));
   return true;
 }
 
@@ -99,10 +99,15 @@ export function workflowExpansionActionFor({
 
 export const PROMPT_DRAFT_CLEARED_STATUS = "Ready.";
 export const CTRL_C_EXIT_PROMPT = "Press Ctrl-C again to exit.";
+export const ESCAPE_PAUSE_PROMPT = "Press Esc again to pause output.";
+export const NO_ACTIVE_OUTPUT_STATUS = "No active output to pause. Press Ctrl-C twice to exit.";
+export const ONLY_ONE_MODEL_STATUS = "Only one model available.";
+export const NO_SELECTABLE_MODEL_STATUS = "No selectable models are available.";
 export const LAST_REPLY_COPIED_STATUS = "Copied last assistant reply.";
 export const LAST_REPLY_COPY_FAILED_STATUS = "Could not copy last assistant reply.";
 export const NO_ASSISTANT_REPLY_STATUS = "No assistant reply to copy.";
 export const CTRL_C_EXIT_CONFIRMATION_WINDOW_MS = 2_000;
+export const ESCAPE_PAUSE_CONFIRMATION_WINDOW_MS = 2_000;
 
 export function shouldClearPromptDraftOnCtrlC(draftValue: string): boolean {
   return draftValue.length > 0;
@@ -122,14 +127,47 @@ export function shouldExitOnCtrlD({
   return draftValue.length === 0 && !hasAttachments;
 }
 
-export type CtrlCExitGuard = {
+export function consumeKeyEvent(key: KeyEvent): void {
+  key.preventDefault();
+  key.stopPropagation();
+}
+
+export type DoublePressGuard = {
   lastPressAtMs: number | undefined;
 };
+
+type DoublePressIntent = "confirm" | "arm";
+
+export function createDoublePressGuard(): DoublePressGuard {
+  return { lastPressAtMs: undefined };
+}
+
+export function resolveDoublePressIntent(
+  guard: DoublePressGuard,
+  nowMs: number,
+  windowMs: number,
+): DoublePressIntent {
+  const lastPressAtMs = guard.lastPressAtMs;
+  const elapsedMs = lastPressAtMs === undefined ? undefined : nowMs - lastPressAtMs;
+  if (elapsedMs !== undefined && elapsedMs >= 0 && elapsedMs <= windowMs) {
+    guard.lastPressAtMs = undefined;
+    return "confirm";
+  }
+
+  guard.lastPressAtMs = nowMs;
+  return "arm";
+}
+
+export function resetDoublePressGuard(guard: DoublePressGuard): void {
+  guard.lastPressAtMs = undefined;
+}
+
+export type CtrlCExitGuard = DoublePressGuard;
 
 type CtrlCExitIntent = "confirm_exit" | "show_prompt";
 
 export function createCtrlCExitGuard(): CtrlCExitGuard {
-  return { lastPressAtMs: undefined };
+  return createDoublePressGuard();
 }
 
 export function resolveCtrlCExitIntent(
@@ -137,17 +175,30 @@ export function resolveCtrlCExitIntent(
   nowMs: number,
   windowMs = CTRL_C_EXIT_CONFIRMATION_WINDOW_MS,
 ): CtrlCExitIntent {
-  const lastPressAtMs = guard.lastPressAtMs;
-  const elapsedMs = lastPressAtMs === undefined ? undefined : nowMs - lastPressAtMs;
-  if (elapsedMs !== undefined && elapsedMs >= 0 && elapsedMs <= windowMs) {
-    guard.lastPressAtMs = undefined;
-    return "confirm_exit";
-  }
-
-  guard.lastPressAtMs = nowMs;
-  return "show_prompt";
+  return resolveDoublePressIntent(guard, nowMs, windowMs) === "confirm"
+    ? "confirm_exit"
+    : "show_prompt";
 }
 
 export function resetCtrlCExitGuard(guard: CtrlCExitGuard): void {
-  guard.lastPressAtMs = undefined;
+  resetDoublePressGuard(guard);
+}
+
+/** Selected row for `Ctrl+L`: highlight the current model, else start at the top. */
+export function modelPickerIndex(models: readonly TuiModelOption[], currentModel: string): number {
+  const index = models.findIndex((model) => modelOptionValue(model) === currentModel.trim());
+  return index < 0 ? 0 : index;
+}
+
+/** Next enabled model for `Ctrl+P`; `undefined` when there is nothing to cycle. */
+export function nextSelectableModelOption(
+  models: readonly TuiModelOption[],
+  currentModel: string,
+): TuiModelOption | undefined {
+  const selectable = models.filter((model) => !model.disabledReason);
+  if (selectable.length <= 1) return undefined;
+  const currentIndex = selectable.findIndex(
+    (model) => modelOptionValue(model) === currentModel.trim(),
+  );
+  return selectable[(currentIndex + 1) % selectable.length];
 }
