@@ -114,10 +114,12 @@ export class SessionInfoPanel implements Component, Focusable {
     const servers = Object.entries(this.mcpServers ?? {});
     if (servers.length > 0) {
       lines.push(sectionHeader(theme, `MCP servers (${servers.length})`));
-      for (const [name, status] of servers.slice(0, MAX_SECTION_ITEMS)) {
-        const glyph = status === "connected" ? theme.success("●") : theme.danger("●");
+      for (const [name, server] of servers.slice(0, MAX_SECTION_ITEMS)) {
+        const glyph = server.status === "connected" ? theme.success("●") : theme.danger("●");
+        const tools = server.toolCount > 0 ? theme.muted(` ${server.toolCount} tools`) : "";
+        const state = server.error ?? server.status;
         lines.push(
-          `    ${glyph} ${theme.text(truncate(name, inner - 24))} ${theme.muted(status)}`,
+          `    ${glyph} ${theme.text(truncate(name, inner - 30))} ${theme.muted(truncate(state, 20))}${tools}`,
         );
       }
     }
