@@ -181,3 +181,84 @@ herdr pane 1..N                    每 workspace 一个
   store），状态行如实显示 session indisponible。
 - Windows 下 socket 走 named pipe 分支已实现但未实测。
 - 断线横幅的完整 banner 设计未做（当前为状态行最小版）。
+
+## 交互语义收口（busy 队列 / 断线重连 / resume-latest）
+
+### busy 输入本地队列
+
+core 的 `session/send` 同一时间只接纳一个 prompt（并发时拒绝
+"A prompt is already running"）。与本地 CommandInbox 同语义的排队
+放在 **attach 客户端**（`AttachSessionHandle.sendInput`）：
+
+- `pendingTurns` 非空（有回合在跑）时，`sendInput` 把输入停进
+  本地 FIFO 队列，返回 `{kind:"queued", pendingInputId, queueLength,
+  turnId}`，并同步向 sinks 发本地合成 `turn_steer_queued` 事件，
+  让 TUI 队列区立即可见。
+- `expectedTurnId` 与当前活跃回合不一致时返回
+  `{kind:"rejected", reason:"expected_turn_mismatch"}`。
+- 回合 settle（`turn_complete`/`turn_error`）后 microtask 触发
+  `flushQueuedInputs`：先合成 `turn_steer_drained`（UI 摘除队列行），
+  再把该输入作为新回合 `session/send`；user 行由 core 正常的
+  `user_message`/`turn_started` 下发，不伪造 transcript。
+  一次只放一条——新回合重新占住 `pendingTurns`，余下条目等
+  下一轮 settle 接力；flush 失败合成 `session_notice` 错误行并
+  继续后续条目。
+
+### slash 命令路由
+
+`sendInput` 与 `submitPrompt` 一样先经 `commandCenter` 的 slash 路由。
+`/model`、`/effort`（Ctrl+P 轮换、Ctrl+L 选择器、忙时输入）在
+`sendInput` 内特判，走 `commandCenter` → `sessionSetModel` /
+`sessionSetThoughtLevel`，返回 `{kind:"command_result"}`；
+不会作为普通 prompt 发给模型。
+
+### core 死亡与重连恢复
+
+socket close → 状态行 "reconnecting" + transcript 内 `session_notice`
+横幅 → 指数退避重连（1s 起，封顶 30s）。每轮重连先重跑
+`ensureServer`：stale pid/socket 由原子 reclaim 清理并 detached
+respawn 新 core（同一确定性 socketPath）。连接恢复后逐会话
+`session/subscribe(afterSeq)` 补放缺口；core 重启丢 registry 时先经
+`session/resume` 冷物化再重试。composer 草稿本地保留，恢复后可继续
+输入。
+
+### 新 pane resume-latest
+
+attach 入口不再无条件 `session/create`：先 `session/list` 取该
+workspace 最近会话，存在则 `session/resume` 拿全量快照（含
+messages），并把 `restoredMessages` 作为 `initialResult` 交给
+`runTui` 首帧渲染历史 transcript；list 为空或 resume 失败时退回
+`session/create`，行为与之前一致。同一 workspace 多个 pane 会
+attach 到同一会话，事件经 core fan-out 同步。
+
+### 模型状态同步（mutation 快照 / state.updated）
+
+legacy `session/setModel`/`setThoughtLevel`/`setMode` 与订阅事件不同源：
+
+- mutation 回包是 `afterStateMutation` 返回的**快照本体**（无
+  `{snapshot}` 包装），且其 `available` 列表按 `modelAvailability:
+  "current"` 过滤成仅当前模型——它是回显投影，不是 provider
+  catalog 事实。客户端合并时（`mergeSettings`）：直返形状要认，
+  过滤形状（available 长度 1 且旧 catalog >1）保留旧 catalog，
+  只取 current；否则 Ctrl+P 依次退化为 "Model is not available" →
+  "Only one model available"。
+- mutation 后 core 只发 `state.updated` settings patch 通知、不发
+  raw `ModelSelected` 事件；attach 客户端合并 patch 后向 sinks 补发
+  合成 `model_selected`（current 变化时），其他 pane 的状态行才能
+  跟上远端切模。
+
+### core 自登记（.pid/.info 所有权）
+
+`.pid/.info` 由 **bind 成功的 server 进程**在 listen 后自写
+（`zcode-protocol-entrypoint`）。客户端侧 `ensureServer` 只负责
+锁/spawn/等就绪，不写登记：双 spawn 竞争下客户端写入会把先退出的
+进程登记成 owner（实测 `.pid` 指向死进程、真 listener 无登记），
+`probeSocket` 只能证明"有人在听"，证明不了"我的 child 在听"。
+失败路径同样不清理登记文件——所有权在 server，客户端删别人的
+登记才是破坏。
+
+### resume-latest 的"最近"定义
+
+`session/list` 返回顺序不保证（实测含任意序/创建序混排），
+"最近会话"必须按 `updatedAt`（退化 `createdAt`）显式取最大，
+`sessions.at(-1)` 会恢复到陈旧会话。

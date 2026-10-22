@@ -11,6 +11,7 @@ import {
   zcodeSessionStateSnapshotSchema,
 } from "@zcode/shared";
 import type { GlobalOptions, RunContext } from "@zcode/shared-types";
+import type { TuiSubmitPromptResult } from "@zcode/tui";
 import type { CliTuiFrontend, RunDependencies } from "../cli-types.js";
 import { createNodeClipboardImageReader } from "../clipboard-image.js";
 import { createNodeClipboardTextWriter } from "../clipboard-text.js";
@@ -21,7 +22,10 @@ import { resolveWorkspaceGitBranch } from "../tui-workspace-git.js";
 import { loadPiTuiRuntime } from "../tui-pi-runtime-loader.js";
 import { loadTuiRuntime } from "../tui-runtime-loader.js";
 import { DEFAULT_CLI_WORKFLOW_MODE } from "../workflow-mode.js";
-import { AttachSessionHandle } from "./attach-session.js";
+import {
+  AttachSessionHandle,
+  projectAttachTranscriptMessages,
+} from "./attach-session.js";
 import {
   AttachProtocolVersionError,
   AttachRuntime,
@@ -54,7 +58,15 @@ export const runAttachCommand = async (
       workspaceKey: resolveWorkspaceKey(workspace),
     };
     const { socketPath } = await ensureServer({ env, version, workspace });
-    const runtime = new AttachRuntime({ socketPath, workspace: workspaceRef });
+    const runtime = new AttachRuntime({
+      socketPath,
+      workspace: workspaceRef,
+      // core 死亡后的重连必须重跑 ensureServer：pid/socket 已 stale，原子
+      // reclaim 会 detached respawn 新 core 到同一确定性 socketPath。
+      ensureConnected: async () => ({
+        socketPath: (await ensureServer({ env, version, workspace })).socketPath,
+      }),
+    });
     const client = await runtime.connect();
     // 瘦客户端（zcode-attach）不带 config 适配器：locale 用轻量路径；
     // monolith 经 deps.resolveAttachStartupLocale 注入完整 createConfig 实现。
@@ -62,10 +74,45 @@ export const runAttachCommand = async (
       deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
       resolveLocale(options.locale, options.detectedLocale);
     try {
+      // 新 pane 默认恢复该 workspace 最近一次会话（与主 CLI -c/--resume 语义一致）；
+      // 无历史或冷恢复失败则退回 session/create。resume 返回值同 create：全量快照。
+      const latestSessionId = await client
+        .request(zcodeProtocolMethods.sessionList, { workspace: workspaceRef })
+        .then((listed) => {
+          // server 返回顺序不保证（实测按创建序/任意序混排）；"最近会话"
+          // 必须按 updatedAt（退化 createdAt）显式取最大，否则恢复到陈旧会话。
+          const sessions = (
+            listed as {
+              sessions?: Array<{
+                createdAt?: number;
+                sessionId?: string;
+                id?: string;
+                updatedAt?: number;
+              }>;
+            }
+          ).sessions;
+          const byRecency = [...(sessions ?? [])].sort(
+            (a, b) =>
+              (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0),
+          );
+          const last = byRecency[0];
+          return last?.sessionId ?? last?.id;
+        })
+        .catch(() => undefined);
+      const resumedSnapshot = latestSessionId
+        ? await client
+            .request(zcodeProtocolMethods.sessionResume, {
+              sessionId: latestSessionId,
+              workspace: workspaceRef,
+            })
+            .catch(() => undefined)
+        : undefined;
       // 握手：session/create 直接返回协议快照；版本断言先于任何会话状态依赖。
-      const created = (await client.request(zcodeProtocolMethods.sessionCreate, {
-        workspace: workspaceRef,
-      })) as unknown;
+      const created =
+        resumedSnapshot ??
+        ((await client.request(zcodeProtocolMethods.sessionCreate, {
+          workspace: workspaceRef,
+        })) as unknown);
       // 版本断言先于全量 schema 校验：snapshot.protocol.version 是 z.literal 断言位，
       // 直接 parse 会把版本漂移报成模糊 ZodError，先单独读出再给可操作错误。
       const advertisedVersion = (
@@ -102,6 +149,24 @@ export const runAttachCommand = async (
         developerMode,
         getMainSessionId: promptHandler.getMainSessionId,
         initialMode: handle.getMode(),
+        // resume-latest：快照自带 messages，按 loadSessionTranscript 的映射
+        // 产出 restoredMessages 让 transcript 首帧即历史。
+        ...(resumedSnapshot
+          ? {
+              initialResult: {
+                locale: startupLocale,
+                mode: handle.getMode(),
+                model: handle.getModel(),
+                response: "",
+                restoredMessages: projectAttachTranscriptMessages(
+                  snapshot.messages,
+                ),
+                sessionId: snapshot.session.sessionId,
+                thoughtLevel: handle.getThoughtLevel(),
+                traceId: snapshot.session.traceId,
+              } satisfies TuiSubmitPromptResult,
+            }
+          : {}),
         listMcpServers: async () => ({}),
         listModelOptions: promptHandler.listModelOptions,
         ...(deps.createAttachPathSuggestions

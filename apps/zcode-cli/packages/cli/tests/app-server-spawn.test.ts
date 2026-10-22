@@ -44,16 +44,29 @@ async function ensureTestServer(
   return result;
 }
 
-/** 假 server：按 --socket 参数 bind 一个 unix socket 并保持进程存活。 */
+/** 假 server：按 --socket 参数 bind 一个 unix socket 并自登记 .pid/.info（与真 server
+ *  的 listen 后自登记合同一致：bind 成功者才是 owner），随后保持进程存活。 */
 async function writeFakeServerScript(directory: string): Promise<string> {
   const scriptPath = join(directory, "fake-app-server.mjs");
   await writeFile(
     scriptPath,
     `import { createServer } from "node:net";
+import { writeFile } from "node:fs/promises";
 const socketIndex = process.argv.indexOf("--socket");
 const socketPath = process.argv[socketIndex + 1];
+const identityIndex = process.argv.indexOf("--cwd");
+const identity = identityIndex >= 0 ? process.argv[identityIndex + 1] : process.env.ZCODE_WORKSPACE_IDENTITY;
+const versionIndex = process.argv.indexOf("--version");
+const version = versionIndex >= 0 ? process.argv[versionIndex + 1] : "9.9.9-test";
 const server = createServer((socket) => socket.end());
-server.listen(socketPath);
+server.listen(socketPath, async () => {
+  await writeFile(socketPath + ".pid", process.pid + "\\n", "utf8");
+  await writeFile(socketPath + ".info", JSON.stringify({
+    version: version || "9.9.9-test",
+    workspaceIdentity: identity || "/workspace/demo",
+    startedAt: new Date().toISOString(),
+  }), "utf8");
+});
 process.on("SIGTERM", () => process.exit(0));
 process.on("SIGINT", () => process.exit(0));
 `,

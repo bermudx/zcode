@@ -7,7 +7,10 @@ import { test } from "node:test";
 import { ZCODE_PROTOCOL_VERSION } from "@zcode/shared";
 import { connectAttachClient } from "../src/attach/attach-client.js";
 import { AttachSessionHandle } from "../src/attach/attach-session.js";
-import { AttachRuntime } from "../src/attach/attach-tui-options.js";
+import {
+  AttachRuntime,
+  createAttachPromptHandler,
+} from "../src/attach/attach-tui-options.js";
 
 const SID = "sess-1";
 
@@ -354,6 +357,199 @@ test("协议版本不匹配 → 退出码 2 与可操作错误", async () => {
     assert.match(stderrChunks.join(""), /Shared core protocol v999/);
   } finally {
     await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 session/send", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let finishFirstTurn: (() => void) | undefined;
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      const inputId = request.params.inputId as string;
+      const content = request.params.content as string;
+      const turnId = `turn-${content}`;
+      queueMicrotask(() => {
+        notify(
+          rawEvent({
+            inputId,
+            payload: { inputId, input: content, turnNumber: 1 },
+            seq: 1,
+            turnId,
+            type: "turn_started",
+          }),
+        );
+        if (content !== "first") {
+          notify(
+            rawEvent({
+              payload: { response: `r-${content}`, resultType: "completed" },
+              seq: 3,
+              turnId,
+              type: "turn_complete",
+            }),
+          );
+        }
+      });
+      if (content === "first") {
+        finishFirstTurn = () =>
+          notify(
+            rawEvent({
+              payload: { response: "r1", resultType: "completed" },
+              seq: 2,
+              turnId,
+              type: "turn_complete",
+            }),
+          );
+      }
+      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  const received: Array<{ type: string }> = [];
+  handle.addSink((event) => received.push(event as { type: string }));
+  try {
+    await handle.subscribe();
+    const first = handle.submitPrompt("first");
+    // 等 turn_started 到达，pendingTurns 非空。
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const queued = await handle.sendInput("second");
+    assert.equal(queued.kind, "queued");
+    if (queued.kind === "queued") assert.equal(queued.queueLength, 1);
+    assert.ok(received.some((event) => event.type === "turn_steer_queued"));
+    // 忙期间没有第二条 session/send——core 只收单并发 prompt。
+    assert.equal(
+      core.requests.filter((r) => r.method === "session/send").length,
+      1,
+    );
+    finishFirstTurn!();
+    await first;
+    // drain = microtask + 一次 session/send 往返。
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const sends = core.requests.filter((r) => r.method === "session/send");
+    assert.equal(sends.length, 2);
+    assert.equal(sends[1]?.params.content, "second");
+    assert.ok(received.some((event) => event.type === "turn_steer_drained"));
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("sendInput '/model …' 经 commandCenter → session/setModel，不发 session/send", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/setModel") {
+      // 真实 server 的 afterStateMutation 直接返回快照本体（无 {snapshot} 包装）；
+      // fake 若只回包装形状，会掩盖 applyMutationSnapshot 漏更新的回归。
+      return makeSnapshot();
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const snapshot = makeSnapshot() as {
+    settings: { model: { available: unknown[] } };
+  } & ReturnType<typeof makeSnapshot>;
+  snapshot.settings.model.available = [
+    {
+      label: "glm-4.6",
+      reasoning: { defaultLevel: "max", levels: [{ value: "max" }] },
+      ref: { modelId: "glm-4.6", providerId: "zai" },
+    },
+  ];
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: snapshot as never,
+  });
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = await handler.sendInput!("/model zai/glm-4.6", {});
+    assert.equal(result.kind, "command_result");
+    // 直返快照形状下 getModel() 必须读到新模型，否则 Ctrl+P 轮换会在原地打转。
+    assert.match(
+      String((result.result as { model?: string }).model ?? ""),
+      /glm-4\.6/,
+    );
+    assert.ok(
+      core.requests.some((r) => r.method === "session/setModel"),
+      "expected session/setModel request",
+    );
+    assert.ok(
+      !core.requests.some((r) => r.method === "session/send"),
+      "slash command must not reach session/send",
+    );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("applyStatePatch 合并 state/updated settings 并补发 ModelSelected", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  try {
+    const handle = new AttachSessionHandle({
+      client: () => {
+        throw new Error("no client needed");
+      },
+      sessionId: SID,
+      snapshot: makeSnapshot() as never,
+    });
+    const events: unknown[] = [];
+    handle.addSink((event) => events.push(event));
+    // 初始 catalog 两项；setModel 只发 settings patch、不发 raw 事件。
+    const initial = makeSnapshot() as {
+      settings: { model: { available: unknown[]; current: unknown } };
+    } & ReturnType<typeof makeSnapshot>;
+    initial.settings.model.available = [
+      { modelId: "glm-4.6", providerId: "zai" },
+      { modelId: "glm-4.7", providerId: "zai" },
+    ];
+    (handle as unknown as { snapshot: unknown }).snapshot = initial;
+    handle.applyStatePatch({
+      // modelAvailability:"current" 过滤投影：available 只剩当前模型，不得覆盖 catalog。
+      model: {
+        available: [{ modelId: "glm-4.7", providerId: "zai" }],
+        current: { modelId: "glm-4.7", providerId: "zai" },
+      },
+    });
+    assert.match(String(handle.getModel() ?? ""), /glm-4\.7/);
+    const settings = (handle as unknown as { snapshot: { settings: { model: { available: unknown[] } } } })
+      .snapshot.settings;
+    assert.equal(settings.model.available.length, 2, "filtered available must not clobber catalog");
+    assert.equal(
+      events.filter((e) => (e as { type?: string }).type === "model_selected").length,
+      1,
+      "expected one ModelSelected sink event",
+    );
+    // 相同 current 再 patch：幂等，不再补发。
+    handle.applyStatePatch({
+      model: {
+        available: [{ modelId: "glm-4.6", providerId: "zai" }],
+        current: { modelId: "glm-4.7", providerId: "zai" },
+      },
+    });
+    assert.equal(
+      events.filter((e) => (e as { type?: string }).type === "model_selected").length,
+      1,
+    );
+  } finally {
     await rm(dir, { force: true, recursive: true });
   }
 });

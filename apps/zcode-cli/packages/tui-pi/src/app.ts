@@ -359,7 +359,8 @@ export class PiTuiApp {
     }
     store.set("traceId", result.traceId);
     store.set("liveModelText", "");
-    if (result.turnId) store.set("activeTurnId", result.turnId as TurnId);
+    // settle 回合不得回写 activeTurnId：socket 事件先清零，无条件回写会把已完成回合复活成 busy。
+    if (result.turnId && store.state.activeTurnId === result.turnId) store.set("activeTurnId", undefined);
     if (result.usage) store.set("usage", result.usage);
     if (result.projection) {
       store.setter("contextUsage")((current) => ({

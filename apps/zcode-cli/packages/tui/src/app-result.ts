@@ -23,7 +23,7 @@ type TuiApplyResultInput = {
     model: string;
   };
   modifiedFileToolCallIds: Set<string>;
-  setActiveTurnId: (turnId: TurnId | undefined) => void;
+  setActiveTurnId: React.Dispatch<React.SetStateAction<TurnId | undefined>>;
   setCacheStats: React.Dispatch<React.SetStateAction<CacheStats | undefined>>;
   setContextUsage: React.Dispatch<React.SetStateAction<ContextUsage>>;
   setEffortOptions: React.Dispatch<React.SetStateAction<NonNullable<TuiOptions["effortOptions"]>>>;
@@ -68,7 +68,13 @@ export function useTuiApplyResult(input: TuiApplyResultInput) {
       input.setTraceId(result.traceId);
       input.setLiveModelText("");
 
-      if (result.turnId) input.setActiveTurnId(result.turnId as TurnId);
+      // 同上（tui-pi applyResult）：result.turnId 是已 settle 回合，
+      // 不回写成 activeTurnId；仅当它仍被标记为活跃时清掉。
+      if (result.turnId) {
+        input.setActiveTurnId((current) =>
+          current === result.turnId ? undefined : current,
+        );
+      }
       if (result.usage) input.setUsage(result.usage);
       if (result.projection) {
         input.setContextUsage((current) => ({

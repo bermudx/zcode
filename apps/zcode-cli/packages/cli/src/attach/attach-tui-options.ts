@@ -15,7 +15,7 @@ import type {
 import { connectAttachClient, AttachProtocolError, type AttachClient } from "./attach-client.js";
 import { AttachSessionHandle, asCommandCenterApp } from "./attach-session.js";
 import type { CommandCenterApp, CommandCenterDeps } from "../command-center.js";
-import { createCommandCenter } from "../command-center.js";
+import { createCommandCenter, parseSlashCommand } from "../command-center.js";
 import type { TuiPromptHandler } from "../tui-command-state.js";
 
 const RECONNECT_BACKOFF_START_MS = 1000;
@@ -118,6 +118,16 @@ export class AttachRuntime {
   }
 
   private routeNotification(method: string, params: unknown): void {
+    if (method === "state.updated") {
+      // legacy mutation（session/setModel 等）只走 state.updated settings patch，不发 raw 事件；
+      // 不合并会让已挂 TUI 的状态行停在旧模型（Ctrl+P 后看似切模失败）。
+      const notification = params as { sessionId?: string; patch?: unknown };
+      const handle = notification.sessionId
+        ? this.sessions.get(String(notification.sessionId))
+        : this.current;
+      handle?.applyStatePatch(notification.patch);
+      return;
+    }
     if (method !== zcodeProtocolNotifications.sessionRawEvent) return;
     const raw = params as ZCodeSessionRawEvent;
     this.sessions.get(String(raw.sessionId))?.ingestRawEvent(raw);
@@ -356,8 +366,27 @@ export function createAttachPromptHandler(
   submitPrompt.readSubagentTranscript = (childSessionId) =>
     current.readSubagentTranscript(childSessionId);
   submitPrompt.recallPreviousInput = (skip) => current.recallPreviousInputHistory(skip);
-  submitPrompt.sendInput = async (input: TuiPromptInput, sendOptions) =>
-    current.sendInput(input, sendOptions as never);
+  submitPrompt.sendInput = async (input: TuiPromptInput, sendOptions) => {
+    // /model /effort 是客户端侧命令（Ctrl+P 轮换、Ctrl+L 选择器都走 sendInput），
+    // 必须经 commandCenter → handle.setModel/setThoughtLevel；直接 session/send
+    // 会把命令文本当 prompt 发给模型（曾导致"轮换"只是模型聊了一句命令名）。
+    const command = parseSlashCommand(
+      typeof input === "string" ? input : input.text,
+    );
+    if (
+      command?.type === "known" &&
+      (command.name === "model" || command.name === "effort")
+    ) {
+      return {
+        kind: "command_result",
+        result: await submitPrompt(input, {
+          ...sendOptions,
+          abortSignal: sendOptions?.abortSignal ?? new AbortController().signal,
+        }),
+      };
+    }
+    return current.sendInput(input, sendOptions as never);
+  };
   submitPrompt.setMode = async (mode) => {
     const result = await current.setMode(mode as string);
     return { mode: result.mode as never };

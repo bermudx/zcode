@@ -75,6 +75,12 @@ export async function runPiTui(options: TuiOptions): Promise<number> {
 
   tui.start();
 
+  // React 前端在 constructor 消费 options.initialResult（attach resume-latest
+  // 的恢复 transcript）；pi 侧等效：tui.start() 后立刻 applyResult。
+  if (options.initialResult) {
+    app.applyResult(options.initialResult);
+  }
+
   // Startup metadata paints after the first frame, same contract as the
   // React frontend: composer visible immediately, options hydrate after.
   if (options.loadStartupOptions) {

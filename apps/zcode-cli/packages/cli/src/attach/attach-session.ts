@@ -1,7 +1,7 @@
 // attach 模式下的协议态会话句柄：实现 CommandCenterApp 的可选面，
 // 业务状态全部留在共享 core；本文件只做 topic 映射与快照缓存。
 // raw SessionEvent 的 timestamp 在线上为 ISO 串，由 runtime  revive 成 Date。
-import type { SessionEvent } from "@zcode/contracts";
+import { SessionEventType, type SessionEvent } from "@zcode/contracts";
 import {
   zcodeProtocolMethods,
   zcodeSessionSubscribeResultSchema,
@@ -15,6 +15,7 @@ import {
 } from "@zcode/shared";
 import type {
   TuiPromptInput,
+  TuiRestoredTranscriptPart,
   TuiSendInputResult,
   TuiSubmitPromptResult,
   TuiSubagentTranscriptSnapshot,
@@ -28,6 +29,77 @@ const TURN_END_TYPES = new Set(["turn_complete", "turn_error"]);
 
 const PROMPT_INPUT_ID_PREFIX = "attach-input";
 
+/** 与本地 formatLegacyRuntimeModelValue 同形：providerId/modelId。
+ * 状态行按 "/" 取尾段显示；Ctrl+P 轮换、/model 参数匹配都依赖完整 ref。 */
+function formatModelRef(
+  current: { providerId?: string; modelId?: string } | undefined,
+): string | undefined {
+  if (!current?.providerId || !current.modelId) return current?.modelId;
+  return `${current.providerId}/${current.modelId}`;
+}
+
+/** wire part（zcodeMessagePartSchema）→ TuiRestoredTranscriptPart。
+ * 与 bootstrap projectSessionTranscript 同语义；瘦客户端不引 bootstrap barrel。 */
+function projectWirePart(part: unknown): TuiRestoredTranscriptPart | undefined {
+  const record = part as Record<string, unknown> | undefined;
+  if (record?.type === "text" && typeof record.text === "string") {
+    return record.ignored === true ? undefined : { text: record.text, type: "text" };
+  }
+  if (record?.type === "reasoning" && typeof record.text === "string") {
+    return { text: record.text, type: "thought" };
+  }
+  if (record?.type === "tool" && typeof record.tool === "string") {
+    const state = (record.state ?? {}) as Record<string, unknown>;
+    const base = {
+      input: (state.input ?? {}) as Record<string, unknown>,
+      ...(typeof state.title === "string" ? { title: state.title } : {}),
+      toolCallId:
+        (typeof record.callId === "string" && record.callId) ||
+        (typeof record.callID === "string" ? record.callID : ""),
+      toolName: record.tool,
+      type: "tool" as const,
+    };
+    if (state.status === "completed") {
+      return {
+        ...base,
+        ...(typeof state.output === "string" ? { output: state.output } : {}),
+        status: "completed",
+      };
+    }
+    if (state.status === "error") {
+      return {
+        ...base,
+        ...(typeof state.error === "string" ? { error: state.error } : {}),
+        status: "failed",
+      };
+    }
+    return { ...base, status: "running" };
+  }
+  return undefined;
+}
+
+/** 快照/存储里的 wire messages → TuiSubmitPromptResult.restoredMessages。 */
+export function projectAttachTranscriptMessages(
+  messages: ReadonlyArray<{
+    info?: { messageId?: string; role?: string };
+    parts?: unknown[];
+  }>,
+): NonNullable<TuiSubmitPromptResult["restoredMessages"]> {
+  return messages.map((message) => {
+    const parts = (message.parts ?? [])
+      .map(projectWirePart)
+      .filter((part): part is TuiRestoredTranscriptPart => part !== undefined);
+    return {
+      content: "",
+      ...(message.info?.messageId ? { id: message.info.messageId } : {}),
+      ...(parts.length > 0 ? { parts } : {}),
+      role: (message.info?.role === "user" ? "user" : "agent") as
+        | "user"
+        | "agent",
+    };
+  });
+}
+
 export type AttachSessionEvent = SessionEvent;
 
 type PendingTurn = {
@@ -35,6 +107,24 @@ type PendingTurn = {
   resolve: (result: TuiSubmitPromptResult) => void;
   reject: (error: Error) => void;
   turnId?: string;
+};
+
+type SendInputOptions = {
+  abortSignal?: AbortSignal;
+  delivery?: string;
+  expectedTurnId?: TurnId;
+  onEvent?: (event: SessionEvent) => void | Promise<void>;
+  requestPermission?: (
+    request: unknown,
+    requestOptions?: unknown,
+  ) => Promise<unknown>;
+};
+
+type QueuedLocalInput = {
+  input: TuiPromptInput;
+  options?: SendInputOptions;
+  pendingInputId: string;
+  targetTurnId?: string;
 };
 
 /**
@@ -55,6 +145,12 @@ export class AttachSessionHandle {
   private lastSeq = 0;
   private inputCounter = 0;
   private locale: TuiSubmitPromptResult["locale"];
+  /** core 的 session/send 忙时直接拒绝；busy 输入停本地队列，settle 后自动 flush。 */
+  private readonly queuedInputs: QueuedLocalInput[] = [];
+  private queueCounter = 0;
+  private localEventCounter = 0;
+  private lastActiveTurnId: string | undefined;
+  private flushingQueue = false;
   /** 当前等待中的 permission 回调；同一连接一次交互只挂一个。 */
   activeRequestPermission:
     | ((request: unknown, options?: unknown) => Promise<unknown>)
@@ -116,6 +212,7 @@ export class AttachSessionHandle {
   private routeTurnEvent(event: SessionEvent): void {
     const payload = (event.payload ?? {}) as Record<string, unknown>;
     if (event.type === TURN_STARTED) {
+      this.lastActiveTurnId = String(event.turnId);
       const inputId = typeof payload.inputId === "string" ? payload.inputId : undefined;
       const pending = inputId ? this.pendingTurns.get(inputId) : undefined;
       if (pending) {
@@ -137,9 +234,25 @@ export class AttachSessionHandle {
       pending.reject(
         new Error(errorPayload?.message ?? "Turn failed on the shared core"),
       );
+      this.scheduleQueuedFlush();
       return;
     }
     pending.resolve(this.buildTurnResult(event, pending));
+    this.scheduleQueuedFlush();
+  }
+
+  /** 本地合成的投影事件（queued/drained/notice）：只走 sinks，不进 routeTurnEvent。 */
+  private emitSinkEvent(type: string, payload: Record<string, unknown>): void {
+    const event = {
+      id: `attach-local-${++this.localEventCounter}`,
+      payload,
+      sequenceNumber: 0,
+      sessionId: this.sessionId,
+      timestamp: new Date(),
+      traceId: this.traceId,
+      type,
+    } as unknown as SessionEvent;
+    for (const sink of this.sinks) sink(event);
   }
 
   private findPendingByInputId(inputId: unknown): PendingTurn | undefined {
@@ -156,7 +269,7 @@ export class AttachSessionHandle {
     return {
       locale: this.locale,
       mode: settings.mode.current as TuiSubmitPromptResult["mode"],
-      model: settings.model.current?.modelId,
+      model: formatModelRef(settings.model.current),
       response: typeof payload.response === "string" ? payload.response : "",
       sessionId: this.sessionId,
       thoughtLevel: settings.thoughtLevel.current,
@@ -227,20 +340,89 @@ export class AttachSessionHandle {
     }
   }
 
-  /** CommandCenterApp.sendInput：steer/queue 经同一 session/send 入口，core admission 裁决。 */
+  /**
+   * CommandCenterApp.sendInput：忙时本地排队（core 的 session/send 只收一个并发
+   * prompt，排队语义在客户端），settle 后 flushQueuedInputs 逐条重放为新回合。
+   */
   async sendInput(
     input: TuiPromptInput,
-    options?: {
-      abortSignal?: AbortSignal;
-      onEvent?: (event: SessionEvent) => void | Promise<void>;
-      requestPermission?: (
-        request: unknown,
-        requestOptions?: unknown,
-      ) => Promise<unknown>;
-    },
+    options?: SendInputOptions,
   ): Promise<TuiSendInputResult> {
+    if (this.pendingTurns.size > 0) {
+      const activeTurnId =
+        this.lastActiveTurnId ??
+        (options?.expectedTurnId ? String(options.expectedTurnId) : undefined);
+      const expected = options?.expectedTurnId
+        ? String(options.expectedTurnId)
+        : undefined;
+      if (expected && activeTurnId && expected !== activeTurnId) {
+        return {
+          activeTurnId: activeTurnId as TurnId,
+          kind: "rejected",
+          reason: "expected_turn_mismatch",
+        };
+      }
+      const text = typeof input === "string" ? input : input.text;
+      const pendingInputId = `${PROMPT_INPUT_ID_PREFIX}-queued-${++this.queueCounter}`;
+      this.queuedInputs.push({
+        input,
+        options,
+        pendingInputId,
+        targetTurnId: activeTurnId,
+      });
+      // 投影 queued 行立即进 UI 队列区（applyTurnSteerQueuedEvent 只读
+      // pendingInputId/inputPreview，其余字段为对齐协议事件形状）。
+      this.emitSinkEvent("turn_steer_queued", {
+        delivery: "queue",
+        input: text,
+        inputPreview: text,
+        inputSize: text.length,
+        pendingInputId,
+        queueLength: this.queuedInputs.length,
+        ...(activeTurnId ? { targetTurnId: activeTurnId } : {}),
+      });
+      return {
+        kind: "queued",
+        pendingInputId,
+        queueLength: this.queuedInputs.length,
+        turnId: (activeTurnId ?? "") as TurnId,
+      };
+    }
     const result = await this.submitPrompt(input, options);
     return { kind: "started_turn", result };
+  }
+
+  private scheduleQueuedFlush(): void {
+    if (this.flushingQueue || this.queuedInputs.length === 0) return;
+    queueMicrotask(() => {
+      void this.flushQueuedInputs();
+    });
+  }
+
+  /** 每次只放一条：submitPrompt 会让 pendingTurns 重新非空，余下条目等下一轮 settle。 */
+  private async flushQueuedInputs(): Promise<void> {
+    if (this.flushingQueue || this.pendingTurns.size > 0) return;
+    const item = this.queuedInputs.shift();
+    if (!item) return;
+    this.flushingQueue = true;
+    try {
+      // drained 事件把该条从 UI 队列区摘除；user 行由新回合的
+      // user_message/turn_started 正常下发，不在这里伪造 transcript。
+      this.emitSinkEvent("turn_steer_drained", {
+        pendingInputIds: [item.pendingInputId],
+        targetTurnId: item.targetTurnId,
+      });
+      await this.submitPrompt(item.input, item.options);
+      // 该条结束后 routeTurnEvent 会再次 scheduleQueuedFlush 接力下一条。
+    } catch (error) {
+      this.emitSinkEvent("session_notice", {
+        message: `Queued input failed: ${error instanceof Error ? error.message : String(error)}`,
+        role: "system",
+      });
+      this.scheduleQueuedFlush();
+    } finally {
+      this.flushingQueue = false;
+    }
   }
 
   async resume(): Promise<{
@@ -272,7 +454,7 @@ export class AttachSessionHandle {
   }
 
   getModel(): string | undefined {
-    return this.snapshot.settings.model.current?.modelId;
+    return formatModelRef(this.snapshot.settings.model.current);
   }
 
   getThoughtLevel(): string | undefined {
@@ -290,8 +472,58 @@ export class AttachSessionHandle {
   }
 
   private applyMutationSnapshot(result: unknown): void {
-    const snapshot = (result as { snapshot?: ZCodeSessionStateSnapshot }).snapshot;
-    if (snapshot) this.snapshot = snapshot;
+    // session/setModel 等 mutation 直接返回快照本体（afterStateMutation 返回 stateSnapshot），
+    // 只认 {snapshot} 包装会漏掉全部更新——getModel() 永远返回旧模型，Ctrl+P 轮换原地打转。
+    const snapshot =
+      (result as { snapshot?: ZCodeSessionStateSnapshot }).snapshot ??
+      ((result as ZCodeSessionStateSnapshot).settings
+        ? (result as ZCodeSessionStateSnapshot)
+        : undefined);
+    if (!snapshot?.settings) return;
+    this.mergeSettings(snapshot.settings);
+  }
+
+  /** state/updated settings patch 合并：legacy setModel 链路只发通知、不发 raw 事件，
+   *  不合并会让已挂 TUI（含其他 pane）的模型状态行停在旧模型。 */
+  applyStatePatch(patch: unknown): void {
+    const settings = patch as ZCodeSessionStateSnapshot["settings"] | undefined;
+    if (!settings || typeof settings !== "object") return;
+    this.mergeSettings(settings);
+  }
+
+  /** mutation 回包（setModel 等）与 state/updated patch 的 available 是 modelAvailability:"current"
+   *  过滤后的仅当前模型投影，不是 provider catalog 事实；整包覆盖会把可选项缩成 1 项
+   *  （Ctrl+P 依次报 "Model is not available" → "Only one model available"），
+   *  故过滤形状下保留旧 catalog，只在完整形状时采纳新列表。 */
+  private mergeSettings(next: ZCodeSessionStateSnapshot["settings"]): void {
+    const prev = this.snapshot.settings;
+    const patch = { ...next };
+    if (
+      patch.model?.available?.length === 1 &&
+      (prev.model.available?.length ?? 0) > 1
+    ) {
+      patch.model = { ...patch.model, available: prev.model.available };
+    }
+    if (
+      patch.thoughtLevel?.available?.length === 1 &&
+      (prev.thoughtLevel?.available?.length ?? 0) > 1
+    ) {
+      patch.thoughtLevel = {
+        ...patch.thoughtLevel,
+        available: prev.thoughtLevel?.available,
+      };
+    }
+    const previousModel = JSON.stringify(prev.model.current);
+    this.snapshot = { ...this.snapshot, settings: { ...prev, ...patch } };
+    const current = this.snapshot.settings.model.current;
+    if (JSON.stringify(current) === previousModel) return;
+    const event = {
+      id: `attach-local-${++this.localEventCounter}`,
+      timestamp: new Date(),
+      type: SessionEventType.ModelSelected,
+      payload: { modelSelection: current },
+    } as unknown as SessionEvent;
+    for (const sink of this.sinks) sink(event);
   }
 
   async setModel(modelId: string | ModelSelection): Promise<{ model: string }> {
@@ -483,12 +715,7 @@ export class AttachSessionHandle {
         sessionId: this.sessionId,
       }),
     );
-    return result.messages.map((message) => ({
-      content: "",
-      id: message.info.messageId,
-      parts: message.parts as never,
-      role: (message.info.role === "user" ? "user" : "agent") as "user" | "agent",
-    }));
+    return projectAttachTranscriptMessages(result.messages);
   }
 
   async forkFromCheckpoint(): Promise<{

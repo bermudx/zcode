@@ -1,6 +1,7 @@
 import { createConfig } from "@zcode/adapters/config";
 import { createNodeModelSelectionFacade } from "@zcode/provider-node";
 import { createNodeLoggerFactory } from "@zcode/adapters/logging";
+import { writeFile } from "node:fs/promises";
 import { Writable } from "node:stream";
 import type { Socket } from "node:net";
 import {
@@ -39,6 +40,7 @@ import {
   type OfficialMcpAuthRequestContext,
 } from "./zcode-protocol/official-mcp-auth-port.js";
 import {
+  appServerInfoSchema,
   createOfficialMcpTrustedOriginRegistry,
   OFFICIAL_MCP_DEV_TRUSTED_ORIGINS_ENV,
   ZCODE_WORKSPACE_IDENTITY_ENV,
@@ -540,6 +542,32 @@ export async function runZCodeProtocolAgent(
           }),
         disposeLate: (listener) => listener.close(),
       });
+      // 自登记：bind 成功的进程才是 socket 的唯一 owner，.pid/.info 只能由它在
+      // listen 后写入；客户端侧写入在并发恢复/双 spawn 竞争下会把死进程登记成
+      // owner（实测踩坑：.pid 指向已退出进程，真 listener 无登记）。
+      const selfIdentity = process.env[ZCODE_WORKSPACE_IDENTITY_ENV]?.trim();
+      if (selfIdentity) {
+        try {
+          await writeFile(`${socketPath}.pid`, `${process.pid}\n`, "utf8");
+          await writeFile(
+            `${socketPath}.info`,
+            `${JSON.stringify(
+              appServerInfoSchema.parse({
+                version: "0.0.0",
+                workspaceIdentity: selfIdentity,
+                startedAt: new Date().toISOString(),
+              }),
+            )}\n`,
+            "utf8",
+          );
+        } catch (error) {
+          logger.warn("ZCode Protocol socket self-registration failed", {
+            errorType: error instanceof Error ? error.name : typeof error,
+            event: "zcode_protocol.socket.self_register.failed",
+            module: "bootstrap.zcode_protocol",
+          });
+        }
+      }
       startupTimer.complete("ZCode Protocol agent startup completed", {
         context: { socketPath },
         event: "zcode_protocol.startup.completed",

@@ -18,6 +18,7 @@ export type {
   TuiReadSubagentTranscript,
   TuiSubagentTranscriptSnapshot,
   TuiRequestPermission,
+  TuiRestoredTranscriptPart,
   TuiSelection,
   TuiSelectionItem,
   TuiSessionMetadata,

@@ -184,9 +184,25 @@ export function resetCtrlCExitGuard(guard: CtrlCExitGuard): void {
   resetDoublePressGuard(guard);
 }
 
-/** Selected row for `Ctrl+L`: highlight the current model, else start at the top. */
+/**
+ * 当前模型 → option 下标。providerId 存在不同命名空间（快照/事件可能写
+ * registry provider，选项 ref 用 account: 前缀 face），精确 ref 失配时
+ * 退到尾部 modelId 匹配，避免 Ctrl+P/选择器永远钉在 selectable[0]。
+ */
+function findModelOptionIndex(
+  models: readonly TuiModelOption[],
+  currentModel: string,
+): number {
+  const value = currentModel.trim();
+  const exact = models.findIndex((model) => modelOptionValue(model) === value);
+  if (exact >= 0) return exact;
+  const modelId = value.split("/").pop();
+  if (!modelId) return -1;
+  return models.findIndex((model) => model.ref.modelId === modelId);
+}
+
 export function modelPickerIndex(models: readonly TuiModelOption[], currentModel: string): number {
-  const index = models.findIndex((model) => modelOptionValue(model) === currentModel.trim());
+  const index = findModelOptionIndex(models, currentModel);
   return index < 0 ? 0 : index;
 }
 
@@ -197,8 +213,6 @@ export function nextSelectableModelOption(
 ): TuiModelOption | undefined {
   const selectable = models.filter((model) => !model.disabledReason);
   if (selectable.length <= 1) return undefined;
-  const currentIndex = selectable.findIndex(
-    (model) => modelOptionValue(model) === currentModel.trim(),
-  );
+  const currentIndex = findModelOptionIndex(selectable, currentModel);
   return selectable[(currentIndex + 1) % selectable.length];
 }

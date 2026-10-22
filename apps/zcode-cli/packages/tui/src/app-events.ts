@@ -85,6 +85,8 @@ export function applySessionEventToState(
       }
       applyTurnErrorEvent(payload, handlers.setLastError, handlers.setMessages);
       handlers.setStatus(copy.status.turnFailed);
+      // 失败回合同样已 settle；不清 activeTurnId 会把后续所有提交锁进 busy 队列路径。
+      handlers.setActiveTurnId(undefined);
       handlers.setQueuedInputs?.([]);
       break;
     case SessionEventType.TurnSteerQueued:

@@ -6,7 +6,6 @@ import { connect } from "node:net";
 import { dirname, join } from "node:path";
 import {
   appServerAttachWorkspaceSchema,
-  appServerInfoSchema,
   resolveWorkspaceKey,
   ZCODE_WORKSPACE_IDENTITY_ENV,
   type AppServerAttachWorkspace,
@@ -132,7 +131,6 @@ export async function ensureServer(
   let child: ChildProcess | undefined;
   let childExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   let childError: Error | undefined;
-  let wroteMetadata = false;
   try {
     // 抢到锁 ≠ 独享 socket：上一个持锁者可能在就绪后才放锁，再探一次，
     // 复用已有 server 而不是重复 spawn/误删它的 socket。
@@ -180,20 +178,8 @@ export async function ensureServer(
       );
     });
 
-    await writeFile(`${socketPath}.pid`, `${child.pid}\n`, "utf8");
-    await writeFile(
-      `${socketPath}.info`,
-      `${JSON.stringify(
-        appServerInfoSchema.parse({
-          version: options.version ?? "0.0.0",
-          workspaceIdentity: identityKey,
-          startedAt: new Date().toISOString(),
-        }),
-      )}\n`,
-      "utf8",
-    );
-    wroteMetadata = true;
-
+    // .pid/.info 由 server 端在 listen 成功后自登记（bind 成功者才是 owner）；
+    // 客户端在这里写会在双 spawn 竞争下登记死进程。本端只等 socket 就绪。
     while (now() < deadline) {
       if (childError) {
         throw new Error(`app-server spawn failed: ${childError.message}`, {
@@ -220,12 +206,8 @@ export async function ensureServer(
         /* 子进程可能已退出 */
       }
     }
-    // 只清这次调用写下的元数据；socket 路径不归本次调用所有，不能因自己
-    // spawn 失败去删——可能是别的存活 listener，也可能根本不是 socket 文件。
-    if (wroteMetadata) {
-      await rm(`${socketPath}.pid`, { force: true }).catch(() => undefined);
-      await rm(`${socketPath}.info`, { force: true }).catch(() => undefined);
-    }
+    // spawn 失败路径不清理 .pid/.info：登记权在 server 端（listen 后自写），
+    // 本调用从未写过；删别人登记的文件才是破坏。socket 路径同样不归本次调用所有。
     throw error;
   } finally {
     await releaseOwnedLock(lockPath).catch(() => undefined);
