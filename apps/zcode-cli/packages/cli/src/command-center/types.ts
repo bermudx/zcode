@@ -300,6 +300,18 @@ export type CommandCenterApp = {
 
 export type CommandCenterDeps = {
   forkApp?: (targetCheckpointId?: string) => Promise<CommandCenterForkResult>;
+  /**
+   * 解析不出来（既不是内置命令，也没有同名自定义命令）的 `/...` 输入怎么处理。
+   *
+   * - 缺省 `false`：返回 "Unknown command: /<name>. Available commands: ..." 文案，不建 app、
+   *   不发模型。headless 用它——脚本里把 `/typo ...` 静默当普通 prompt 提交会以 exit 0
+   *   「成功」走错路，那里必须留下可见的失败信号。
+   * - `true`：整段原文按普通 prompt 提交（附件一起带走）。交互式 TUI / attach 用它——
+   *   composer 是唯一发送通道，首行是绝对路径或日志行的正文不能被换成一句错误提示。
+   *
+   * 详见 `docs/design/v2/commands.md`「解析不出来的 `/...` 输入」。
+   */
+  forwardUnknownSlashAsPrompt?: boolean;
   getApp(): Promise<CommandCenterApp>;
   getLocale?: () => TuiSubmitPromptResult["locale"];
   getMode?: () => CommandCenterMode;

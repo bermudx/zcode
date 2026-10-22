@@ -118,6 +118,26 @@ Headless `--target` 测试覆盖：
 - `--target-replace` 允许覆盖现有 goal；`--target-replace` 单独出现时报错。
 - `--prompt "/goal ..."` 与单独 `--target ...` 都会经过同一条 command center goal 语义；`--prompt "/target ..."` 暂时保留兼容；headless 无法交互确认替换时必须返回明确错误，不得静默丢弃 selection。
 
+## 解析不出来的 `/...` 输入
+
+`/` 开头的输入一律先按 slash command 解析：命中内置命令就是内置命令，否则尝试同名的自定义命令。两者都不命中时按入口区分：
+
+- **交互式客户端**（opentui TUI、`zcode tui --tui-frontend=pi`、`zcode-attach` 共享 core 客户端）把**整段原文按普通 prompt 提交**，附件原样带上，不返回错误文案。
+- **headless**（`--prompt`、`--target`）继续返回 `Unknown command: /<name>. Available commands: ...` 文案，不建 turn。
+
+理由：composer 是交互式客户端唯一的发送通道，粘贴的绝对路径、日志行、diff 头、SQL/正则片段都可能以 `/` 开头（例如把 `/home/me/project/notes.md` 放在消息第一行再写正文）。把这些正文换成一句 "Unknown command" 等于让用户删掉内容重打；转发后用户能在 transcript 里立刻看到自己发出的原文，发错了重发即可，不会静默丢内容。headless 保留文案是因为脚本化入口把 `/typo ...` 静默当普通 prompt 提交会以 exit 0「成功」走错路——那里的「解析不出来」仍必须是可见的失败信号，判据与 `prompt-command.ts` 的 `isResolvableCustomCommand` 同源。
+
+策略差异通过 `CommandCenterDeps.forwardUnknownSlashAsPrompt` 表达：交互式 wiring（`tui-prompt-handler.ts`、`attach/attach-tui-options.ts`）打开，headless 不传（缺省 = 返回文案）。命令解析顺序不变：内置 → 同名自定义命令 → 兜底策略。
+
+已知取舍：命令拼错（如 `/modle fast`）在交互式客户端同样会被当正文发给模型，而不是提示「没有这个命令」。可用命令的提示责任在输入阶段的 `/` 候选面板；command center 不按「像命令 / 像路径」加拼写启发式——猜错的边界比不猜更难解释。
+
+测试覆盖：
+
+- attach wiring：首行是绝对路径的多行输入提交后，core 收到完整原文（`session/send`），返回值里没有 `Unknown command`。
+- command center：`forwardUnknownSlashAsPrompt` 打开时解析不出来的 `/...` 建 turn，附件随原文一起提交。
+- command center：同一条输入在缺省策略下仍返回 `Unknown command: /<name>. Available commands: ...`，且不建 app。
+- 自定义命令优先于兜底：`/review auth` 在两种策略下都展开成自定义命令 prompt。
+
 ## TUI `/model` 持久化
 
 `/model <target>` 成功切换主模型时，app/server 必须同步更新当前 runtime 的 model ref 和配置文件里的 `model` 主模型选择，避免 TUI 里看到的模型只停留在内存态。TUI 仍只调用 command center，不直接读写配置文件。

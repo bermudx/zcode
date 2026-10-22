@@ -1,4 +1,4 @@
-import type { TuiSubmitPrompt } from "@zcode/tui";
+import type { TuiSubmitPrompt, TuiSubmitPromptResult } from "@zcode/tui";
 import {
   formatAvailableCommandNames,
   listCustomCommandsForHelp,
@@ -36,13 +36,17 @@ import {
 import { loginRequiredResponse } from "../tui-login-state.js";
 import type { CommandCenterDeps } from "./types.js";
 
+const UNSUPPORTED_ATTACHMENTS_RESPONSE = "Image attachments are only supported for normal prompts.";
+
 export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
   return async (input, options) => {
     const promptInput = normalizeTuiPromptInput(input);
     const command = parseSlashCommand(promptInput.text);
     const hasAttachments = (promptInput.attachments?.length ?? 0) > 0;
 
-    if (!command) {
+    // 普通 prompt 路径：没有可选模型时先退成登录提示，否则整段输入（含附件）交给 app 建 turn。
+    // 没有 `/` 前缀的输入走这里；解析不出来的 `/...` 文本按策略也可能走这里（见下面 unknown 分支）。
+    const submitNormalPrompt = async (): Promise<TuiSubmitPromptResult> => {
       if (await isLoginRequired(deps)) {
         return {
           loginRequired: true,
@@ -52,25 +56,45 @@ export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
       }
       const app = await deps.getApp();
       return attachCurrentSessionMetadata(await app.submitPrompt(input, options), deps, app);
-    }
+    };
 
-    if (hasAttachments) {
-      return {
-        mode: deps.getMode?.(),
-        response: "Image attachments are only supported for normal prompts.",
-      };
+    if (!command) {
+      return await submitNormalPrompt();
     }
 
     if (command.type === "unknown") {
-      const customResult = await handleCustomCommand(command.rawName, command.args, deps, options);
-      if (customResult) {
-        await recordSlashCommandInHistory(deps, promptInput.text, command);
-        return customResult;
+      // 附件不能跟着自定义命令展开走（展开只提交展开后的文本，附件会被悄悄丢掉），
+      // 所以带附件时保持既有的本地拒绝，不尝试自定义命令。
+      if (!hasAttachments) {
+        const customResult = await handleCustomCommand(command.rawName, command.args, deps, options);
+        if (customResult) {
+          await recordSlashCommandInHistory(deps, promptInput.text, command);
+          return customResult;
+        }
+      }
+      // 交互式客户端把解析不出来的 `/...` 当普通 prompt 提交：粘贴的绝对路径、日志行、
+      // diff 头都以 `/` 开头，换成一句 "Unknown command" 会让用户根本发不出去。
+      // headless 不打开这个开关，理由见 CommandCenterDeps.forwardUnknownSlashAsPrompt。
+      if (deps.forwardUnknownSlashAsPrompt) {
+        return await submitNormalPrompt();
+      }
+      if (hasAttachments) {
+        return {
+          mode: deps.getMode?.(),
+          response: UNSUPPORTED_ATTACHMENTS_RESPONSE,
+        };
       }
       const customCommands = await listCustomCommandsForHelp(deps);
       return {
         mode: deps.getMode?.(),
         response: `Unknown command: /${command.rawName}. Available commands: ${formatAvailableCommandNames(listAvailableCommandNames(deps), customCommands)}.`,
+      };
+    }
+
+    if (hasAttachments) {
+      return {
+        mode: deps.getMode?.(),
+        response: UNSUPPORTED_ATTACHMENTS_RESPONSE,
       };
     }
 

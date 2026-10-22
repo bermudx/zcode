@@ -902,6 +902,9 @@ test("passes custom command suggestions into the TUI", async () => {
 test("command center expands custom commands before submitting to runtime", async () => {
   let submittedPrompt = "";
   const commandCenter = createCommandCenter({
+    // 交互式 wiring 打开了「解析不出来就当正文」的兜底：自定义命令仍必须先展开，
+    // 转交只是最后一道兜底（见下一个用例）。
+    forwardUnknownSlashAsPrompt: true,
     getApp: async () =>
       ({
         getModel: () => "openai/gpt-test",
@@ -939,6 +942,75 @@ test("command center expands custom commands before submitting to runtime", asyn
 
   assert.match(result.response, /Run custom command \/review/);
   assert.match(submittedPrompt, /Review auth and auth high/);
+});
+
+// 回归证据（2026-10-22 用户实测）：首行是绝对路径的多行消息被当成 `/home/daniel/...`
+// slash 命令，回一句 "Unknown command" 让正文根本发不出去。交互式客户端里这种输入必须
+// 按普通 prompt 建 turn；附件也要跟着走（它不是命令，没有展开会把附件丢掉的问题）。
+test("command center forwards an unresolvable slash input as a normal prompt when the client opts in", async () => {
+  let submitted: unknown;
+  const commandCenter = createCommandCenter({
+    forwardUnknownSlashAsPrompt: true,
+    getApp: async () =>
+      ({
+        getModel: () => "openai/gpt-test",
+        sessionId: "session-forward",
+        submitPrompt: async (prompt: unknown) => {
+          submitted = prompt;
+          return {
+            projection: fakeProjection as never,
+            response: "answer-from-model",
+            traceId: "trace-forward" as never,
+            turnId: "turn-forward" as never,
+          };
+        },
+      }) as never,
+    getMode: () => "build",
+    loadCustomCommand: async () => {
+      throw new Error("Custom command not found: home/daniel/dots/pi/models.json");
+    },
+    resumeApp: async () => {
+      throw new Error("resume should not be called");
+    },
+  });
+
+  const input = {
+    attachments: [{ path: "/tmp/notes.png", type: "image" } as never],
+    text: "/home/daniel/dots/pi/models.json\n\nlogfare models can change every day, give me 5 ideas",
+  };
+  const result = await commandCenter(input, {});
+
+  // 原文逐字下发，包括首行路径和空行。
+  assert.deepEqual(submitted, input);
+  assert.equal(result.response, "answer-from-model");
+  assert.equal(result.response.includes("Unknown command"), false);
+});
+
+test("command center keeps the Unknown command response when the client does not opt in", async () => {
+  const commandCenter = createCommandCenter({
+    // 没传 forwardUnknownSlashAsPrompt = headless 策略。
+    getApp: async () => {
+      throw new Error("headless unknown slash must not create an app");
+    },
+    getMode: () => "build",
+    listCustomCommands: async () =>
+      ({
+        commands: [reviewCustomCommand.metadata],
+        diagnostics: [],
+        totalDiscovered: 1,
+      }) as never,
+    loadCustomCommand: async () => {
+      throw new Error("Custom command not found: nope");
+    },
+    resumeApp: async () => {
+      throw new Error("resume should not be called");
+    },
+  });
+
+  const result = await commandCenter("/home/daniel/dots/pi/models.json\n\nbody", {});
+
+  assert.match(result.response, /Unknown command: \/home\/daniel\/dots\/pi\/models\.json\./);
+  assert.match(result.response, /Available commands: .*\/review/);
 });
 
 test("zcode commands list prints custom commands", async () => {

@@ -501,6 +501,72 @@ test("sendInput '/model …' 经 commandCenter → session/setModel，不发 ses
   }
 });
 
+// 回归证据（2026-10-22，`piz` 实测）：首行是绝对路径的多行输入被当成 `/home/daniel/...`
+// slash 命令，只回一句 "Unknown command" —— 整段正文根本没发出去。attach 是交互式客户端，
+// 解析不出来的 `/...` 必须原样按普通 prompt 提交给 core。
+test("首行为绝对路径的多行输入按普通 prompt 提交，而不是回 Unknown command", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      const inputId = request.params.inputId as string;
+      const content = request.params.content as string;
+      const turnId = "turn-forward";
+      queueMicrotask(() => {
+        notify(
+          rawEvent({
+            inputId,
+            payload: { inputId, input: content, turnNumber: 1 },
+            seq: 1,
+            turnId,
+            type: "turn_started",
+          }),
+        );
+        notify(
+          rawEvent({
+            payload: { response: `r-${content}`, resultType: "completed" },
+            seq: 2,
+            turnId,
+            type: "turn_complete",
+          }),
+        );
+      });
+      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  const text = "/home/daniel/dots/pi/models.json\n\nlogfare models can change every day, give me 5 ideas";
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = await handler(text, {});
+    const sends = core.requests.filter((r) => r.method === "session/send");
+    assert.equal(sends.length, 1, "expected exactly one session/send");
+    // 原文逐字下发（含首行路径与空行）。
+    assert.equal(sends[0]?.params.content, text);
+    assert.equal(result.response, `r-${text}`);
+    assert.equal(result.response.includes("Unknown command"), false);
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 test("applyStatePatch 合并 state/updated settings 并补发 ModelSelected", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   try {

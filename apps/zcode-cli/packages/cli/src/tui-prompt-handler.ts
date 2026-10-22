@@ -267,6 +267,8 @@ export function createTuiSubmitPrompt(
         restoredFileCount: result.restoredFileCount ?? result.restoredFiles?.length ?? 0,
       };
     },
+    // 交互式客户端：解析不出来的 `/...` 文本按普通 prompt 提交（粘贴的绝对路径发得出去）。
+    forwardUnknownSlashAsPrompt: true,
     getApp,
     getMode: () => currentCliMode(modeState),
     getLocale: () =>
