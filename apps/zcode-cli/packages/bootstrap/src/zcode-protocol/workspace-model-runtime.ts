@@ -73,8 +73,13 @@ export async function createWorkspaceZCodeApp(
   workspace: ZCodeWorkspaceRef,
   options: Omit<ZCodeAppOptions, "providerRegistry">,
 ): Promise<ZCodeApp> {
+  // 优先级：调用方显式 port > 进程级 standalone 凭据 port > 按 workspace 回环
+  // Host 的反向请求 port。无 Host 的 socket core 依赖中间档，否则模型请求会因
+  // 客户端无法应答 interactionRequestProviderRuntimeHeaders 而失败。
   const providerRuntimeHeadersPort =
-    options.providerRuntimeHeadersPort ?? createProviderRuntimeHeadersPort(context, workspace);
+    options.providerRuntimeHeadersPort ??
+    context.deps.providerRuntimeHeadersPort ??
+    createProviderRuntimeHeadersPort(context, workspace);
   return context.deps.createZCodeApp({
     ...options,
     onOffPeakLifecycleEvent: (event) =>

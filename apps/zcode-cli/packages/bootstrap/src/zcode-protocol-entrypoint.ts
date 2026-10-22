@@ -369,16 +369,6 @@ export async function runZCodeProtocolAgent(
               activeProviderRegistryRuntime.runtime.registryService,
               activeProviderRegistryRuntime.configuredDefaultModelSelection,
             ),
-            // standalone 账号面自带凭据鉴权端口（createStandaloneProviderRuntimeHeadersPort）。
-            // socket core 没有 Host 可应答 interactionRequestProviderRuntimeHeaders，
-            // 不注入它模型请求会在请求级鉴权处永久挂起/失败。显式传入的 port 仍优先。
-            ...(activeProviderRegistryRuntime.providerRuntimeHeadersPort
-              ? {
-                  providerRuntimeHeadersPort:
-                    appOptions.providerRuntimeHeadersPort ??
-                    activeProviderRegistryRuntime.providerRuntimeHeadersPort,
-                }
-              : {}),
             // 只读同进程已应用快照；不为子任务另发 Host RPC，也不在 ModelFactory 偷换模型。
             resolveEffectiveModelSelection: (selection) => {
               const view = modelSelectionFacade.getView(undefined, undefined, { selection });
@@ -415,6 +405,15 @@ export async function runZCodeProtocolAgent(
         mcpTelemetry: mcpTelemetryTracker,
         sessionStore,
         syncAccountProviderConfig: activeProviderRegistryRuntime.syncAccountProviderConfig,
+        // standalone 账号面自带凭据鉴权端口（createStandaloneProviderRuntimeHeadersPort）。
+        // socket core 没有 Host 可应答 interactionRequestProviderRuntimeHeaders，
+        // createWorkspaceZCodeApp 按 deps 优先注入它，模型请求才能拿到签名头。
+        ...(activeProviderRegistryRuntime.providerRuntimeHeadersPort
+          ? {
+              providerRuntimeHeadersPort:
+                activeProviderRegistryRuntime.providerRuntimeHeadersPort,
+            }
+          : {}),
         refreshProviderRegistry: async (reason) => {
           await activeProviderRegistryRuntime.runtime.registryService.refresh(reason);
         },

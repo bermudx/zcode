@@ -11,7 +11,7 @@ import {
   type TraceContext,
 } from "@zcode/contracts";
 import type { McpTelemetryTracker } from "@zcode/adapters";
-import type { WorkspaceHookPolicyProvider } from "@zcode/core";
+import type { ProviderRuntimeHeadersPort, WorkspaceHookPolicyProvider } from "@zcode/core";
 import type { AccountProviderConfigSnapshot } from "@zcode/provider";
 import {
   zcodeProtocolErrorCodes,
@@ -65,6 +65,12 @@ export interface ZCodeProtocolAgentDependencies {
   workspaceHookPolicyProvider?: WorkspaceHookPolicyProvider;
   /** 把 Host 账号状态形成的第三层 Config Overlay 同步给进程 Registry。 */
   syncAccountProviderConfig?: (snapshot: AccountProviderConfigSnapshot) => Promise<boolean>;
+  /**
+   * 进程级凭据鉴权端口（standalone 账号面自带）。
+   * 存在时优先于按 workspace 回环 Host 的默认端口；socket core 没有能应答
+   * interactionRequestProviderRuntimeHeaders 的 Host，必须由它签名模型请求。
+   */
+  providerRuntimeHeadersPort?: ProviderRuntimeHeadersPort;
   /** 连接测试前主动重读当前进程的 Config Source 并等待 Registry 发布。 */
   refreshProviderRegistry?: (reason: string) => Promise<void>;
 }
