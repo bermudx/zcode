@@ -182,7 +182,7 @@ herdr pane 1..N                    每 workspace 一个
 - Windows 下 socket 走 named pipe 分支已实现但未实测。
 - 断线横幅的完整 banner 设计未做（当前为状态行最小版）。
 
-## 交互语义收口（busy 队列 / 断线重连 / resume-latest）
+## 交互语义收口（busy 队列 / 断线重连 / 会话选择）
 
 ### busy 输入本地队列
 
@@ -222,14 +222,23 @@ respawn 新 core（同一确定性 socketPath）。连接恢复后逐会话
 `session/resume` 冷物化再重试。composer 草稿本地保留，恢复后可继续
 输入。
 
-### 新 pane resume-latest
+### 会话选择（-c / --resume，默认新会话）
 
-attach 入口不再无条件 `session/create`：先 `session/list` 取该
-workspace 最近会话，存在则 `session/resume` 拿全量快照（含
-messages），并把 `restoredMessages` 作为 `initialResult` 交给
+attach 入口的会话选择与主 CLI 同语义，不再默认 resume：
+
+| 意图               | 行为                                                |
+| ------------------ | --------------------------------------------------- |
+| 默认（无旗标）     | `session/create` —— 开新会话                        |
+| `-c` / `--continue` | `session/list` 取本 workspace 最近会话 → `resume`  |
+| `--resume <id>`     | `session/resume` 指定会话                          |
+
+之前无条件 resume 最近会话，piz 永远进旧对话、无法开新会话——
+与主 CLI（默认新会话、`-c` 才继续）相反。
+
+resume 成功时 `restoredMessages` 作为 `initialResult` 交给
 `runTui` 首帧渲染历史 transcript；list 为空或 resume 失败时退回
-`session/create`，行为与之前一致。同一 workspace 多个 pane 会
-attach 到同一会话，事件经 core fan-out 同步。
+`session/create`。同一 workspace 多个 pane 在 `-c` 下 attach 到
+同一会话，事件经 core fan-out 同步。
 
 ### 模型状态同步（mutation 快照 / state.updated）
 
@@ -257,8 +266,20 @@ legacy `session/setModel`/`setThoughtLevel`/`setMode` 与订阅事件不同源�
 失败路径同样不清理登记文件——所有权在 server，客户端删别人的
 登记才是破坏。
 
-### resume-latest 的"最近"定义
+### resume 目标的"最近"定义
 
-`session/list` 返回顺序不保证（实测含任意序/创建序混排），
+`-c` 选"最近会话"时，`session/list` 返回顺序不保证（实测含任意序/创建序混排），
 "最近会话"必须按 `updatedAt`（退化 `createdAt`）显式取最大，
 `sessions.at(-1)` 会恢复到陈旧会话。
+
+### Ctrl-C：字节路径与信号路径同义
+
+Ctrl-C 有两条投递路径，二者必须共享同一条 guard（`PiTuiApp.handleCtrlCIntent`）：
+
+- **字节路径**：raw 模式下的 `0x03` 字节（普通终端）。
+- **信号路径**：SIGINT（多路复用器如 herdr pane 把 Ctrl-C 递送为信号）。
+
+缺 SIGINT handler 时 Node 的默认行为是直接终止进程（exit 130），
+多路复用器环境下就会"首按即死"，与字节路径的"再按一次退出"不一致。
+因此 `run-tui` 装 SIGINT handler 转发到同一 intent；退出时摘掉 handler
+（signal handler 是 ref 句柄，不摘会让进程在 TUI 退出后挂着不退）。

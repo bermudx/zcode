@@ -73,6 +73,12 @@ export async function runPiTui(options: TuiOptions): Promise<number> {
     tui,
   });
 
+  // SIGINT 与 raw 模式下的 Ctrl-C 字节同义：同一个双击确认。缺这个 handler 时
+  // Node 的默认行为是直接终止进程（exit 130），多路复用器（herdr pane 等）把
+  // Ctrl-C 递送为信号时就会首按即死，与字节路径的“再按一次退出”不一致。
+  const onSigint = () => app.handleCtrlCIntent();
+  process.on("SIGINT", onSigint);
+
   tui.start();
 
   // React 前端在 constructor 消费 options.initialResult（attach resume-latest
@@ -94,6 +100,8 @@ export async function runPiTui(options: TuiOptions): Promise<number> {
   }
 
   const code = await exitPromise;
+  // signal handler 是 ref 句柄：不摘掉会让进程在 TUI 退出后仍挂着不退。
+  process.off("SIGINT", onSigint);
   await app.stop();
   return code;
 }

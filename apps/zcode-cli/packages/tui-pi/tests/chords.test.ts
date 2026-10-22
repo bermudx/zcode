@@ -51,6 +51,28 @@ test("Ctrl+C on empty draft prompts, second press exits", async () => {
   await h.stop();
 });
 
+test("SIGINT shares the Ctrl+C guard: first signal prompts, second exits", async () => {
+  // 信号路径（多路复用器把 Ctrl-C 递送为 SIGINT）必须与字节路径同语义：
+  // 首按只提示，不退出；二次才退出。缺这条时 Node 默认行为是直接终止。
+  const h = createHarness();
+  h.app.handleCtrlCIntent();
+  assert.equal(h.store.state.status, CTRL_C_EXIT_PROMPT);
+  assert.equal(h.exitCode(), undefined);
+  h.app.handleCtrlCIntent();
+  assert.equal(h.exitCode(), 0);
+  await h.stop();
+});
+
+test("SIGINT with a non-empty draft clears the draft instead of exiting", async () => {
+  const h = createHarness();
+  h.feed("draft");
+  h.app.handleCtrlCIntent();
+  assert.equal(h.draftText(), "");
+  assert.equal(h.store.state.status, PROMPT_DRAFT_CLEARED_STATUS);
+  assert.equal(h.exitCode(), undefined);
+  await h.stop();
+});
+
 test("Ctrl+D exits only on an empty draft", async () => {
   const h = createHarness();
   h.feed(CTRL_D);

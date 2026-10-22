@@ -23,14 +23,12 @@ import type {
   TuiSwitchableMode,
 } from "@zcode/tui/internals";
 import {
-  CTRL_C_EXIT_PROMPT,
   EMPTY_TUI_WORKFLOW_MIRROR,
   ESCAPE_PAUSE_CONFIRMATION_WINDOW_MS,
   ESCAPE_PAUSE_PROMPT,
   NO_ACTIVE_OUTPUT_STATUS,
   NO_SELECTABLE_MODEL_STATUS,
   ONLY_ONE_MODEL_STATUS,
-  PROMPT_DRAFT_CLEARED_STATUS,
   SIDEBAR_HIDDEN_STATUS,
   SIDEBAR_LEADER_HINT,
   SIDEBAR_SHOWN_STATUS,
@@ -39,7 +37,6 @@ import {
   applyWorkflowProgressToMirror,
   appendAgentResult,
   appendWorkflowInterruptedNotices,
-  createCtrlCExitGuard,
   createDoublePressGuard,
   createSelectionState,
   createSidebarShortcutState,
@@ -51,13 +48,10 @@ import {
   modelOptionValue,
   modelPickerIndex,
   nextSelectableModelOption,
-  resolveCtrlCExitIntent,
   resolveDoublePressIntent,
-  resetCtrlCExitGuard,
   resetDoublePressGuard,
   resolveSidebarShortcut,
   seedWorkflowMirror,
-  shouldClearPromptDraftOnCtrlC,
   shouldExitOnCtrlD,
   submitDuringActiveTurn,
   submitIdleTurn,
@@ -66,6 +60,11 @@ import {
   type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
 import { Composer } from "./composer.js";
+import {
+  createCtrlCIntentGuard,
+  resetCtrlCExitGuard,
+  runCtrlCIntent,
+} from "./ctrl-c-intent.js";
 import { SessionInfoPanel } from "./info-panel.js";
 import { PiInputHistory } from "./input-history.js";
 import { keyEventFromInput } from "./keys.js";
@@ -106,8 +105,7 @@ export class PiTuiApp {
   private readonly mdTheme;
   private copy: TuiCopy;
   private readonly requestPermission;
-  private readonly ctrlCGuard = createCtrlCExitGuard();
-  private readonly escGuard = createDoublePressGuard();
+  private readonly ctrlCGuard = createCtrlCIntentGuard();  private readonly escGuard = createDoublePressGuard();
   private readonly removeInputListener: () => void;
   private unsubscribeSession: (() => void) | undefined;
   private unsubscribeConnectionStatus: (() => void) | undefined;
@@ -469,6 +467,20 @@ export class PiTuiApp {
 
   /* ---------- chords ---------- */
 
+  /**
+   * Ctrl-C 意图：字节路径（raw 模式下的 0x03）与信号路径（SIGINT）共用同一条
+   * guard 与同一份状态（见 ctrl-c-intent.ts）。
+   */
+  handleCtrlCIntent(): void {    runCtrlCIntent({
+      abortTurn: () => this.store.turnAbort.current?.abort(),
+      clearDraft: () => this.history.setDraftValue(""),
+      draft: this.editor.getText(),
+      exit: () => this.onExit(0),
+      guard: this.ctrlCGuard,
+      setStatus: (status) => this.store.set("status", status),
+    });
+  }
+
   private dispatchChord(data: string): { consume?: boolean } | undefined {
     const store = this.store;
 
@@ -494,19 +506,7 @@ export class PiTuiApp {
     }
 
     if (matchesKey(data, "ctrl+c")) {
-      const draft = this.editor.getText();
-      if (shouldClearPromptDraftOnCtrlC(draft)) {
-        resetCtrlCExitGuard(this.ctrlCGuard);
-        this.history.setDraftValue("");
-        store.set("status", PROMPT_DRAFT_CLEARED_STATUS);
-        return { consume: true };
-      }
-      if (resolveCtrlCExitIntent(this.ctrlCGuard, Date.now()) === "confirm_exit") {
-        this.store.turnAbort.current?.abort();
-        this.onExit(0);
-        return { consume: true };
-      }
-      store.set("status", CTRL_C_EXIT_PROMPT);
+      this.handleCtrlCIntent();
       return { consume: true };
     }
     resetCtrlCExitGuard(this.ctrlCGuard);

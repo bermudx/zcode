@@ -730,7 +730,14 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       return await runSkillsCommand(ctx, options, commandDeps, parsed.positionals.slice(1));
     case "tui":
       if (parsed.values["shared-core"] === true) {
-        return await runAttachCommand(ctx, options, commandDeps, version, tuiFrontend);
+        return await runAttachCommand(
+          ctx,
+          options,
+          commandDeps,
+          version,
+          tuiFrontend,
+          resumeRequest,
+        );
       }
       return await runTuiCommand(
         ctx,

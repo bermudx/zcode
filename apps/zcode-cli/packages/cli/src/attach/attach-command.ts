@@ -12,11 +12,12 @@ import {
 } from "@zcode/shared";
 import type { GlobalOptions, RunContext } from "@zcode/shared-types";
 import type { TuiSubmitPromptResult } from "@zcode/tui";
-import type { CliTuiFrontend, RunDependencies } from "../cli-types.js";
+import type { CliResumeRequest, CliTuiFrontend, RunDependencies } from "../cli-types.js";
 import { createNodeClipboardImageReader } from "../clipboard-image.js";
 import { createNodeClipboardTextWriter } from "../clipboard-text.js";
 import { listSlashCommandSuggestions } from "../command-center.js";
 import { ensureServer } from "../app-server-spawn.js";
+import type { AttachClient } from "./attach-client.js";
 import { resolveLocale } from "@zcode/i18n";
 import { resolveWorkspaceGitBranch } from "../tui-workspace-git.js";
 import { loadPiTuiRuntime } from "../tui-pi-runtime-loader.js";
@@ -33,6 +34,48 @@ import {
 } from "./attach-tui-options.js";
 
 /**
+ * 解析 attach 入口的会话选择目标：
+ *   - 无 resume 意图 → undefined（调用方走 session/create，开新会话）
+ *   - --resume <id>   → 该会话 id
+ *   - -c/--continue   → 本 workspace 最近一次会话
+ *
+ * “最近”按 updatedAt（退化 createdAt）显式取最大：server 的 session/list 返回
+ * 顺序不保证（实测创建序/任意序混排），取末位会恢复到陈旧会话。
+ */
+export const resolveAttachResumeTarget = async ({
+  client,
+  continueSession,
+  resumeSessionId,
+  workspace,
+}: {
+  client: AttachClient;
+  continueSession: boolean;
+  resumeSessionId?: string;
+  workspace: { workspacePath: string; workspaceIdentity?: string; workspaceKey: string };
+}): Promise<string | undefined> => {
+  if (resumeSessionId) return resumeSessionId;
+  if (!continueSession) return undefined;
+  const listed = await client
+    .request(zcodeProtocolMethods.sessionList, { workspace })
+    .catch(() => undefined);
+  const sessions = (
+    (listed ?? {}) as {
+      sessions?: Array<{
+        createdAt?: number;
+        sessionId?: string;
+        id?: string;
+        updatedAt?: number;
+      }>;
+    }
+  ).sessions;
+  const byRecency = [...(sessions ?? [])].sort(
+    (a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0),
+  );
+  const last = byRecency[0];
+  return last?.sessionId ?? last?.id;
+};
+
+/**
  * attach 入口：瘦客户端只负责传输与呈现，core 承载会话/运行时/存储。
  * 版本不匹配直接失败并给出恢复指引——不尝试协议降级。
  */
@@ -42,6 +85,7 @@ export const runAttachCommand = async (
   deps: RunDependencies,
   version: string,
   tuiFrontend: CliTuiFrontend = "pi",
+  resumeRequest?: CliResumeRequest,
 ): Promise<number> => {
   try {
     const workspaceDirectory = (deps.cwd ?? process.cwd)();
@@ -74,35 +118,21 @@ export const runAttachCommand = async (
       deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
       resolveLocale(options.locale, options.detectedLocale);
     try {
-      // 新 pane 默认恢复该 workspace 最近一次会话（与主 CLI -c/--resume 语义一致）；
-      // 无历史或冷恢复失败则退回 session/create。resume 返回值同 create：全量快照。
-      const latestSessionId = await client
-        .request(zcodeProtocolMethods.sessionList, { workspace: workspaceRef })
-        .then((listed) => {
-          // server 返回顺序不保证（实测按创建序/任意序混排）；"最近会话"
-          // 必须按 updatedAt（退化 createdAt）显式取最大，否则恢复到陈旧会话。
-          const sessions = (
-            listed as {
-              sessions?: Array<{
-                createdAt?: number;
-                sessionId?: string;
-                id?: string;
-                updatedAt?: number;
-              }>;
-            }
-          ).sessions;
-          const byRecency = [...(sessions ?? [])].sort(
-            (a, b) =>
-              (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0),
-          );
-          const last = byRecency[0];
-          return last?.sessionId ?? last?.id;
-        })
-        .catch(() => undefined);
-      const resumedSnapshot = latestSessionId
+      // 会话选择与主 CLI 语义一致（不再默认 resume）：
+      //   默认          → session/create（开新会话）
+      //   -c/--continue → 恢复本 workspace 最近一次会话
+      //   --resume <id> → 恢复指定会话
+      // 之前的实现无条件 resume 最近会话，piz 永远进旧对话、无法开新会话。
+      const resumeTarget = await resolveAttachResumeTarget({
+        client,
+        continueSession: resumeRequest?.continueSession === true,
+        resumeSessionId: resumeRequest?.resumeSessionId,
+        workspace: workspaceRef,
+      });
+      const resumedSnapshot = resumeTarget
         ? await client
             .request(zcodeProtocolMethods.sessionResume, {
-              sessionId: latestSessionId,
+              sessionId: resumeTarget,
               workspace: workspaceRef,
             })
             .catch(() => undefined)
