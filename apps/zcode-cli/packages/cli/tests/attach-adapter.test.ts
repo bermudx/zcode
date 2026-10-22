@@ -14,6 +14,25 @@ import {
 
 const SID = "sess-1";
 
+/** 真实 server 的 catalog 项形状（实测 session/create 回包）：身份在 ref 里，
+ *  元数据是 label/providerLabel/reasoning/properties。 */
+const modelOption = (modelId: string, providerId = "zai") => ({
+  label: modelId,
+  properties: {
+    inputFormat: {
+      supportsAudio: false,
+      supportsImage: true,
+      supportsPdf: true,
+      supportsText: true,
+      supportsVideo: false,
+    },
+    outputFormat: { supportsText: true },
+  },
+  providerLabel: "Z.AI",
+  reasoning: { defaultLevel: "max", levels: [{ label: "max", value: "max" }] },
+  ref: { modelId, providerId },
+});
+
 function makeSnapshot(version: number = ZCODE_PROTOCOL_VERSION) {
   return {
     messages: [],
@@ -45,7 +64,7 @@ function makeSnapshot(version: number = ZCODE_PROTOCOL_VERSION) {
     settings: {
       mode: { current: "build" },
       model: {
-        available: [{ modelId: "glm-4.6", providerId: "zai" }],
+        available: [modelOption("glm-4.6"), modelOption("glm-4.7"), modelOption("glm-5.3")],
         current: { modelId: "glm-4.6", providerId: "zai" },
       },
       thoughtLevel: { available: [], current: "medium", enabled: true },
@@ -583,15 +602,12 @@ test("applyStatePatch 合并 state/updated settings 并补发 ModelSelected", as
     const initial = makeSnapshot() as {
       settings: { model: { available: unknown[]; current: unknown } };
     } & ReturnType<typeof makeSnapshot>;
-    initial.settings.model.available = [
-      { modelId: "glm-4.6", providerId: "zai" },
-      { modelId: "glm-4.7", providerId: "zai" },
-    ];
+    initial.settings.model.available = [modelOption("glm-4.6"), modelOption("glm-4.7")];
     (handle as unknown as { snapshot: unknown }).snapshot = initial;
     handle.applyStatePatch({
       // modelAvailability:"current" 过滤投影：available 只剩当前模型，不得覆盖 catalog。
       model: {
-        available: [{ modelId: "glm-4.7", providerId: "zai" }],
+        available: [modelOption("glm-4.7")],
         current: { modelId: "glm-4.7", providerId: "zai" },
       },
     });
@@ -607,7 +623,7 @@ test("applyStatePatch 合并 state/updated settings 并补发 ModelSelected", as
     // 相同 current 再 patch：幂等，不再补发。
     handle.applyStatePatch({
       model: {
-        available: [{ modelId: "glm-4.6", providerId: "zai" }],
+        available: [modelOption("glm-4.6")],
         current: { modelId: "glm-4.7", providerId: "zai" },
       },
     });
@@ -616,6 +632,162 @@ test("applyStatePatch 合并 state/updated settings 并补发 ModelSelected", as
       1,
     );
   } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 回归证据（2026-10-22，`piz` 实测）：/new 走 session/create + session/subscribe
+// (includeSnapshot)。create 回的是完整 catalog，subscribe 回的 available 是
+// `modelAvailability:"current"` 投影——只剩当前模型。整包替换句柄快照后，
+// 第一次 Ctrl+P 报 "Unable to switch model: Model is not available: …"（该失败
+// 回包又把 1 项列表写进 TUI store），第二次 Ctrl+P 报 "Only one model available."。
+test("subscribe 的过滤快照不会把句柄的模型 catalog 缩成当前项", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const filtered = makeSnapshot() as {
+    settings: { model: { available: unknown[] } };
+  } & ReturnType<typeof makeSnapshot>;
+  filtered.settings.model.available = [modelOption("glm-4.6")];
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID, snapshot: filtered };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    assert.equal((await handle.listModels()).length, 3);
+    await handle.subscribe(undefined, true);
+    const models = (await handle.listModels()) as Array<{ ref?: { modelId?: string } }>;
+    assert.equal(models.length, 3, "filtered subscribe snapshot must not shrink the catalog");
+    assert.ok(models.some((model) => model.ref?.modelId === "glm-5.3"));
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("/new 之后 listModelOptions 仍返回完整 catalog", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const created = makeSnapshot() as {
+    session: { sessionId: string };
+    settings: { model: { available: unknown[] } };
+  } & ReturnType<typeof makeSnapshot>;
+  created.session = { ...created.session, sessionId: "sess-new" };
+  const subscribed = makeSnapshot() as {
+    session: { sessionId: string };
+    settings: { model: { available: unknown[] } };
+  } & ReturnType<typeof makeSnapshot>;
+  subscribed.session = { ...subscribed.session, sessionId: "sess-new" };
+  // server 侧订阅快照的真实形状：仅当前模型。
+  subscribed.settings.model.available = [modelOption("glm-4.6")];
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/create") return created;
+    if (request.method === "session/subscribe") {
+      return {
+        eventSeq: 0,
+        events: [],
+        rawEvents: [],
+        sessionId: "sess-new",
+        snapshot: subscribed,
+      };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = await handler("/new", {});
+    assert.match(result.response ?? "", /Started new session/);
+    const models = (await handler.listModelOptions?.()) as Array<{
+      ref?: { modelId?: string };
+    }>;
+    assert.equal(
+      models.length,
+      3,
+      "/new must keep the session-create catalog, not the subscribe projection",
+    );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 回归证据（2026-10-22，`piz` 实测）：TUI 附件形状 {type,path} 直接进 session/send 时，
+// server 的 mapProtocolPromptAttachment 只读 kind/localPath，整条附件被静默丢弃——
+// `@src/alpha.ts` 提交成功、模型却什么都没收到。协议边界必须做一次形状转换。
+test("prompt 附件按 session/send 的协议形状下发（kind/localPath, kind/dataBase64）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      const inputId = request.params.inputId as string;
+      queueMicrotask(() => {
+        notify(
+          rawEvent({
+            payload: { inputId, response: "ok" },
+            seq: 2,
+            turnId: "turn-attach",
+            type: "turn_complete",
+          }),
+        );
+      });
+      return { accepted: true };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  // AttachRuntime 只给已注册的会话分发 session/rawEvent（生产路径由
+  // createAttachPromptHandler 注册）；直接构造句柄的用例必须自己登记。
+  runtime.registerSession(handle);
+  try {
+    const dataUrl = `data:image/png;base64,${Buffer.from("png-bytes").toString("base64")}`;
+    await handle.submitPrompt({
+      attachments: [
+        { path: "src/alpha.ts", type: "file" },
+        { content: "inline text", type: "file" },
+        { content: dataUrl, path: "@shot.png", type: "image" },
+      ],
+      text: "review @src/alpha.ts",
+    });
+    const send = core.requests.find((request) => request.method === "session/send");
+    assert.ok(send, "expected session/send");
+    assert.deepEqual(send.params.attachments, [
+      { filename: "src/alpha.ts", kind: "file", localPath: "src/alpha.ts" },
+      { filename: "attachment", kind: "file", textContent: "inline text" },
+      {
+        dataBase64: Buffer.from("png-bytes").toString("base64"),
+        filename: "shot.png",
+        kind: "image",
+        mimeType: "image/png",
+      },
+    ]);
+  } finally {
+    await runtime.close();
+    await core.close();
     await rm(dir, { force: true, recursive: true });
   }
 });

@@ -280,16 +280,21 @@ export interface CreateAttachHandlerOptions {
 export function createAttachPromptHandler(
   options: CreateAttachHandlerOptions,
 ): TuiPromptHandler {
-  const { client, runtime } = options;
+  const { runtime } = options;
   let current = options.initialHandle;
   runtime.registerSession(current);
+  // 重连会换 client：会话级 request 一律经 runtime 拿当前连接，不能用捕获的旧 client。
+  const request = <T = unknown>(method: string, params?: unknown): Promise<T> =>
+    runtime.currentClient().request<T>(method, params);
 
   const toHandle = async (sessionId: string): Promise<AttachSessionHandle> => {
     const handle = new AttachSessionHandle({
       client: () => runtime.currentClient(),
       locale: options.initialHandle.getLocale(),
       sessionId,
-      snapshot: options.initialHandle.snapshot,
+      // 用当前句柄的快照做种子：subscribe 回来的 available 是“仅当前模型”投影，
+      // 从上一个（已持有完整 catalog 的）句柄继承，/new 后 Ctrl+P 才不会只剩一个模型。
+      snapshot: current.snapshot,
     });
     runtime.registerSession(handle);
     await handle.subscribe(undefined, true);
@@ -299,7 +304,7 @@ export function createAttachPromptHandler(
   const getApp = async (): Promise<CommandCenterApp> => asCommandCenterApp(current);
 
   const newApp = async (): Promise<CommandCenterApp> => {
-    const created = (await client.request(zcodeProtocolMethods.sessionCreate, {
+    const created = (await request(zcodeProtocolMethods.sessionCreate, {
       workspace: options.workspace,
     })) as { session: { sessionId: string } };
     current = await toHandle(created.session.sessionId);
@@ -308,7 +313,7 @@ export function createAttachPromptHandler(
 
   const resumeApp = async (sessionId?: string): Promise<CommandCenterApp> => {
     if (!sessionId) {
-      const listed = (await client.request(zcodeProtocolMethods.sessionList, {
+      const listed = (await request(zcodeProtocolMethods.sessionList, {
         workspace: options.workspace,
       })) as { sessions?: Array<{ id?: string; sessionId?: string }> };
       const last = listed.sessions?.at(-1);
@@ -316,7 +321,7 @@ export function createAttachPromptHandler(
       if (!id) return asCommandCenterApp(current);
       sessionId = id;
     }
-    const resumed = (await client.request(zcodeProtocolMethods.sessionResume, {
+    const resumed = (await request(zcodeProtocolMethods.sessionResume, {
       sessionId,
     })) as { sessionId?: string };
     current = await toHandle(resumed.sessionId ?? sessionId);
@@ -326,7 +331,7 @@ export function createAttachPromptHandler(
   const commandCenter = createCommandCenter({
     forkApp: async (targetCheckpointId) => {
       const active = current;
-      const result = (await client.request(zcodeProtocolMethods.sessionFork, {
+      const result = (await request(zcodeProtocolMethods.sessionFork, {
         sessionId: active.sessionId,
         target: targetCheckpointId
           ? { checkpointId: targetCheckpointId, kind: "checkpoint" }

@@ -22,7 +22,10 @@ import type {
 } from "@zcode/tui";
 import type { TurnId } from "@zcode/contracts";
 import type { AttachClient } from "./attach-client.js";
+import { toProtocolAttachments } from "./attach-attachments.js";
+import { mergeCatalog, modelOptionKey, thoughtLevelKey } from "./attach-catalog.js";
 import type { CommandCenterApp } from "../command-center.js";
+import { resolveTuiModelSelection } from "../command-center/handlers/model.js";
 
 const TURN_STARTED = "turn_started";
 const TURN_END_TYPES = new Set(["turn_complete", "turn_error"]);
@@ -204,7 +207,7 @@ export class AttachSessionHandle {
         sessionId: this.sessionId,
       }),
     );
-    if (result.snapshot) this.snapshot = result.snapshot;
+    if (result.snapshot) this.snapshot = this.adoptSnapshot(result.snapshot);
     if (result.eventSeq > this.lastSeq) this.lastSeq = result.eventSeq;
     for (const raw of result.rawEvents ?? []) this.ingestRawEvent(raw);
   }
@@ -322,7 +325,7 @@ export class AttachSessionHandle {
     });
     try {
       await this.clientOf().request(zcodeProtocolMethods.sessionSend, {
-        attachments: typeof prompt === "string" ? undefined : prompt.attachments,
+        attachments: typeof prompt === "string" ? undefined : toProtocolAttachments(prompt.attachments),
         content: text,
         inputId,
         modelSelection,
@@ -491,26 +494,54 @@ export class AttachSessionHandle {
     this.mergeSettings(settings);
   }
 
-  /** mutation 回包（setModel 等）与 state/updated patch 的 available 是 modelAvailability:"current"
-   *  过滤后的仅当前模型投影，不是 provider catalog 事实；整包覆盖会把可选项缩成 1 项
-   *  （Ctrl+P 依次报 "Model is not available" → "Only one model available"），
-   *  故过滤形状下保留旧 catalog，只在完整形状时采纳新列表。 */
+  /** subscribe 的整包快照只在设置层面替换，模型/思考档目录走只增不减的合并。 */
+  private adoptSnapshot(
+    snapshot: ZCodeSessionStateSnapshot,
+  ): ZCodeSessionStateSnapshot {
+    const previous = this.snapshot.settings;
+    return {
+      ...snapshot,
+      settings: {
+        ...snapshot.settings,
+        model: {
+          ...snapshot.settings.model,
+          available: mergeCatalog(
+            previous.model.available,
+            snapshot.settings.model.available,
+            modelOptionKey,
+          ),
+        },
+        thoughtLevel: {
+          ...snapshot.settings.thoughtLevel,
+          available: mergeCatalog(
+            previous.thoughtLevel?.available,
+            snapshot.settings.thoughtLevel.available,
+            thoughtLevelKey,
+          ),
+        },
+      },
+    };
+  }
+
+  /** mutation 回包（setModel 等）与 state/updated patch 同属“当前模型”投影：
+   *  只合并、不让 available 缩水，否则 Ctrl+P/Ctrl+L 的可选列表会被回包反噬。 */
   private mergeSettings(next: ZCodeSessionStateSnapshot["settings"]): void {
     const prev = this.snapshot.settings;
     const patch = { ...next };
-    if (
-      patch.model?.available?.length === 1 &&
-      (prev.model.available?.length ?? 0) > 1
-    ) {
-      patch.model = { ...patch.model, available: prev.model.available };
+    if (patch.model) {
+      patch.model = {
+        ...patch.model,
+        available: mergeCatalog(prev.model.available, patch.model.available, modelOptionKey),
+      };
     }
-    if (
-      patch.thoughtLevel?.available?.length === 1 &&
-      (prev.thoughtLevel?.available?.length ?? 0) > 1
-    ) {
+    if (patch.thoughtLevel) {
       patch.thoughtLevel = {
         ...patch.thoughtLevel,
-        available: prev.thoughtLevel?.available,
+        available: mergeCatalog(
+          prev.thoughtLevel?.available,
+          patch.thoughtLevel.available,
+          thoughtLevelKey,
+        ),
       };
     }
     const previousModel = JSON.stringify(prev.model.current);
@@ -538,26 +569,12 @@ export class AttachSessionHandle {
 
   private toModelSelection(input: string | ModelSelection): ModelSelection {
     if (typeof input !== "string") return input;
-    const available = this.snapshot.settings.model.available as Array<{
-      providerId?: string;
-      modelId?: string;
-      id?: string;
-    }>;
-    const match = available.find(
-      (option) => option.modelId === input || option.id === input,
-    );
-    if (match?.providerId && match.modelId) {
-      return { providerId: match.providerId, modelId: match.modelId };
-    }
-    const separatorIndex = input.indexOf("/");
-    if (separatorIndex > 0) {
-      return {
-        providerId: input.slice(0, separatorIndex),
-        modelId: input.slice(separatorIndex + 1),
-      };
-    }
-    throw new Error(
-      `Cannot resolve model "${input}" to a provider/model selection on the shared core`,
+    // 目录项形状是 {ref:{providerId,modelId}}，且 setModel 必须带 reasoningLevel——
+    // 手写解析会漏掉 ref 匹配、也补不出档位，统一复用 CLI 的解析器。
+    return resolveTuiModelSelection(
+      input,
+      this.snapshot.settings.model.available,
+      undefined,
     );
   }
 
