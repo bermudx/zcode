@@ -189,7 +189,16 @@ export async function runZCodeProtocolAgent(
     providerRegistryRuntime = await acquireProtocolStartupResource({
       signal: options.lifecycle?.signal,
       logger,
-      create: () => startProcessProviderRegistryRuntime(runtimeEnv),
+      create: () =>
+        startProcessProviderRegistryRuntime(
+          runtimeEnv,
+          // socket 共享 core 只服务 CLI attach 客户端，没有能推送
+          // provider/updateAccountConfig 的 Desktop Host；非 standalone 时
+          // accountSource 永远为空 → Registry 0 provider →
+          // settings.model.available=[]。socket 模式固定启用 standalone
+          // 账号面：直接读本机 credentials.json + personal provider config。
+          socketPath ? { standalone: {} } : undefined,
+        ),
       disposeLate: (runtime) => runtime.dispose(),
     });
     options.lifecycle?.signal.throwIfAborted();
@@ -360,6 +369,16 @@ export async function runZCodeProtocolAgent(
               activeProviderRegistryRuntime.runtime.registryService,
               activeProviderRegistryRuntime.configuredDefaultModelSelection,
             ),
+            // standalone 账号面自带凭据鉴权端口（createStandaloneProviderRuntimeHeadersPort）。
+            // socket core 没有 Host 可应答 interactionRequestProviderRuntimeHeaders，
+            // 不注入它模型请求会在请求级鉴权处永久挂起/失败。显式传入的 port 仍优先。
+            ...(activeProviderRegistryRuntime.providerRuntimeHeadersPort
+              ? {
+                  providerRuntimeHeadersPort:
+                    appOptions.providerRuntimeHeadersPort ??
+                    activeProviderRegistryRuntime.providerRuntimeHeadersPort,
+                }
+              : {}),
             // 只读同进程已应用快照；不为子任务另发 Host RPC，也不在 ModelFactory 偷换模型。
             resolveEffectiveModelSelection: (selection) => {
               const view = modelSelectionFacade.getView(undefined, undefined, { selection });
