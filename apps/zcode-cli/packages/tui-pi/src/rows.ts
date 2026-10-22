@@ -5,6 +5,7 @@ import {
   Markdown,
   Text,
   TruncatedText,
+  truncateToWidth,
   type Component,
   type MarkdownTheme,
 } from "@earendil-works/pi-tui";
@@ -65,17 +66,20 @@ class ToolPartRow implements Component {
 
   invalidate(): void {}
 
-  render(_width: number): string[] {
+  render(width: number): string[] {
     const theme = this.theme;
     const part = this.part;
     const glyph = TOOL_STATUS_GLYPHS[part.status] ?? "?";
     const glyphStyle = part.status === "failed" ? theme.danger : theme.success;
     const title = part.title?.trim() ? ` ${part.title}` : "";
+    // 工具标题/detail/output/error/diff 行都可能超终端宽度；doRender 对超宽行
+    // 抛错崩 TUI，所有行先截到可见宽度再加样式。
+    const bodyWidth = Math.max(1, width - 4);
     const header = `  ${glyphStyle(glyph)} ${theme.text(part.toolName)}${theme.muted(title)}`;
-    const lines = [header];
+    const lines = [truncateToWidth(header, width)];
 
     for (const detail of truncateLines(part.detailLines, MAX_TOOL_DETAIL_LINES, theme.muted)) {
-      lines.push(`    ${theme.muted(detail)}`);
+      lines.push(`    ${theme.muted(truncateToWidth(detail, bodyWidth))}`);
     }
     if (part.output) {
       const outputLines = truncateLines(
@@ -83,11 +87,12 @@ class ToolPartRow implements Component {
         MAX_TOOL_OUTPUT_LINES,
         theme.muted,
       );
-      for (const line of outputLines) lines.push(`    ${theme.dim(line)}`);
+      for (const line of outputLines)
+        lines.push(`    ${theme.dim(truncateToWidth(line, bodyWidth))}`);
     }
     if (part.error) {
       for (const line of part.error.split("\n").slice(0, 4)) {
-        lines.push(`    ${theme.danger(line)}`);
+        lines.push(`    ${theme.danger(truncateToWidth(line, bodyWidth))}`);
       }
     }
     if (part.resultDisplay) {
@@ -100,7 +105,7 @@ class ToolPartRow implements Component {
               : line.tone === "meta"
                 ? theme.muted
                 : theme.text;
-        lines.push(`    ${style(line.text)}`);
+        lines.push(`    ${style(truncateToWidth(line.text, bodyWidth))}`);
       }
       if (part.resultDisplay.truncated) {
         lines.push(`    ${theme.muted("… diff truncated")}`);
@@ -122,16 +127,19 @@ class ThoughtPartRow implements Component {
 
   invalidate(): void {}
 
-  render(_width: number): string[] {
+  render(width: number): string[] {
     const label =
       this.part.status === "thinking"
         ? this.theme.muted("⠋ thinking…")
         : this.theme.muted(`✻ thought (${this.part.contentCharCount} chars)`);
+    // 流式 reasoning 单行可能远超终端宽度；doRender 对超宽行直接抛错崩 TUI，
+    // 必须先把纯文本截到可见宽度再加样式。
+    const bodyWidth = Math.max(1, width - 2);
     const body = this.part.text
       .split("\n")
       .filter((line) => line.trim().length > 0)
       .slice(0, 2)
-      .map((line) => `  ${this.theme.dim(line.trim())}`);
+      .map((line) => `  ${this.theme.dim(truncateToWidth(line.trim(), bodyWidth))}`);
     return [label, ...body];
   }
 }
