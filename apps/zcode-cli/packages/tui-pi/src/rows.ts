@@ -6,6 +6,7 @@ import {
   Text,
   TruncatedText,
   truncateToWidth,
+  wrapTextWithAnsi,
   type Component,
   type MarkdownTheme,
 } from "@earendil-works/pi-tui";
@@ -17,6 +18,9 @@ import type {
 } from "@zcode/tui/internals";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { PiTheme, Style } from "./theme.js";
+// Shell transcript rows are local-only system messages produced by shell.ts;
+// the sigil that marks them belongs to the producer.
+import { SHELL_ROW_PREFIX, collapseShellContextBlocks } from "./shell.js";
 
 const USER_PREFIX = "> ";
 const TOOL_STATUS_GLYPHS = {
@@ -27,6 +31,65 @@ const TOOL_STATUS_GLYPHS = {
 } as const;
 const MAX_TOOL_OUTPUT_LINES = 6;
 const MAX_TOOL_DETAIL_LINES = 8;
+
+/**
+ * Wrap `text` into rows that never exceed `width` cells, prefixing the first
+ * line with `prefix` and later lines with `continuation`.
+ *
+ * Why: pi-tui's TuiMainScreen.doRender() throws as soon as one rendered line is
+ * wider than the terminal, which kills the whole client. Any transcript row fed
+ * by user input (paste, model output, shell output) must therefore be measured
+ * against the real width *before* styling — visibleWidth() ignores ANSI, so the
+ * prefix width has to be subtracted from the raw strings, not the styled ones.
+ */
+const wrapPrefixed = (input: {
+  continuation: string;
+  prefix: string;
+  style: (text: string) => string;
+  text: string;
+  width: number;
+}): string[] => {
+  const prefixWidth = visibleWidth(input.prefix);
+  const continuationWidth = visibleWidth(input.continuation);
+  const contentWidth = Math.max(1, input.width - Math.max(prefixWidth, continuationWidth));
+  const lines: string[] = [];
+  for (const raw of input.text.split(/\r\n|\r|\n/u)) {
+    for (const wrapped of wrapTextWithAnsi(raw, contentWidth)) lines.push(wrapped);
+  }
+  return lines.map(
+    (line, index) =>
+      `${index === 0 ? input.prefix : input.continuation}${input.style(line)}`,
+  );
+};
+
+/** Hard guarantee for the whole transcript: no row wider than `width`. */
+const clampLines = (lines: string[], width: number): string[] =>
+  lines.map((line) => (visibleWidth(line) <= width ? line : truncateToWidth(line, width)));
+
+/** Local shell transcript row: `!command` line + captured output below it. */
+const renderShellRow = (content: string, theme: PiTheme, width: number): string[] => {
+  const newlineIndex = content.indexOf("\n");
+  const command = newlineIndex < 0 ? content.slice(1) : content.slice(1, newlineIndex);
+  const output = newlineIndex < 0 ? "" : content.slice(newlineIndex + 1);
+  const commandLines = wrapPrefixed({
+    continuation: "  ",
+    prefix: `${theme.accent("!")} `,
+    style: theme.text,
+    text: command,
+    width,
+  });
+  if (output.trim().length === 0) return [...commandLines, theme.muted("  (no output)")];
+  return [
+    ...commandLines,
+    ...wrapPrefixed({
+      continuation: "  ",
+      prefix: "  ",
+      style: theme.dim,
+      text: output,
+      width,
+    }),
+  ];
+};
 
 export const piMarkdownTheme = (theme: PiTheme): MarkdownTheme => ({
   bold: theme.bold,
@@ -207,7 +270,10 @@ export class MessageRow implements Component {
   render(width: number): string[] {
     if (this.cached && this.renderedWidth === width) return this.cached;
     this.renderedWidth = width;
-    this.cached = this.renderMessage(width);
+    // 兜底：任何一行超过终端宽度，pi-tui doRender 都会抛错终止整个进程；
+    // 分派层（user/system/shell/timeline/markdown）各自按宽度折行后，这里
+    // 再对最终行做一次硬截断，防止第三方 Markdown 渲染器的超宽边界。
+    this.cached = clampLines(this.renderMessage(Math.max(1, width)), Math.max(1, width));
     return this.cached;
   }
 
@@ -217,18 +283,42 @@ export class MessageRow implements Component {
 
     if (message.role === "user") {
       const text = message.content || transcriptPartText(message);
-      const lines = text.split("\n").map((line, index) =>
-        index === 0
-          ? `${theme.accent(USER_PREFIX)}${theme.text(line)}`
-          : `  ${theme.text(line)}`,
-      );
+      // 用户输入（粘贴的剪贴板、长单行）以前不换行，直接按原始行渲染；
+      // 一旦某行超过终端宽度，doRender 抛错崩掉整个客户端（实测 211 列终端
+      // 粘贴 212 列的行即崩溃）。这里按终端宽度折行后再上色。
+      // `!cmd` 的输出块已在上面单独成行展示，这里只留一行提示，正文不重复堆叠。
+      const collapsed = collapseShellContextBlocks(text);
+      const lines = wrapPrefixed({
+        continuation: "  ",
+        prefix: USER_PREFIX,
+        style: theme.text,
+        text: collapsed.text,
+        width,
+      });
+      for (const notice of collapsed.notices) {
+        lines.push(...wrapPrefixed({
+          continuation: "    ",
+          prefix: "  ",
+          style: theme.muted,
+          text: notice,
+          width,
+        }));
+      }
       return lines.length > 0 ? lines : [theme.accent(USER_PREFIX)];
     }
 
+    if (message.role === "system" && message.content.startsWith(SHELL_ROW_PREFIX)) {
+      return renderShellRow(message.content, theme, width);
+    }
+
     if (message.role === "system") {
-      return message.content
-        .split("\n")
-        .map((line) => `${theme.warning("!")} ${theme.warning(line)}`);
+      return wrapPrefixed({
+        continuation: "  ",
+        prefix: `${theme.warning("!")} `,
+        style: theme.warning,
+        text: message.content,
+        width,
+      });
     }
 
     if (message.role === "timeline" && message.timeline) {

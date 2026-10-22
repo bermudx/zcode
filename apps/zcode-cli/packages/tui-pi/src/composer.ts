@@ -9,6 +9,8 @@ import {
   type SlashCommand,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { statSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import type {
   TuiEffortOption,
   TuiModelOption,
@@ -19,6 +21,30 @@ import { TUI_SWITCHABLE_MODES, modelOptionValue } from "@zcode/tui/internals";
 import type { PiTheme } from "./theme.js";
 
 type SlashCommandSource = readonly TuiSlashCommandSuggestion[] | undefined;
+
+/**
+ * Locate `fd` (or Debian's `fdfind`) on PATH.
+ *
+ * pi-tui's CombinedAutocompleteProvider silently disables *all* `@`-mention
+ * suggestions when it has no fd binary — getFuzzyFileSuggestions() returns []
+ * before ever touching the filesystem. Without this the composer shows no file
+ * completion at all (reported as "no @ file mentions").
+ */
+const resolveFdPath = (): string | undefined => {
+  const directories = (process.env.PATH ?? "").split(delimiter);
+  for (const name of ["fd", "fdfind"]) {
+    for (const directory of directories) {
+      if (!directory) continue;
+      const candidate = join(directory, name);
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch {
+        // not executable / not present: keep looking
+      }
+    }
+  }
+  return undefined;
+};
 
 export const toPiSlashCommands = (
   commands: SlashCommandSource,
@@ -78,6 +104,8 @@ export class Composer extends Editor {
       options: TuiOptions;
       models: () => readonly TuiModelOption[];
       efforts: () => readonly TuiEffortOption[];
+      /** Test seam: defaults to resolving `fd` from PATH. */
+      fdPath?: string | null;
     },
   ) {
     super(tui, { borderColor: theme.border, selectList: theme.selectList }, { paddingX: 1 });
@@ -96,6 +124,7 @@ export class Composer extends Editor {
       this.deps.efforts,
     );
     const basePath = this.deps.options.workspaceDirectory ?? process.cwd();
-    return new CombinedAutocompleteProvider(commands ?? [], basePath);
+    const fdPath = this.deps.fdPath === undefined ? resolveFdPath() : this.deps.fdPath;
+    return new CombinedAutocompleteProvider(commands ?? [], basePath, fdPath ?? null);
   }
 }

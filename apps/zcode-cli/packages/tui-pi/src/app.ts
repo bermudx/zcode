@@ -10,14 +10,13 @@ import {
   type OverlayHandle,
   type TUI,
 } from "@earendil-works/pi-tui";
-import type { CollaborationMode, SessionEvent, TurnId } from "@zcode/contracts";
+import type { CollaborationMode, SessionEvent } from "@zcode/contracts";
 import { getZCodeCopy, type TuiCopy } from "@zcode/i18n";
 import type {
+  DraftAttachment,
   SubmitValueOptions,
-  TuiModelOption,
   TuiOptions,
   TuiPromptInput,
-  TuiSelection,
   TuiStartupOptions,
   TuiSubmitPromptResult,
   TuiSwitchableMode,
@@ -27,8 +26,6 @@ import {
   ESCAPE_PAUSE_CONFIRMATION_WINDOW_MS,
   ESCAPE_PAUSE_PROMPT,
   NO_ACTIVE_OUTPUT_STATUS,
-  NO_SELECTABLE_MODEL_STATUS,
-  ONLY_ONE_MODEL_STATUS,
   SIDEBAR_HIDDEN_STATUS,
   SIDEBAR_LEADER_HINT,
   SIDEBAR_SHOWN_STATUS,
@@ -43,11 +40,6 @@ import {
   createTuiPermissionRequester,
   interruptedWorkflowNotices,
   lastAgentReplyText,
-  modelCommandQuery,
-  modelCommandText,
-  modelOptionValue,
-  modelPickerIndex,
-  nextSelectableModelOption,
   resolveDoublePressIntent,
   resetDoublePressGuard,
   resolveSidebarShortcut,
@@ -60,6 +52,10 @@ import {
   type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
 import { Composer } from "./composer.js";
+import { appendFileMentions } from "./mentions.js";
+import { openModelPicker, rotateModel } from "./model-chords.js";
+import { createShellEscapeRunner } from "./shell-prompt.js";
+import { isShellCommand } from "./shell.js";
 import {
   createCtrlCIntentGuard,
   resetCtrlCExitGuard,
@@ -118,6 +114,15 @@ export class PiTuiApp {
   private loaderMounted = false;
   private startupApplied = false;
   private readonly history: PiInputHistory;
+  /** `!cmd` 执行器：本地跑命令、打印结果、把输出缓到下一条 prompt。 */
+  private readonly shellEscape = createShellEscapeRunner({
+    appendMessage: (message) =>
+      this.store.setter("messages")((current) => [...current, message]),
+    clearDraft: () => this.history.setDraftValue(""),
+    cwd: () => this.options.workspaceDirectory ?? process.cwd(),
+    setStatus: (status) => this.store.set("status", status),
+  });
+  private attachmentSequence = 0;
   private submitPipelineCache: TuiOptions | undefined;
   private readonly fallback: {
     locale: NonNullable<TuiOptions["locale"]>;
@@ -413,13 +418,16 @@ export class PiTuiApp {
     const store = this.store;
     const text = value.trim();
     if (!text) return undefined;
+    // `@path` → 协议 file attachment（core 自己读文件）；`!cmd` 的输出随下一条 prompt 进上下文。
+    const draftAttachments = this.draftAttachmentsFor(text);
+    const promptText = this.shellEscape.consume(text);
 
     if (store.state.busy || store.state.activeTurnId) {
       return submitDuringActiveTurn({
         activeTurnId: store.state.activeTurnId,
         applyResult: this.applyResult,
         applySessionEvent: this.applyEvent,
-        draftAttachments: store.state.draftAttachments,
+        draftAttachments,
         messageInsertIndex: store.state.messages.length,
         options: this.submitPipeline(),
         requestPermission: this.requestPermission,
@@ -429,14 +437,14 @@ export class PiTuiApp {
         setQueuedInputs: store.setter("queuedInputs"),
         setStatus: (s) => store.set("status", s),
         submitOptions,
-        text,
+        text: promptText,
       });
     }
 
     return submitIdleTurn({
       applyResult: this.applyResult,
       applySessionEvent: this.applyEvent,
-      draftAttachments: store.state.draftAttachments,
+      draftAttachments,
       options: this.submitPipeline(),
       requestPermission: this.requestPermission,
       setBusy: (v) => {
@@ -453,15 +461,33 @@ export class PiTuiApp {
       setStatus: (s) => store.set("status", s),
       setStatusDetails: store.setter("statusDetails"),
       submitOptions,
-      text,
+      text: promptText,
       turnRef: this.store.turnAbort,
     });
   };
+
+  /** `@path` tokens in the draft become file attachments the core reads. */
+  private draftAttachmentsFor(text: string): DraftAttachment[] {
+    // Slash commands are control messages; only real prompts carry attachments.
+    if (text.startsWith("/")) return this.store.state.draftAttachments;
+    return appendFileMentions({
+      allocateId: () => (this.attachmentSequence += 1),
+      existing: this.store.state.draftAttachments,
+      text,
+      workspaceDirectory: this.options.workspaceDirectory ?? process.cwd(),
+    });
+  }
 
   private handleEditorSubmit(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
     this.editor.addToHistory(trimmed);
+    // `!cmd` 在客户端工作区执行，输出进 transcript 并缓冲到下一条 prompt；
+    // 它不是一次模型回合（core 没有“追加本地消息”的协议面）。
+    if (isShellCommand(trimmed)) {
+      void this.shellEscape.run(trimmed);
+      return;
+    }
     void this.submitValue(trimmed);
   }
 
@@ -555,51 +581,23 @@ export class PiTuiApp {
     }
 
     if (matchesKey(data, "ctrl+p")) {
-      const models = store.state.modelOptions as TuiModelOption[];
-      const selectable = models.filter((model) => !(model as { disabledReason?: string }).disabledReason);
-      if (selectable.length === 0) {
-        store.set("status", NO_SELECTABLE_MODEL_STATUS);
-        return { consume: true };
-      }
-      if (selectable.length === 1) {
-        store.set("status", ONLY_ONE_MODEL_STATUS);
-        return { consume: true };
-      }
-      const next = nextSelectableModelOption(models, store.state.model);
-      if (!next) {
-        store.set("status", ONLY_ONE_MODEL_STATUS);
-        return { consume: true };
-      }
-      const preserveDraft = modelCommandQuery(this.editor.getText()) === undefined;
-      void this.submitValue(modelCommandText(next), { preserveDraft, silent: true }).then(
-        (result) => {
-          if (result?.response) store.set("status", result.response);
-        },
-      );
+      rotateModel({
+        currentModel: store.state.model,
+        draft: this.editor.getText(),
+        models: store.state.modelOptions,
+        setStatus: (status) => store.set("status", status),
+        submitValue: this.submitValue,
+      });
       return { consume: true };
     }
 
     if (matchesKey(data, "ctrl+l")) {
-      const models = store.state.modelOptions;
-      if (models.length === 0) {
-        store.set("status", NO_SELECTABLE_MODEL_STATUS);
-        return { consume: true };
-      }
-      const selection: TuiSelection = {
-        emptyMessage: "No models available.",
-        filterable: true,
-        items: models.map((model) => ({
-          command: modelCommandText(model),
-          id: modelOptionValue(model),
-          primary: model.label,
-          secondary: modelOptionValue(model),
-        })),
-        prompt: "Select a model.",
-        selectedIndex: modelPickerIndex(models, store.state.model),
-        title: "Switch model",
-      };
-      store.set("selection", createSelectionState(selection));
-      store.set("status", "Select a model.");
+      openModelPicker({
+        currentModel: store.state.model,
+        models: store.state.modelOptions,
+        setSelection: (selection) => store.set("selection", selection),
+        setStatus: (status) => store.set("status", status),
+      });
       return { consume: true };
     }
 
