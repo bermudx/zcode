@@ -1,3 +1,5 @@
+> **piz — a maintained patch-carrying ZCode fork.** We focus on a thin pi terminal client and shared headless core; standalone zcode-allowance development is parked. See [FORK.md](FORK.md) for branch roles, upstream baseline, verification and installation status. Bring piz-specific issues to maintainer bermudi; no public fork issue tracker is configured. Upstream documentation and attribution follow below.
+
 # ZCode
 
 <div align="center">

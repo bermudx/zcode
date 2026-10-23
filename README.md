@@ -1,3 +1,5 @@
+> **piz：维护中的 ZCode 补丁分支。** 本分支专注于轻量 pi 终端客户端与共享无界面 core；独立 zcode-allowance 构建暂缓维护。分支规则、上游基线、验证和安装状态见 [FORK.md](FORK.md)。piz 专属问题请联系维护者 bermudi；尚未配置公开的 fork issue tracker。以下保留上游文档与署名。
+
 # ZCode
 
 <div align="center">
