@@ -397,3 +397,74 @@ abortSignal 传下去。
   deny/decline，绝不伪造用户批准。
 - 渲染后即可被 herdr 的 piz manifest 识别为 blocked/needs-attention，
   无需 herdr 侧改动。
+## Herdr 生命周期上报（客户端侧 reporter + core env 标记）
+
+### 问题
+
+`zcode-attach`（piz 启动器）在 herdr pane 里曾被识别成 `zcode`：
+`process.title = "zcode-attach"` 不在 herdr 的进程名表里，唯一的身份来
+源是 `~/.zcode/herdr-hook.sh` 钩子（`--agent zcode`）。该钩子在共享
+core 进程内触发，env 是 core spawn 时烘焙的——`HERDR_PANE_ID` 永远是
+拉起 core 的那个 pane，第二个及以后 attach 的客户端全部错报；core 被
+复用时连第一个 pane 都可能 stale。结果：状态错 pane、错 agent、
+resume 命令指向 `zcode --resume`。
+
+### 设计
+
+两层防御，互不依赖：
+
+1. **客户端 reporter**（`attach/herdr-reporter.ts`）：状态所有权在
+   客户端。仅当三个 env 同时存在才激活：`HERDR_ENV=1`、
+   `HERDR_PANE_ID`、herdr CLI 路径 `HERDR_BIN_PATH`。经
+   `herdr pane report-agent <pane> --source piz --agent piz …` 上报：
+
+   | 会话事件                | herdr 状态 |
+   | ----------------------- | ---------- |
+   | 绑定（新/恢复会话句柄） | idle + `--agent-session-id <sid>` + resume argv `piz --resume <sid>` |
+   | `turn_started`          | working    |
+   | `permission_requested`  | blocked（`--message "permission: <toolName>"`） |
+   | `permission_resolved`/`permission_denied` | 回到该会话绑定态（有未结回合则 working，否则 idle） |
+   | `turn_complete`/`turn_error` | idle    |
+
+   绑定经 `AttachRuntime.onSessionBound`（`registerSession` 单点触发，
+   覆盖初始 attach、`/new`、`/resume`、`/fork`、断线重连换句柄）；
+   事件经 `AttachSessionHandle.addSink` 常驻 sink。reporter 只认当前
+   绑定句柄的事件——旧句柄（已 detach 会话）的迟到事件不影响 pane。
+   只对 `zcode-attach` 专用入口（attach-main）启用；monolith
+   `zcode attach`/`tui --shared-core` 不启用（进程是 `zcode`，
+   herdr 侧仍按 ZCode 处理）。
+
+2. **core env 标记**：`ensureServer` spawn core 时写
+   `ZCODE_ATTACH_CORE=1`。语义：「这个 core 为 attach 客户端服务，
+   env 烘焙的 pane 归属无效」。`~/.zcode/herdr-hook.sh` 见到该标记
+   直接 no-op，从根上停掉共享 core 的 zcode 误报。
+
+   - 优先级/生效面：标记由客户端在 spawn 时无条件写入，不是用户配
+     置；in-process core（desktop/monolith tui）不经 ensureServer，
+     不受影响；zcode attach（monolith）客户端同样受益——共享 core
+     的钩子对任何非首个 pane 都是错的。
+   - 失败行为：标记缺失（旧 core 仍在跑）时钩子照旧误报，但 herdr
+     侧 `zcode-attach`→`piz` 的进程识别会让 `--agent zcode` 的钩子
+     上报与该 pane 的检测 agent 冲突被拒；客户端 reporter 的真实
+     `--agent piz` 上报仍然生效。
+   - 复用 core：已存在的 core 保留 spawn 时的 env（含旧 HERDR_*
+     或无标记），客户端不补写；行为由 herdr 侧冲突拒绝兜底。
+
+   上报本身 best-effort：`execFile` 参数数组（不经 shell）、2s 超
+   时、stdio 全丢、失败静默（不污染协议 stdout；`--verbose` 时写
+   stderr）。`--seq` 用进程内单调递增（epoch-ms × 1000 + 计数器），
+   重启/重绑不会回退。
+
+### 验收
+
+- herdr pane 中 `zcode-attach` 进程识别为 `piz`（herdr
+  `Agent::Piz`，别名 `piz`/`zcode-attach`/`zcode-attach.cjs`）。
+- `herdr agent get <pane>`：agent `piz`、状态随
+  idle/working/blocked 转换、`--agent-session-id` 为当前会话、
+  resume argv 为 `piz --resume <sid>`。
+- 共享 core 的 `zcode-hooks` 上报不再认领 piz pane。
+- `ZCODE_ATTACH_CORE` 单测：env 注入进入 childEnv；hook 标记抑制
+  由脚本侧 `[ -n "${ZCODE_ATTACH_CORE:-}" ] && exit 0` 承担，
+  不进仓库代码路径。
+- 上报单测：env gate、事件→状态映射、绑定 resume argv、seq 单调、
+  进程调用参数数组（含 `--agent-session-id`、尾部 `--` 分隔）。

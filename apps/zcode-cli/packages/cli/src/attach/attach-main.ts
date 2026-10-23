@@ -79,6 +79,7 @@ const main = async (): Promise<number> => {
     __CLI_VERSION__,
     "pi",
     resume,
+    "piz",
   );
 };
 

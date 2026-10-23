@@ -33,6 +33,7 @@ import {
   AttachRuntime,
   createAttachPromptHandler,
 } from "./attach-tui-options.js";
+import { createAttachHerdrReporter } from "./herdr-reporter.js";
 
 /**
  * 解析 attach 入口的会话选择目标：
@@ -87,6 +88,9 @@ export const runAttachCommand = async (
   version: string,
   tuiFrontend: CliTuiFrontend = "pi",
   resumeRequest?: CliResumeRequest,
+  // "piz" 仅 zcode-attach 专用入口（attach-main）传：进程名/产品即 piz，
+  // herdr reporter 报 --agent piz。monolith 入口进程是 zcode，不传。
+  attachHerdrAgent?: "piz",
 ): Promise<number> => {
   try {
     const workspaceDirectory = (deps.cwd ?? process.cwd)();
@@ -112,6 +116,23 @@ export const runAttachCommand = async (
         socketPath: (await ensureServer({ env, version, workspace })).socketPath,
       }),
     });
+    // herdr reporter：必须在 createAttachPromptHandler 注册首个句柄前挂好
+    // onSessionBound，才能收到初始绑定（否则 pane 无 session/resume 元数据）。
+    const herdrReporter =
+      attachHerdrAgent === "piz"
+        ? createAttachHerdrReporter({
+            env,
+            onError: options.verbose
+              ? (error) =>
+                  ctx.stderr.write(
+                    `herdr report failed: ${error instanceof Error ? error.message : String(error)}\n`,
+                  )
+              : undefined,
+          })
+        : undefined;
+    if (herdrReporter) {
+      runtime.onSessionBound((handle) => herdrReporter.bind(handle));
+    }
     const client = await runtime.connect();
     // 瘦客户端（zcode-attach）不带 config 适配器：locale 用轻量路径；
     // monolith 经 deps.resolveAttachStartupLocale 注入完整 createConfig 实现。

@@ -90,11 +90,21 @@ export class AttachRuntime {
   private connecting: Promise<AttachClient> | undefined;
   private stopped = false;
   private readonly statusListeners = new Set<(status: string) => void>();
+  private readonly sessionBoundListeners = new Set<
+    (handle: AttachSessionHandle) => void
+  >();
 
   /** Écoute de l'état de connexion (port TuiOptions.subscribeConnectionStatus). */
   onConnectionStatus(listener: (status: string) => void): () => void {
     this.statusListeners.add(listener);
     return () => this.statusListeners.delete(listener);
+  }
+
+  /** 会话绑定/换绑的统一观察口（初始 attach、/new、/resume、/fork、重连换句柄）；
+   *  herdr reporter 等外部状态投影经此跟随当前句柄。 */
+  onSessionBound(listener: (handle: AttachSessionHandle) => void): () => void {
+    this.sessionBoundListeners.add(listener);
+    return () => this.sessionBoundListeners.delete(listener);
   }
 
   private emitStatus(status: string): void {
@@ -312,6 +322,7 @@ export class AttachRuntime {
   registerSession(handle: AttachSessionHandle): void {
     this.sessions.set(handle.sessionId, handle);
     this.current = handle;
+    for (const listener of this.sessionBoundListeners) listener(handle);
   }
 
   get currentSession(): AttachSessionHandle | undefined {
