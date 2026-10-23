@@ -1,12 +1,21 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   applyBashSourceScript,
+  applyBashSourceScripts,
   applyBashSourcesToExecutionRequest,
   materializeBashInternalSourceScript,
 } from "../src/exec/bash-startup-script.js";
+
+const TEST_ZSH_PATH = ["/usr/bin/zsh", "/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(
+  (path) => existsSync(path),
+);
+const TEST_BASH_PATH = ["/usr/bin/bash", "/bin/bash", "/usr/local/bin/bash"].find((path) =>
+  existsSync(path),
+);
 
 describe("bash source script materializer", () => {
   it("writes a hash-scoped script and sources it before the command", () => {
@@ -32,7 +41,7 @@ describe("bash source script materializer", () => {
       expect(statSync(materialized!.path).isFile()).toBe(true);
 
       const command = applyBashSourceScript("zcode_startup_marker", materialized!);
-      expect(command).toBe(`. '${materialized!.path}'\nzcode_startup_marker`);
+      expect(command).toBe(`. '${materialized!.path}'\neval 'zcode_startup_marker'`);
     } finally {
       rmSync(rootDir, { force: true, recursive: true });
     }
@@ -68,7 +77,7 @@ describe("bash source script materializer", () => {
     };
 
     expect(applyBashSourceScript("echo ok", materialized)).toBe(
-      ". /c/Users/me/AppData/Local/ZCode/startup.sh\necho ok",
+      ". /c/Users/me/AppData/Local/ZCode/startup.sh\neval 'echo ok'",
     );
   });
 
@@ -105,7 +114,10 @@ describe("bash source script materializer", () => {
       });
 
       expect(rewritten.command.command).toMatch(
-        /^\. '\/tmp\/init snapshot\.sh' 2>\/dev\/null \|\| true\n\. '.+embedded-search-startup-.+\.sh'\nfind \. -name '\*\.ts'$/u,
+        /^\. '\/tmp\/init snapshot\.sh' 2>\/dev\/null \|\| true\n\. '.+embedded-search-startup-.+\.sh'\neval '/u,
+      );
+      expect(rewritten.command.command).toContain(
+        "eval 'find . -name '\\''*.ts'\\'''",
       );
     } finally {
       rmSync(rootDir, { force: true, recursive: true });
@@ -145,7 +157,7 @@ describe("bash source script materializer", () => {
       });
 
       expect(rewritten.command.command).toMatch(
-        /^\. \/c\/Users\/me\/AppData\/Local\/ZCode\/shell-snapshots\/snapshot-bash-1\.sh 2>\/dev\/null \|\| true\n\. '.+embedded-search-startup-.+\.sh'\ngrep needle file\.txt$/u,
+        /^\. \/c\/Users\/me\/AppData\/Local\/ZCode\/shell-snapshots\/snapshot-bash-1\.sh 2>\/dev\/null \|\| true\n\. '.+embedded-search-startup-.+\.sh'\neval 'grep needle file\.txt'$/u,
       );
 
       const startupDir = join(rootDir, "bash-startup", "session");
@@ -157,6 +169,48 @@ describe("bash source script materializer", () => {
       expect(startupContent).toContain(
         "command '/c/Program Files/ZCode/zcode.exe' /c/Users/me/z-code/apps/zcode-cli/src/run.ts __internal-search grep \"$@\"",
       );
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+    }
+  });
+
+  it("returns the command unchanged when there are no sources", () => {
+    expect(applyBashSourceScripts("echo ok", [])).toBe("echo ok");
+  });
+
+  it("eval-quotes commands containing single quotes", () => {
+    const materialized = { path: "/tmp/start up.sh", shellPath: "/tmp/start up.sh" };
+    expect(applyBashSourceScript("echo 'a b'", materialized)).toBe(
+      ". '/tmp/start up.sh'\neval 'echo '\\''a b'\\'''",
+    );
+  });
+
+  it.runIf(TEST_ZSH_PATH)("zsh expands snapshot aliases through eval", () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "zcode-bash-startup-zsh-"));
+    try {
+      const snapshot = join(rootDir, "snapshot.sh");
+      writeFileSync(snapshot, "alias -- zcode_snap_alias='echo zsh-alias-ok'\n");
+      const command = applyBashSourceScripts("zcode_snap_alias", [
+        { path: snapshot, shellPath: snapshot },
+      ]);
+      // 不带 eval 边界时 zsh -c 对整串先解析，source 的 alias 对后续命令不生效。
+      const stdout = execFileSync(TEST_ZSH_PATH!, ["-c", command], { encoding: "utf8" });
+      expect(stdout.trim()).toBe("zsh-alias-ok");
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+    }
+  });
+
+  it.runIf(TEST_BASH_PATH)("bash keeps expanding snapshot aliases through eval", () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "zcode-bash-startup-bash-"));
+    try {
+      const snapshot = join(rootDir, "snapshot.sh");
+      writeFileSync(snapshot, "shopt -s expand_aliases\nalias -- zcode_snap_alias='echo bash-alias-ok'\n");
+      const command = applyBashSourceScripts("zcode_snap_alias", [
+        { path: snapshot, shellPath: snapshot },
+      ]);
+      const stdout = execFileSync(TEST_BASH_PATH!, ["-c", command], { encoding: "utf8" });
+      expect(stdout.trim()).toBe("bash-alias-ok");
     } finally {
       rmSync(rootDir, { force: true, recursive: true });
     }

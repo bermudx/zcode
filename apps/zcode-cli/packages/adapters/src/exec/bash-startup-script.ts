@@ -119,7 +119,10 @@ export function applyBashSourceScripts(command: string, sources: BashSourceScrip
     const sourceCommand = `. ${quoteSourcePath(source)}`;
     return source.optional ? `${sourceCommand} 2>/dev/null || true` : sourceCommand;
   });
-  return sourceLines.length === 0 ? command : [...sourceLines, command].join("\n");
+  if (sourceLines.length === 0) return command;
+  // zsh -c 把整串先解析再执行：source 进来的 alias 对同一串里的命令永不生效，
+  // eval 在 source 完成后重新解析命令文本（bash 下语义等价，alias 展开时点在 eval 内）。
+  return [...sourceLines, `eval ${shellQuoteAlways(command)}`].join("\n");
 }
 
 function supportsBashSourceScripts(shellDialect: StartupShellDialect | undefined): boolean {

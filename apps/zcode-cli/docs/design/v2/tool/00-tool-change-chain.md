@@ -1,5 +1,15 @@
 # Tool Change Chain Spec
 
+## Bash shell init 快照与用户 alias
+
+snapshot 创建由 `shell -c -l` 改为 `shell -ic`：多数用户 rc 对非交互执行提前 return，
+`-c -l` 抓不到 alias/function；interactive 下 rc 正常加载，rc 噪音仅进 stderr，10s 超时兜底，
+失败仍回落 `-c -l` 原路径。用户命令在有 source（snapshot/embedded search prelude）时统一
+改写为 `eval '<shell-quoted command>'`：zsh `-c` 先整体解析再执行，同串内 `. snapshot` 定义的
+alias 对后续命令不生效，eval 让命令在 source 完成后重新解析；bash 语义等价，退出码、
+cwd capture、stdin、kill 树与权限链不变。CMD/legacy dialect 不注入 source，不受影响。
+合同见根目录 `docs/bash-shell-provider.md` 的 Startup source 一节。
+
 ## Bash 临时输出路径隔离
 
 主应用及 workflow 子运行时装配 tmp 父目录 → execution adapter 实际准备具名输出文件 →

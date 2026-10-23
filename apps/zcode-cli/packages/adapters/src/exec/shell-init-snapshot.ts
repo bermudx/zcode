@@ -148,7 +148,9 @@ export class ShellInitSnapshotManager {
       snapshotPath,
     });
 
-    await this.execFile(request.shellPath, ["-c", "-l", creationScript], {
+    // -ic：很多 rc 只在 interactive 下生效（zsh4humans init、bashrc 的 $- i 判断），
+    // 非交互执行会提前 return，snapshot 抓不到 alias；rc 噪音只进 stderr，不影响结果文件。
+    await this.execFile(request.shellPath, ["-ic", creationScript], {
       encoding: "utf8",
       env: request.env,
       maxBuffer: SNAPSHOT_MAX_BUFFER_BYTES,

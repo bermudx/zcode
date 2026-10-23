@@ -66,7 +66,14 @@ workspace path/identity 不参与 shell identity；实际 executable 可用性�
 
 - 在 ZCode storage 的 session `bash-startup/` 目录物化 0600 source script；
 - Git Bash 路径转换为其可读格式；
+- `shell-init-snapshot.ts` 用 `-ic` 跑一次性创建脚本：source 用户 rc（zsh→`~/.zshrc`、
+  bash→`~/.bashrc`）后把 alias/function/setopt/PATH 导出到 `shell-snapshots/*.sh`；interactive
+  是必要的，多数 rc 对非交互执行提前 return（zsh4humans init、`case $- in *i*`），
+  rc 输出只进 stderr；有 snapshot 时用户命令不带 `-l` 运行；
 - 可选 leading sources 与 embedded search prelude 按顺序 `. <quoted path>`；
+- 存在 source 时用户命令统一改写成 `eval '<shell-quoted command>'`：zsh `-c` 先把整串
+  一次性解析再执行，同串内 source 进来的 alias 对后面的命令永不生效；eval 让命令在
+  source 完成后重新解析，snapshot alias/function 才能应用（bash 下语义等价）；
 - CMD/legacy dialect 不注入 POSIX source；
 - script 文件名包含内容 hash，相同内容复用。
 

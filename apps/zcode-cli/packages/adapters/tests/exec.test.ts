@@ -61,6 +61,10 @@ const POSIX_BASH_PATH =
   process.platform === "win32"
     ? undefined
     : findExecutable(["bash", "/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]);
+const POSIX_ZSH_PATH =
+  process.platform === "win32"
+    ? undefined
+    : findExecutable(["zsh", "/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"]);
 const WINDOWS_GIT_BASH_PATH =
   process.platform === "win32" ? resolveWindowsGitBashShell(process.env) : undefined;
 
@@ -1478,7 +1482,7 @@ describe("NodeExecutionAdapter", () => {
         expect(result.stdout.text).toBe("1");
 
         const invocations = (await readFile(shellLog, "utf8")).trim().split("\n");
-        expect(invocations[0]).toContain("-c -l");
+        expect(invocations[0]).toContain("-ic");
         expect(invocations.at(-1)).toMatch(/^-c /u);
         expect(invocations.at(-1)).not.toContain("-l ");
       } finally {
@@ -1598,7 +1602,8 @@ describe("NodeExecutionAdapter", () => {
       await mkdir(bin, { recursive: true });
       await writeFile(
         join(home, ".bashrc"),
-        "alias zcode_snapshot_alias='printf alias-from-snapshot'\n",
+        "alias zcode_snapshot_alias='printf alias-from-snapshot'\n" +
+          'case "$-" in *i*) alias zcode_guard_alias=\'printf guard-from-interactive\';; esac\n',
       );
       await writeFile(
         shellWrapper,
@@ -1626,7 +1631,7 @@ describe("NodeExecutionAdapter", () => {
         const result = await adapter.run({
           command: {
             mode: "shell",
-            command: "zcode_snapshot_alias",
+            command: "zcode_snapshot_alias && zcode_guard_alias",
             shellProfile: "posix-bash",
             shellOverride: {
               dialect: "posix",
@@ -1642,11 +1647,11 @@ describe("NodeExecutionAdapter", () => {
 
         expect(result.status).toBe("completed");
         expect(result.exitCode).toBe(0);
-        expect(result.stdout.text).toBe("alias-from-snapshot");
+        expect(result.stdout.text).toBe("alias-from-snapshotguard-from-interactive");
 
         const log = await readFile(shellLog, "utf8");
         const invocations = log.trim().split("\n");
-        expect(invocations[0]).toContain("-c -l");
+        expect(invocations[0]).toContain("-ic");
         expect(invocations.at(-1)).toMatch(/^-c /u);
         expect(invocations.at(-1)).not.toContain("-l ");
 
@@ -1668,6 +1673,77 @@ describe("NodeExecutionAdapter", () => {
           throw error;
         });
         expect(afterClose).toEqual([]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!POSIX_ZSH_PATH)(
+    "applies zsh snapshot aliases through the eval re-parse boundary",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "zcode-shell-init-zsh-"));
+      const home = join(root, "home");
+      const bin = join(root, "bin");
+      const shellLog = join(root, "shell-args.log");
+      const shellWrapper = join(bin, "zsh-wrapper");
+
+      await mkdir(home, { recursive: true });
+      await mkdir(bin, { recursive: true });
+      await writeFile(
+        join(home, ".zshrc"),
+        "alias zcode_zsh_alias='printf zsh-alias-ok'\n" +
+          "[[ -o interactive ]] && alias zcode_zsh_guard='printf zsh-guard-ok'\n",
+      );
+      await writeFile(
+        shellWrapper,
+        [
+          "#!/usr/bin/env zsh",
+          'printf \'%q \' "$@" >> "$ZCODE_TEST_SHELL_LOG"',
+          "printf '\\n' >> \"$ZCODE_TEST_SHELL_LOG\"",
+          `exec ${JSON.stringify(POSIX_ZSH_PATH!)} "$@"`,
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      try {
+        const adapter = new NodeExecutionAdapter({
+          outputRootDir: root,
+          processEnv: {
+            ...process.env,
+            HOME: home,
+            SHELL: shellWrapper,
+            ZCODE_TEST_SHELL_LOG: shellLog,
+          },
+        });
+
+        const result = await adapter.run({
+          command: {
+            mode: "shell",
+            command: "zcode_zsh_alias && zcode_zsh_guard",
+            shellProfile: "posix-bash",
+            shellOverride: {
+              dialect: "posix",
+              display: { name: "zsh" },
+              path: shellWrapper,
+              source: "auto-detected",
+            },
+          },
+          trace: {
+            sessionId: "shell-init-zsh-session",
+          },
+        });
+
+        expect(result.status).toBe("completed");
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.text).toBe("zsh-alias-okzsh-guard-ok");
+
+        const log = await readFile(shellLog, "utf8");
+        const invocations = log.trim().split("\n");
+        expect(invocations[0]).toContain("-ic");
+        expect(invocations.at(-1)).toMatch(/^-c /u);
+        expect(invocations.at(-1)).not.toContain("-l ");
       } finally {
         await rm(root, { recursive: true, force: true });
       }
@@ -1822,7 +1898,7 @@ describe("NodeExecutionAdapter", () => {
         expect(second.stdout.text).toBe("second-ok");
 
         const invocations = (await readFile(shellLog, "utf8")).trim().split("\n");
-        expect(invocations[0]).toContain("-c -l");
+        expect(invocations[0]).toContain("-ic");
         expect(invocations[1]).toMatch(/^-c /u);
         expect(invocations[1]).not.toContain("-l ");
         expect(invocations[2]).toContain("-c -l");
@@ -1847,7 +1923,7 @@ describe("NodeExecutionAdapter", () => {
           "#!/usr/bin/env bash",
           'printf \'%q \' "$@" >> "$ZCODE_TEST_SHELL_LOG"',
           "printf '\\n' >> \"$ZCODE_TEST_SHELL_LOG\"",
-          "if [ \"$1\" = '-c' ] && [ \"$2\" = '-l' ] && printf '%s' \"$3\" | grep -q 'SNAPSHOT_FILE='; then",
+          "if [ \"$1\" = '-ic' ] && printf '%s' \"$2\" | grep -q 'SNAPSHOT_FILE='; then",
           "  sleep 0.2",
           "fi",
           `exec ${JSON.stringify(POSIX_BASH_PATH!)} "$@"`,
@@ -1892,7 +1968,7 @@ describe("NodeExecutionAdapter", () => {
 
         const invocations = (await readFile(shellLog, "utf8")).trim().split("\n");
         expect(invocations).toHaveLength(1);
-        expect(invocations[0]).toContain("-c -l");
+        expect(invocations[0]).toContain("-ic");
         expect(invocations[0]).toContain("SNAPSHOT_FILE=");
 
         const snapshotSessionDir = join(root, "shell-snapshots");
@@ -1929,7 +2005,7 @@ describe("NodeExecutionAdapter", () => {
           "#!/usr/bin/env bash",
           'printf \'%q \' "$@" >> "$ZCODE_TEST_SHELL_LOG"',
           "printf '\\n' >> \"$ZCODE_TEST_SHELL_LOG\"",
-          "if [ \"$1\" = '-c' ] && [ \"$2\" = '-l' ] && printf '%s' \"$3\" | grep -q 'SNAPSHOT_FILE='; then",
+          "if [ \"$1\" = '-ic' ] && printf '%s' \"$2\" | grep -q 'SNAPSHOT_FILE='; then",
           "  sleep 0.2",
           "fi",
           `exec ${JSON.stringify(POSIX_BASH_PATH!)} "$@"`,
@@ -1978,7 +2054,7 @@ describe("NodeExecutionAdapter", () => {
 
         const invocations = (await readFile(shellLog, "utf8")).trim().split("\n");
         expect(invocations).toHaveLength(1);
-        expect(invocations[0]).toContain("-c -l");
+        expect(invocations[0]).toContain("-ic");
         expect(invocations[0]).toContain("SNAPSHOT_FILE=");
 
         await adapter.close();
@@ -2003,7 +2079,7 @@ describe("NodeExecutionAdapter", () => {
           "#!/usr/bin/env bash",
           'printf \'%q \' "$@" >> "$ZCODE_TEST_SHELL_LOG"',
           "printf '\\n' >> \"$ZCODE_TEST_SHELL_LOG\"",
-          "if [ \"$1\" = '-c' ] && [ \"$2\" = '-l' ] && printf '%s' \"$3\" | grep -q 'SNAPSHOT_FILE='; then",
+          "if [ \"$1\" = '-ic' ] && printf '%s' \"$2\" | grep -q 'SNAPSHOT_FILE='; then",
           "  exit 42",
           "fi",
           `exec ${JSON.stringify(POSIX_BASH_PATH!)} "$@"`,
@@ -2044,7 +2120,7 @@ describe("NodeExecutionAdapter", () => {
 
         const log = await readFile(shellLog, "utf8");
         const invocations = log.trim().split("\n");
-        expect(invocations[0]).toContain("-c -l");
+        expect(invocations[0]).toContain("-ic");
         expect(invocations.at(-1)).toContain("-c -l");
       } finally {
         await rm(root, { recursive: true, force: true });
