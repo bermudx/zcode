@@ -2,6 +2,8 @@
 
 [FORK.md](../../FORK.md) owns policy, patch inventory and the maintenance log.
 This file describes the candidate workflow; it is not an unattended updater.
+The goal protected by a sync is extra GLM Coding Plan usage in a CLI without
+Electron or a heavy core per invocation/session—not merely keeping a TUI alive.
 
 ## Recorded baseline
 
@@ -34,6 +36,9 @@ No feature branch is implicitly eligible for integration.
    Review rerere resolutions too.
 5. For each P001–P005 patch, record retained/replaced/obsolete/redesign. Confirm
    upstream replacements satisfy our scenarios before removing local behavior.
+   Signing is mandatory: reject candidates that drop/break it. Retire local
+   signing code only for a verified replacement preserving the signed extra-usage
+   path, never merely because unsigned requests still authenticate.
 6. Update specs before implementation and add regressions before behavior changes.
    Follow architecture governance and verify both CLI and root protocol consumers.
 7. Run [verification](verification.md). Record failures, environmental limits,
@@ -57,7 +62,7 @@ No feature branch is implicitly eligible for integration.
 | Session RPC, snapshots, model preferences/catalog, attachments | P004: CLI attach adapter; verify real reply shapes, catalog preservation, new/continue/resume, queue/steer, reconnect and wire attachments |
 | Bootstrap, plugins/MCP, app-server startup | P004: no-plugin entry gate, socket listener, spawn ownership/races, workspace identity and session lifecycle |
 | Root shared protocol/schema changes | P004: runtime validation and matched client/core compatibility; root shared contract test, not only CLI checks |
-| Provider auth/request/error handling | P001: signing tests, actual supported credential path, explicit errors; preserve signing independently of parked standalone build |
+| Provider auth/request/error handling | P001: preserve the extra-usage request path through the shared core, signing tests and explicit errors; verify allowance eligibility separately from ordinary authentication, and preserve signing independently of the parked standalone build |
 | Build tooling / dependency layout | Thin-client import graph and core pairing; rebuild changed dependencies before consumers, then measure client/server memory and child processes |
 
 ## One-time allowance audit before parking its development completely

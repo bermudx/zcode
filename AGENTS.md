@@ -6,8 +6,12 @@ It owns fork direction, branch roles, active patches and maintenance policy.
 
 ## Working rules
 
-- Product focus: thin pi terminal client + shared headless core. Standalone
-  zcode-allowance is parked. Do not remove inherited signing by association.
+- Product goal: ZCode's extra GLM Coding Plan usage in a preferred CLI, without
+  Electron or a heavy core per invocation/session. Thin pi client + shared core
+  serves that goal. Standalone zcode-allowance is parked; its extra-usage/signing
+  purpose is not. Signing is mandatory: do not ship a candidate that drops or
+  breaks it, or call unsigned ordinary-quota operation success. Do not claim
+  allowance eligibility from code presence alone.
 - Preserve unrelated dirty work and existing history. New carried-change commit
   subjects use `fork:`. Work on `patch/<topic>` or `sync/<date>-<sha>` branches.
 - Installed commands still point to the old trees. Changing this checkout does

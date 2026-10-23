@@ -1,4 +1,4 @@
-> **piz：维护中的 ZCode 补丁分支。** 本分支专注于轻量 pi 终端客户端与共享无界面 core；独立 zcode-allowance 构建暂缓维护。分支规则、上游基线、验证和安装状态见 [FORK.md](FORK.md)。piz 专属问题请联系维护者 bermudi；尚未配置公开的 fork issue tracker。以下保留上游文档与署名。
+> **piz：在 CLI 中使用 ZCode 的额外额度，避免每个会话启动独立重型 core。** 本补丁分支旨在通过轻量 pi 终端客户端与共享无界面 core 使用宣传中的 150% GLM Coding Plan 额度，无需 Electron 应用。额度公告不等于本构建已验证享有该额度；证据、验证与安装状态见 [FORK.md](FORK.md)。独立 zcode-allowance 构建暂缓维护。piz 专属问题请联系 bermudi；尚未配置公开的 fork tracker。以下保留上游文档与署名。
 
 # ZCode
 

@@ -3,13 +3,20 @@
 ## Identity and direction
 
 - **Mode:** patch-carrying fork of [ZCode](https://github.com/zai-org/ZCode).
-- **Purpose:** a low-overhead pi terminal client connected to a shared headless
-  ZCode core. Preserve upstream runtime capabilities without paying for a full
-  runtime and eager plugin/MCP processes in every terminal client.
+- **Purpose:** use ZCode's extra GLM Coding Plan usage allowance from a CLI,
+  without having to use the Electron app or pay the memory cost of a separate
+  heavy core for every CLI invocation/session. The operator prefers CLIs; the
+  thin pi frontend and shared headless core are the means, not the reason.
+- **Allowance context:** the operator reports that official binaries provide the
+  extra usage. The supplied [announcement screenshot](docs/fork/evidence/zcode-150-percent-announcement.png)
+  states: “ZCode users will continue to enjoy a 150% usage allowance on GLM Coding
+  Plan.” This records the product motivation and announcement, not a fresh
+  verification of our build's eligibility or actual account metering.
 - **Maintainer / decisions:** bermudi (personal tool; no public support SLA).
 - **Focus:** piz. The standalone zcode-allowance build is parked pending a memory
   redesign. Preserve it for reference; do not make it our integration target.
-  Request signing is already inherited by piz and is not retired by that decision.
+  Request signing is mandatory for the intended extra-usage path. It is already
+  inherited by piz and is not retired by parking the standalone build.
 - **Why a fork:** the current implementation crosses frontend, server startup,
   protocol and build boundaries; a wrapper alone does not contain these changes.
   Prefer upstream extension points and retire local patches where possible.
@@ -55,6 +62,19 @@ Repository-local rerere is enabled; review every replayed resolution.
 
 - Source baseline: the exact SHA in UPSTREAM, not a README version label or an
   upstream desktop release. Track public `main`; available release tags lag it.
+- Success requires both the intended extra-usage path and bounded incremental
+  memory cost as CLI clients/sessions are added. A working terminal UI, a signed
+  request, or a successful ordinary model turn alone does not prove the allowance.
+  Signing is a hard product requirement, not an optional optimization. Preserve
+  the signed provider-request path through the shared core; a candidate that
+  drops or breaks signing cannot ship. Unsigned ordinary-quota operation does
+  not satisfy this fork's goal. These are acceptance requirements, not a claim
+  that runtime fallback behavior has already been changed. Verify
+  actual eligibility/metering with observable service/account evidence when
+  available, and label it unverified otherwise.
+- Reuse shared cores across CLI invocations/sessions rather than creating a
+  heavy runtime for each client. Sharing does not remove session/workspace
+  isolation requirements or imply one global core across all workspaces.
 - Client and shared core must be built and installed as a matched pair. No
   cross-version protocol compatibility promise exists yet.
 - Preserve schema validation, workspace identity and path distinctions, session
@@ -79,7 +99,7 @@ submission/acceptance status is **unverified**; no fork PR links have been recor
 
 | ID | Purpose / touched areas | Provenance and regression evidence (not rerun) | Removal condition |
 |---|---|---|---|
-| P001 | Request signing and auth/security error policy: adapters request-security-edition, root shared policy | `86ab5b13`, `df8bc4a7`; adapters `client-request-signing.test.ts`; [design](apps/zcode-cli/docs/design/v2/model/client-request-signing.md) | Upstream equivalent verified against our supported credential/request path, or explicit product decision to drop signing |
+| P001 | Extra-usage request path: signing and auth/security error policy in adapters request-security-edition and root shared policy; code presence does not prove allowance eligibility | `86ab5b13`, `df8bc4a7`; adapters `client-request-signing.test.ts`; [design](apps/zcode-cli/docs/design/v2/model/client-request-signing.md) | Only retire the local implementation when a verified replacement preserves mandatory signing and the supported extra-usage request path |
 | P002 | Original TUI controls, paste routing and extracted frontend interfaces: CLI tui package | `090276d9`, `31a770cc`, `c0abfcb1`, `6ee50f58`; tui keymap/paste/exit tests | No remaining piz dependency, or upstream equivalent passes relevant regressions; no wholesale deletion without dependency audit |
 | P003 | pi frontend: tui-pi, CLI selection/build wiring, architecture registration | `570ebd20` through `7e859585`; tui-pi tests incl. projection, composer, history, panels, terminal-drain, mentions, shell and wrapping; [design](apps/zcode-cli/docs/design/v2/tui-pi-frontend.md) | Upstream frontend meets our interaction and resource requirements |
 | P004 | Shared core and thin attach client: bootstrap socket listener, CLI attach/spawn/build, root shared protocol | `32dc8799` through later attach fixes including `61abbc11`; CLI attach tests, bootstrap socket-listener, root shared attach contract; [design](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md) | Upstream shared-core mode covers no-plugin isolation, matched builds, sessions, reconnect and low per-client cost |
@@ -142,6 +162,18 @@ Apache-2.0 license and upstream attribution. Do not publish under upstream's
 identity or enable inherited upload/update paths without a separate audit.
 
 ## Maintenance log
+
+### 2026-10-22 — correct the reason for the fork
+
+- Operator clarified the actual goal: obtain the official binaries' extra GLM
+  Coding Plan usage through a preferred CLI, without Electron or a heavy core
+  per invocation/session. Low-memory shared-core architecture serves that goal.
+- Preserved the supplied 150% announcement screenshot and distinguished that
+  announcement from unverified end-to-end allowance/metering for our build.
+- Updated purpose, README notices, agent direction and verification requirements.
+  Signing is explicitly mandatory: no sync may drop it or substitute unsigned
+  ordinary-quota operation. Local code may retire only behind a verified signed
+  replacement. Documentation only; no eligibility test, model call or runtime change.
 
 ### 2026-10-22 — establish maintained piz checkout; upstream check is a no-op
 

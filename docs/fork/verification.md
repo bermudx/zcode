@@ -82,10 +82,23 @@ imports have not pulled in the monolith runtime.
 - Actual authenticated model turn using only the operator-specified provider and
   model. Do not choose a different provider/model or incur a paid request as an
   incidental documentation check.
+- Mandatory signing gate: verify the supported provider-request path through
+  the actual shared core signs requests correctly. Missing/broken signing blocks
+  delivery; an unsigned ordinary-quota model turn is not an acceptable substitute.
+  Keep signing regressions even if the local implementation is replaced upstream.
+- Extra-usage acceptance is distinct from authentication: verify that the actual
+  piz client → shared core → provider request path qualifies for the intended
+  150% ZCode GLM Coding Plan allowance using observable service/account evidence
+  when available. Record the evidence and its limits without exposing credentials
+  or account data. A signing unit test or successful model turn alone is not
+  proof of extra allowance; mark eligibility/metering unverified if it cannot
+  be observed. Do not exhaust a quota merely to test the multiplier.
 - Model switching, attachments, fresh default session, explicit continue/resume,
   queued submission/steering, disconnect/reconnect and core restart recovery.
 - Idle CPU/RSS with 1 and 5 clients, recording server separately; observe process
-  children and confirm the no-plugins/MCP promise. Establish a fresh old-piz
+  children and confirm the no-plugins/MCP promise. Verify invocations/sessions
+  reuse the intended shared core rather than spawning one heavy core per client;
+  measure core count as well as total memory. Establish a fresh old-piz
   baseline; archived numbers are historical. No material regression is the
   proposed gate, not a fabricated numeric performance guarantee.
 - Client exit must not destroy shared sessions or a core used by other clients.

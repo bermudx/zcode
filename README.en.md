@@ -1,4 +1,4 @@
-> **piz — a maintained patch-carrying ZCode fork.** We focus on a thin pi terminal client and shared headless core; standalone zcode-allowance development is parked. See [FORK.md](FORK.md) for branch roles, upstream baseline, verification and installation status. Bring piz-specific issues to maintainer bermudi; no public fork issue tracker is configured. Upstream documentation and attribution follow below.
+> **piz — ZCode’s extra usage, in a CLI without per-session core bloat.** This patch-carrying fork aims to bring the advertised 150% GLM Coding Plan allowance to a thin pi terminal client backed by a shared headless core, without using the Electron app or launching a heavy core per invocation/session. The allowance announcement is not proof of this build’s eligibility; see [FORK.md](FORK.md) for evidence, verification and installation status. Standalone zcode-allowance development is parked. Bring piz-specific issues to bermudi; no public fork tracker is configured. Upstream documentation and attribution follow below.
 
 # ZCode
 
