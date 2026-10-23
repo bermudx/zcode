@@ -6,6 +6,7 @@ import {
   Container,
   Loader,
   Text,
+  isKeyRelease,
   matchesKey,
   type OverlayHandle,
   type TUI,
@@ -532,6 +533,12 @@ export class PiTuiApp {
 
   private dispatchChord(data: string): { consume?: boolean } | undefined {
     const store = this.store;
+
+    // kitty 协议（pi-tui 推 `\x1b[>7u`）下 press/release 共用同一键码，而
+    // matchesKey 不区分事件类型：不丢 release 会让每个物理按键在 chord 层
+    // 触发两次（↑ 一跳两条历史、Esc 单击即暂停、Shift+Tab 跨两档）。这里不
+    // 消费、交还焦点组件——pi-tui 对 wantsKeyRelease 的组件另有放行。
+    if (isKeyRelease(data)) return undefined;
 
     if (this.quitChoice.handleEarlyQuitKey(data, this.editor.getText())) return { consume: true };
 

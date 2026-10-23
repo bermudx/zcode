@@ -78,6 +78,11 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   选择面板，回车提交 `/model <ref>`）、`Ctrl+Y`（复制最后一条 agent 回复）、
   `Ctrl+V`/`Alt+V`（剪贴板图片粘贴，见下节）、`Shift+Tab`（mode 轮换
   `plan→build→guarded→yolo`）、空草稿 `+`/`-`（展开/收起 workflow 卡）。
+  chord 匹配前先经 `isKeyRelease` 丢弃 kitty release 事件且不消费（交还焦点
+  组件，由 `wantsKeyRelease` 过滤）：pi-tui 推 `\x1b[>7u`（flag 2 = 上报
+  press/repeat/release），release 与 press 键码相同而 `matchesKey` 不区分
+  事件类型，不过滤会让每个物理按键在 chord 层触发两次（↑/↓ 一跳两条历史、
+  Esc 单击即暂停、Shift+Tab 跨两档）。repeat 事件与 press 同路径，照常被处理。
 - Editor 自带 history 导航与 `recallPreviousInput` 远端历史并存：草稿为空时
   Up/Down 先走 CLI 侧 `recallPreviousInput`（跨会话持久历史），与现有前端一致。
 

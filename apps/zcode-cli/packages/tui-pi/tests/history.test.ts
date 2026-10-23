@@ -11,6 +11,13 @@ const historyOptions = (entries: string[]) => ({
     entries[skip] ? { text: entries[skip]! } : null,
 });
 
+// Kitty keyboard protocol (pi-tui pushes `\x1b[>7u`, flag 2 = event types):
+// one physical key produces press `\x1b[1;1:1A`, repeat `:2`, release `:3`.
+const KITTY_UP_PRESS = "\x1b[1;1:1A";
+const KITTY_UP_REPEAT = "\x1b[1;1:2A";
+const KITTY_UP_RELEASE = "\x1b[1;1:3A";
+const KITTY_DOWN_RELEASE = "\x1b[1;1:3B";
+
 test("Up on an empty draft recalls older entries with an increasing skip", async () => {
   const h = createHarness(historyOptions(["first", "second"]));
   h.feed(UP);
@@ -70,6 +77,45 @@ test("typing after a recall resets the skip index", async () => {
   h.feed(UP);
   await h.flush();
   assert.equal(h.draftText(), "first");
+  await h.stop();
+});
+
+test("kitty key release does not fire a second recall", async () => {
+  const h = createHarness(historyOptions(["first", "second"]));
+  h.feed(KITTY_UP_PRESS);
+  await h.flush();
+  assert.equal(h.draftText(), "first");
+  // 物理上仍是同一次按键：release 不得再前进一步（否则一次 ↑ 落到第二条）。
+  h.feed(KITTY_UP_RELEASE);
+  await h.flush();
+  assert.equal(h.draftText(), "first");
+  await h.stop();
+});
+
+test("kitty Down press+release steps back exactly once", async () => {
+  const h = createHarness(historyOptions(["first", "second"]));
+  h.feed(KITTY_UP_PRESS);
+  await h.flush();
+  h.feed(KITTY_UP_PRESS);
+  await h.flush();
+  assert.equal(h.draftText(), "second");
+  h.feed("\x1b[1;1:1B"); // Down press → "first", index=1
+  await h.flush();
+  assert.equal(h.draftText(), "first");
+  // release 再来一步会把 stash 提前恢复（bug 表现：一次 ↓ 直接回到空草稿）。
+  h.feed(KITTY_DOWN_RELEASE);
+  await h.flush();
+  assert.equal(h.draftText(), "first");
+  await h.stop();
+});
+
+test("kitty key repeat still steps like a press", async () => {
+  const h = createHarness(historyOptions(["first", "second"]));
+  h.feed(KITTY_UP_PRESS);
+  await h.flush();
+  h.feed(KITTY_UP_REPEAT);
+  await h.flush();
+  assert.equal(h.draftText(), "second");
   await h.stop();
 });
 
