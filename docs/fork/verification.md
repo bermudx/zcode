@@ -107,3 +107,34 @@ imports have not pulled in the monolith runtime.
 
 No model calls, process restarts, installs, wrapper changes or publications have
 been performed by establishing these records.
+
+## 2026-10-23 — first verified build + `piz` wrapper repoint (this checkout)
+
+Context: the old `~/.local/bin/piz` wrapper pinned client and core to the deleted
+herdr worktree `worktree-rapid-cloud-030e`; `piz` failed with MODULE_NOT_FOUND.
+All dist artifacts here predated the last four fork commits, so everything was
+rebuilt before repointing.
+
+Actually run here, all passing unless stated:
+
+- Root `mise.toml` had to be `mise trust`-ed first — until then `mise exec`
+  silently used unpinned node 24.22.0 instead of the pinned 24.14.0. The
+  pnpm engine warning is the tell; treat `node --version` under `mise exec`
+  as the ground truth.
+- `PATH="$PWD/node_modules/.bin:$PATH" mise exec -- pnpm --dir apps/zcode-cli build`
+  — turbo lives only in the root workspace `node_modules/.bin`, not the nested
+  `apps/zcode-cli` workspace; 25/25 tasks green (12 rebuilt, 13 cached).
+- `mise exec -- pnpm --dir apps/zcode-cli --filter @zcode/cli build:attach`.
+- Attach regression set from the command block above: 37/37 pass, including
+  `zcode-attach.cjs boots under a pty, spawns core, renders TUI status line`
+  against the freshly built binaries.
+- Wrapper `~/.local/bin/piz` repointed to `~/build/piz/apps/zcode-cli/packages/cli/dist`
+  (matched pair, core pin + `ZCODE_SERVER_BIN` override kept).
+- End-to-end boot: `piz` under a pty (throwaway cwd, isolated
+  `ZCODE_DATA_BASE_DIR`), rendered live TUI until killed by timeout; no
+  MODULE_NOT_FOUND; spawned core exited cleanly with the client.
+
+Still NOT done (full acceptance gate above remains open): authenticated model
+turn, signing gate against the real provider request, allowance-eligibility
+evidence, both Ctrl-C delivery paths in a real terminal, client-count memory
+measurements, model switching/attachments/resume matrix.

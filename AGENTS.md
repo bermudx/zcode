@@ -14,10 +14,16 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   allowance eligibility from code presence alone.
 - Preserve unrelated dirty work and existing history. New carried-change commit
   subjects use `fork:`. Work on `patch/<topic>` or `sync/<date>-<sha>` branches.
-- Installed commands still point to the old trees. Changing this checkout does
-  not update those commands. Do not change wrappers, restart live cores, push,
+- Installed commands: since 2026-10-23 `piz` runs the matched client/core
+  pair built in THIS checkout (`apps/zcode-cli/packages/cli/dist`); it does
+  not auto-update — rebuild dist after source changes (see
+  `docs/fork/verification.md`). `zcode` on PATH still points to the old
+  allowance tree. Do not change wrappers, restart live cores, push,
   publish or remove old branches/worktrees as incidental cleanup.
-- No dependency install/build has been verified here. Use pinned mise tools.
+- Dependency install and CLI/attach builds were first verified here on
+  2026-10-23 (pinned node 24.14.0/pnpm 10.33.2; root `mise.toml` must be
+  trusted or `mise exec` silently uses unpinned tools). Use pinned mise
+  tools.
   [Verification](docs/fork/verification.md) records actual script names and gaps;
   [upstream sync](docs/fork/upstream-sync.md) defines integration gates.
 - The inherited freshness script assumes origin/main and skips checks here.
