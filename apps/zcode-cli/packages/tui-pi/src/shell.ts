@@ -145,6 +145,12 @@ const isExecutableFile = (path: string): boolean => {
  * `!` 的执行 shell：bash/zsh 用 `-ic` 让真实 rc（alias、函数）生效——不能用
  * 非交互 `-c` + 前缀注入替代，zsh 对 `-c` 串整体先解析，串内定义的 alias 对
  * 串内命令不生效。非 bash/zsh 的 SHELL 回退 `/bin/sh -c`（不读 rc）。
+ * `+m` 关闭 monitor/job control：交互 shell 的 job control 会对 /dev/tty
+ * tcsetpgrp 抢占前台进程组，退出恢复不可靠（exec/信号杀死/超时 kill 都留死
+ * pgrp 占着前台），客户端下一次 stdin read 即 SIGTTIN 挂起
+ * （"suspended (tty input)"）。捕获式 `!` 用不到 job control。zsh 用 `+m`
+ * 可完全免除启动期抢占；bash 启动期先抢再读选项，`+m` 只管住会话内 monitor，
+ * 所以还要靠 spawn detached 兜底（见 runShellCommand）。
  */
 export const resolveEscapeShell = (
   command: string,
@@ -170,7 +176,7 @@ export const resolveEscapeShell = (
     (name.includes("bash") || name.includes("zsh")) &&
     (options.exists ?? isExecutableFile)(shell);
   return interactive
-    ? { args: ["-ic", command], file: shell, interactive: true }
+    ? { args: ["+m", "-ic", command], file: shell, interactive: true }
     : { args: ["-c", command], file: "/bin/sh", interactive: false };
 };
 
@@ -199,8 +205,13 @@ export const runShellCommand = async (input: {
     let timedOut = false;
     let settled = false;
 
+    // detached（POSIX setsid）：子进程拿到新 session、没有控制终端，open
+    // /dev/tty 必失败——bash 启动期无条件 tcsetpgrp 的抢占也被根除，rc 里
+    // `set -m`、嵌套 `!zsh` 之类的交互 shell 同样够不到本终端。win32 无此语义。
+    const detached = process.platform !== "win32";
     const child = spawn(spec.file, spec.args, {
       cwd: input.cwd,
+      detached,
       env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -235,14 +246,28 @@ export const runShellCommand = async (input: {
       });
     };
 
-    const onAbort = (): void => {
+    const killChild = (): void => {
+      // detached 后 child.pid 就是新进程组 pgid：组 kill 才能带上仍在跑的
+      // 命令；只杀 shell 会把活命令遗留在同组里继续跑。
+      if (detached && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGTERM");
+          return;
+        } catch {
+          /* 进程组已退出，退回单 pid */
+        }
+      }
       child.kill("SIGTERM");
+    };
+
+    const onAbort = (): void => {
+      killChild();
       finish(null);
     };
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      killChild();
     }, SHELL_TIMEOUT_MS);
     // The timer must not keep the client alive once the TUI exits.
     timer.unref?.();

@@ -46,15 +46,15 @@ test("runShellCommand captures stdout and the exit code", async () => {
   }
 });
 
-test("resolveEscapeShell picks the user's bash/zsh with -i, else /bin/sh", () => {
+test("resolveEscapeShell picks the user's bash/zsh with +m -ic, else /bin/sh", () => {
   const exists = () => true;
   assert.deepEqual(
     resolveEscapeShell("ls", { env: { SHELL: "/usr/bin/zsh" }, exists }),
-    { args: ["-ic", "ls"], file: "/usr/bin/zsh", interactive: true },
+    { args: ["+m", "-ic", "ls"], file: "/usr/bin/zsh", interactive: true },
   );
   assert.deepEqual(
     resolveEscapeShell("ls", { env: { SHELL: "/opt/homebrew/bin/bash" }, exists }),
-    { args: ["-ic", "ls"], file: "/opt/homebrew/bin/bash", interactive: true },
+    { args: ["+m", "-ic", "ls"], file: "/opt/homebrew/bin/bash", interactive: true },
   );
   // 非 bash/zsh 的 SHELL 与缺失/不可执行一律回退 /bin/sh（不读 rc）。
   for (const shell of ["/usr/bin/fish", "/usr/bin/nu", "/bin/zsh", ""]) {
