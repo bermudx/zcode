@@ -420,11 +420,15 @@ resume 命令指向 `zcode --resume`。
 
    | 会话事件                | herdr 状态 |
    | ----------------------- | ---------- |
-   | 绑定（新/恢复会话句柄） | idle + `--agent-session-id <sid>` + resume argv `piz --resume <sid>` |
+   | 绑定（新/恢复会话句柄） | idle       |
    | `turn_started`          | working    |
    | `permission_requested`  | blocked（`--message "permission: <toolName>"`） |
    | `permission_resolved`/`permission_denied` | 回到该会话绑定态（有未结回合则 working，否则 idle） |
    | `turn_complete`/`turn_error` | idle    |
+
+   每次上报（含绑定后的 idle）都重带 `--agent-session-id <sid>` 与
+   resume argv `piz --resume <sid>`：herdr 对不带 session_ref 的 state
+   上报会清掉 pane 的会话归属（与官方 pi 集成同约定）。
 
    绑定经 `AttachRuntime.onSessionBound`（`registerSession` 单点触发，
    覆盖初始 attach、`/new`、`/resume`、`/fork`、断线重连换句柄）；

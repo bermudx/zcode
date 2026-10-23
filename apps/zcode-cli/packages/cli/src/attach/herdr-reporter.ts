@@ -44,6 +44,7 @@ export class AttachHerdrReporter {
   private readonly onError: ((error: unknown) => void) | undefined;
   private lastSeq = 0;
   private unsubscribe: (() => void) | undefined;
+  private boundSessionId: string | undefined;
   private turnActive = false;
 
   constructor(options: {
@@ -63,11 +64,9 @@ export class AttachHerdrReporter {
   bind(session: HerdrBoundSession): void {
     this.unsubscribe?.();
     this.turnActive = false;
+    this.boundSessionId = session.sessionId;
     this.unsubscribe = session.addSink(this.onEvent);
-    this.report("idle", {
-      sessionId: session.sessionId,
-      resumeArgv: [HERDR_RESUME_BIN, "--resume", session.sessionId],
-    });
+    this.report("idle");
   }
 
   private readonly onEvent = (event: SessionEvent): void => {
@@ -107,7 +106,7 @@ export class AttachHerdrReporter {
 
   private report(
     state: HerdrAgentState,
-    extras?: { message?: string; sessionId?: string; resumeArgv?: readonly string[] },
+    extras?: { message?: string },
   ): void {
     const args = [
       "pane", "report-agent", this.paneId,
@@ -117,8 +116,13 @@ export class AttachHerdrReporter {
       "--seq", this.nextSeq(),
     ];
     if (extras?.message) args.push("--message", extras.message);
-    if (extras?.sessionId) args.push("--agent-session-id", extras.sessionId);
-    if (extras?.resumeArgv?.length) args.push("--", ...extras.resumeArgv);
+    // herdr 语义：不带 session_ref 的 state 上报会清掉 pane 的会话归属——
+    // 与官方 pi 集成一致，每次上报都重带 session-id + resume argv。
+    const sessionId = this.boundSessionId;
+    if (sessionId) {
+      args.push("--agent-session-id", sessionId);
+      args.push("--", HERDR_RESUME_BIN, "--resume", sessionId);
+    }
     void this.exec(this.herdrBin, args).catch((error) => this.onError?.(error));
   }
 }

@@ -131,6 +131,15 @@ test("session events map turn_started->working, permission->blocked, ends->idle"
 
   session.emit(makeEvent(SessionEventType.TurnStarted));
   assert.equal(stateOf(calls.at(-1)!), "working");
+  // herdr 语义：state 上报必须重带 session ref，否则清掉 pane 会话归属。
+  const working = calls.at(-1)!;
+  assert.equal(
+    working.args[working.args.indexOf("--agent-session-id") + 1],
+    "s1",
+  );
+  assert.deepEqual(working.args.slice(working.args.lastIndexOf("--") + 1), [
+    "piz", "--resume", "s1",
+  ]);
 
   session.emit(
     makeEvent(SessionEventType.PermissionRequested, { toolName: "bash_exec" }),
