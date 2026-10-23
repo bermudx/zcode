@@ -61,6 +61,7 @@ const version = versionIndex >= 0 ? process.argv[versionIndex + 1] : "9.9.9-test
 const server = createServer((socket) => socket.end());
 server.listen(socketPath, async () => {
   await writeFile(socketPath + ".pid", process.pid + "\\n", "utf8");
+  await writeFile(socketPath + ".marker-env", process.env.ZCODE_ATTACH_CORE || "", "utf8");
   await writeFile(socketPath + ".info", JSON.stringify({
     version: version || "9.9.9-test",
     workspaceIdentity: identity || "/workspace/demo",
@@ -269,5 +270,31 @@ test("ensureServer waits out a live-pid lock instead of stealing it", async (t) 
   assert.equal(
     (await readFile(`${socketPath}.lock`, "utf8")).trim(),
     `${process.pid}`,
+  );
+});
+
+test("ensureServer marks spawned attach cores with ZCODE_ATTACH_CORE=1", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("unix socket path only");
+    return;
+  }
+  const directory = await temporaryDirectory();
+  const socketPath = join(directory, "core-marker.sock");
+  const scriptPath = await writeFakeServerScript(directory);
+
+  const result = await ensureTestServer({
+    workspace,
+    socketPath,
+    env: {},
+    spawnSpec: fakeSpawnSpec(scriptPath),
+    version: "9.9.9-test",
+    waitForSocketMs: 10_000,
+  });
+  assert.equal(result.started, true);
+  // 标记随 spawn env 烘焙：~/.zcode/herdr-hook.sh 见此即 no-op，避免共享
+  // core 的 zcode 钩子冒领后续 attach 客户端的 pane（含 piz）。
+  assert.equal(
+    (await readFile(`${socketPath}.marker-env`, "utf8")).trim(),
+    "1",
   );
 });

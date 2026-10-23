@@ -21,6 +21,11 @@ const APP_SERVER_HASH_ALGORITHM = "sha256";
 const APP_SERVER_HASH_LENGTH = 16;
 const WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\zcode-core-";
 
+/** attach 共享 core 的 herdr 抑制标记：core env 烘焙的 pane 归属对
+ *  spawn 之后 attach 进来的其他客户端无效，`~/.zcode/herdr-hook.sh`
+ *  见此标记即 no-op（docs/design/v2/tui-attach-shared-core.md）。 */
+export const ZCODE_ATTACH_CORE_ENV = "ZCODE_ATTACH_CORE";
+
 /** 子进程形态：默认 PATH 上的 `zcode`；测试可注入 node + 假 server 脚本。 */
 export interface AppServerSpawnSpec {
   file: string;
@@ -152,6 +157,11 @@ export async function ensureServer(
     if (options.dataBaseDir) childEnv.ZCODE_DATA_BASE_DIR = options.dataBaseDir;
     const identityKey = resolveWorkspaceKey(workspace);
     if (identityKey) childEnv[ZCODE_WORKSPACE_IDENTITY_ENV] = identityKey;
+    // attach 共享 core 标记：core 由本客户端（zcode attach / zcode-attach/piz）
+    // spawn 且可被多客户端复用，spawn env 里烘焙的 HERDR_PANE_ID 只对首个
+    // 客户端成立。~/.zcode/herdr-hook.sh 见此标记即 no-op，由客户端侧
+    // herdr-reporter 上报真实 pane 归属（docs/design/v2/tui-attach-shared-core.md）。
+    childEnv[ZCODE_ATTACH_CORE_ENV] = "1";
     child = spawn(spec.file, args, {
       // detached 在 POSIX 走 setsid；不启用 shell，spawnSpec.file 必须直接可执行。
       detached: true,
