@@ -20,7 +20,7 @@ import type {
   TuiSubmitPromptResult,
   TuiSubagentTranscriptSnapshot,
 } from "@zcode/tui";
-import type { TurnId } from "@zcode/contracts";
+import type { CollaborationMode, TurnId } from "@zcode/contracts";
 import type { AttachClient } from "./attach-client.js";
 import { toProtocolAttachments } from "./attach-attachments.js";
 import { mergeCatalog, modelOptionKey, thoughtLevelKey } from "./attach-catalog.js";
@@ -452,8 +452,8 @@ export class AttachSessionHandle {
     };
   }
 
-  getMode(): "build" | "plan" | undefined {
-    return this.snapshot.settings.mode.current as "build" | "plan" | undefined;
+  getMode(): CollaborationMode | undefined {
+    return this.snapshot.settings.mode.current;
   }
 
   getModel(): string | undefined {
