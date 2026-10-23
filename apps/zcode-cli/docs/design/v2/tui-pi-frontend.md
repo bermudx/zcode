@@ -121,6 +121,29 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   token 用量、最近事件、todos、修改文件、subagents（running/ended）、MCP
   servers、最近网络请求；Esc 关闭。
 
+## `!` 本地 shell 逃逸
+
+- composer 内 `!cmd`（trim 后以 `!` 开头且长度 > 1）不进入模型回合：在客户端
+  workspace（`workspaceDirectory ?? cwd`）本地执行；`!cmd` 头行 + 退出状态 +
+  输出（stdout/stderr 合并、120s 超时、64k 字符 / 2000 行截断）作为 system
+  消息行写入 transcript；捕获输出以 `<shell-output …>` 块前置到下一条真实
+  prompt（slash 命令不消费缓冲，缓冲只交付一次）。core 没有「追加本地消息」的
+  协议面，上下文交接只能在提交时发生；transcript 展示端把该块折叠为
+  `⤷ shell output:` 一行，未闭合的手写标记原样保留。
+- 执行 shell：POSIX 下取 `env.SHELL` 且 basename 为 bash/zsh 的可执行文件，
+  否则回退 `/bin/sh`；Windows 保持 `ComSpec ?? cmd.exe`（`/d /s /c`）。
+- bash/zsh 以 `-ic` 执行：交互模式加载真实 rc 路径，使 `!` 与用户交互 shell
+  里的 alias、函数、初始化一致（`!gd` == `git diff`）。不能用非交互 `-c` +
+  前缀注入替代：zsh 对 `-c` 串整体先解析再执行，同一串内定义的 alias 对串内
+  命令不生效（bash 按完整命令逐段解析才可行，且依赖 expand_aliases）。
+- `-i` 在无控制 tty 时产生启动期 stderr 诊断（bash 的
+  `cannot set terminal process group` / `no job control in this shell`，
+  zsh 同类 tty/job-control 警告）：属 shell 启动噪声而非命令输出，从捕获
+  输出中剔除；其余 stderr 原样保留进输出。
+- rc 的副作用（噪声输出、慢初始化、阻塞读）与用户在自己终端里执行同一命令
+  的暴露面一致；stdin 置 ignore，120s 超时兜底。
+- 非 bash/zsh 的 SHELL 走原 `/bin/sh -c` 语义：不读 rc、无 alias。
+
 ## 验收
 
 - `zcode tui --tui-frontend=pi` 启动 composer；提交 prompt 流式渲染 markdown +

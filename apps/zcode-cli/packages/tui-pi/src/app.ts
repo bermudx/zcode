@@ -54,7 +54,7 @@ import {
 import { Composer } from "./composer.js";
 import { appendFileMentions } from "./mentions.js";
 import { openModelPicker, rotateModel } from "./model-chords.js";
-import { createShellEscapeRunner } from "./shell-prompt.js";
+import { createShellEscapeRunner, type ShellEscapeRunner } from "./shell-prompt.js";
 import { isShellCommand } from "./shell.js";
 import {
   createCtrlCIntentGuard,
@@ -78,6 +78,7 @@ const promptInputObject = (input: TuiPromptInput): TuiPromptInput =>
   typeof input === "string" ? { text: input } : input;
 
 export type PiTuiAppDeps = {
+  env?: NodeJS.ProcessEnv;
   options: TuiOptions;
   tui: TUI;
   theme: PiTheme;
@@ -115,13 +116,7 @@ export class PiTuiApp {
   private startupApplied = false;
   private readonly history: PiInputHistory;
   /** `!cmd` 执行器：本地跑命令、打印结果、把输出缓到下一条 prompt。 */
-  private readonly shellEscape = createShellEscapeRunner({
-    appendMessage: (message) =>
-      this.store.setter("messages")((current) => [...current, message]),
-    clearDraft: () => this.history.setDraftValue(""),
-    cwd: () => this.options.workspaceDirectory ?? process.cwd(),
-    setStatus: (status) => this.store.set("status", status),
-  });
+  private readonly shellEscape: ShellEscapeRunner;
   private attachmentSequence = 0;
   private submitPipelineCache: TuiOptions | undefined;
   private readonly fallback: {
@@ -144,6 +139,13 @@ export class PiTuiApp {
       mode: (this.options.initialMode ?? "yolo") as CollaborationMode,
       model: this.options.initialModel ?? "",
     };
+    this.shellEscape = createShellEscapeRunner({
+      appendMessage: (message) =>
+        this.store.setter("messages")((current) => [...current, message]),
+      clearDraft: () => this.history.setDraftValue(""),
+      cwd: () => this.options.workspaceDirectory ?? process.cwd(), env: deps.env,
+      setStatus: (status) => this.store.set("status", status),
+    });
 
     const store = this.store;
     store.set("mode", this.fallback.mode as string);

@@ -22,6 +22,8 @@ export const createShellEscapeRunner = (deps: {
   appendMessage: (message: Message) => void;
   clearDraft: () => void;
   cwd: () => string;
+  /** 测试可注入假 env（如 pin SHELL=/bin/sh）；缺省用 process.env。 */
+  env?: NodeJS.ProcessEnv;
   setStatus: (status: string) => void;
 }): ShellEscapeRunner => {
   const pending: ShellRunResult[] = [];
@@ -35,7 +37,7 @@ export const createShellEscapeRunner = (deps: {
       const command = trimmed.slice(1).trim();
       deps.clearDraft();
       deps.setStatus(`Running ${command}…`);
-      const result = await runShellCommand({ command, cwd: deps.cwd() });
+      const result = await runShellCommand({ command, cwd: deps.cwd(), env: deps.env });
       pending.push(result);
       deps.appendMessage({ content: formatShellTranscriptRow(result), role: "system" });
       deps.setStatus(

@@ -7,11 +7,20 @@
 // topic, so the context hand-off happens at submit time (see app.ts).
 
 import { spawn } from "node:child_process";
+import { accessSync, constants as fsConstants } from "node:fs";
+import { basename } from "node:path";
 
 export const SHELL_ROW_PREFIX = "!";
 const MAX_OUTPUT_CHARS = 64_000;
 const MAX_OUTPUT_LINES = 2_000;
 export const SHELL_TIMEOUT_MS = 120_000;
+
+/**
+ * `-i` 无控制 tty 时 bash/zsh 的启动期 stderr 诊断（job control / tty pgrp），
+ * 属 shell 启动噪声而非命令输出，从捕获输出中剔除。
+ */
+const INTERACTIVE_STARTUP_NOISE =
+  /cannot set terminal process group|no job control in this shell|can't set tty pgrp|can't have job control/u;
 
 export type ShellRunResult = {
   command: string;
@@ -117,14 +126,72 @@ export const collapseShellContextBlocks = (
   };
 };
 
+type EscapeShell = {
+  args: string[];
+  file: string;
+  interactive: boolean;
+};
+
+const isExecutableFile = (path: string): boolean => {
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * `!` 的执行 shell：bash/zsh 用 `-ic` 让真实 rc（alias、函数）生效——不能用
+ * 非交互 `-c` + 前缀注入替代，zsh 对 `-c` 串整体先解析，串内定义的 alias 对
+ * 串内命令不生效。非 bash/zsh 的 SHELL 回退 `/bin/sh -c`（不读 rc）。
+ */
+export const resolveEscapeShell = (
+  command: string,
+  options: {
+    env?: NodeJS.ProcessEnv;
+    exists?: (path: string) => boolean;
+    platform?: NodeJS.Platform;
+  } = {},
+): EscapeShell => {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  if (platform === "win32") {
+    return {
+      args: ["/d", "/s", "/c", command],
+      file: env.ComSpec ?? "cmd.exe",
+      interactive: false,
+    };
+  }
+
+  const shell = env.SHELL ?? "";
+  const name = basename(shell);
+  const interactive =
+    (name.includes("bash") || name.includes("zsh")) &&
+    (options.exists ?? isExecutableFile)(shell);
+  return interactive
+    ? { args: ["-ic", command], file: shell, interactive: true }
+    : { args: ["-c", command], file: "/bin/sh", interactive: false };
+};
+
+const stripInteractiveStartupNoise = (output: string): string =>
+  output
+    .split("\n")
+    .filter((line) => !INTERACTIVE_STARTUP_NOISE.test(line))
+    .join("\n");
+
 export const runShellCommand = async (input: {
   command: string;
   cwd: string;
+  env?: NodeJS.ProcessEnv;
+  shellExists?: (path: string) => boolean;
   signal?: AbortSignal;
 }): Promise<ShellRunResult> => {
-  const isWindows = process.platform === "win32";
-  const file = isWindows ? (process.env.ComSpec ?? "cmd.exe") : "/bin/sh";
-  const args = isWindows ? ["/d", "/s", "/c", input.command] : ["-c", input.command];
+  const env = input.env ?? process.env;
+  const spec = resolveEscapeShell(input.command, {
+    env,
+    exists: input.shellExists,
+  });
 
   return await new Promise<ShellRunResult>((resolve) => {
     let output = "";
@@ -132,9 +199,9 @@ export const runShellCommand = async (input: {
     let timedOut = false;
     let settled = false;
 
-    const child = spawn(file, args, {
+    const child = spawn(spec.file, spec.args, {
       cwd: input.cwd,
-      env: process.env,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -153,11 +220,12 @@ export const runShellCommand = async (input: {
       settled = true;
       clearTimeout(timer);
       input.signal?.removeEventListener("abort", onAbort);
-      const lines = output.trimEnd().split("\n");
+      const body = spec.interactive ? stripInteractiveStartupNoise(output) : output;
+      const lines = body.trimEnd().split("\n");
       const cappedOutput =
         lines.length > MAX_OUTPUT_LINES
           ? `${lines.slice(0, MAX_OUTPUT_LINES).join("\n")}\n[output truncated at ${MAX_OUTPUT_LINES} lines]`
-          : output;
+          : body;
       resolve({
         command: input.command,
         exitCode,

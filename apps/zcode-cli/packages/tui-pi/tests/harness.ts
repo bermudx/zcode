@@ -92,6 +92,9 @@ export const createHarness = (options: Partial<TuiOptions> = {}): Harness => {
   } as TuiOptions;
 
   const app = new PiTuiApp({
+    // `!` harness 测试钉死 /bin/sh：交接管线语义与具体 shell 无关，真实
+    // `zsh -ic`（z4h 初始化）会超过 flush 的等待窗口且依赖本机 rc。
+    env: { ...process.env, SHELL: "/bin/sh" },
     onExit: (code) => {
       exitCode = code;
     },

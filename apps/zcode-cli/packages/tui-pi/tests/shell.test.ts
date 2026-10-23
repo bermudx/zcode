@@ -3,7 +3,7 @@
 // protocol verb to append a local message).
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -13,6 +13,7 @@ import {
   formatShellContextBlock,
   formatShellTranscriptRow,
   isShellCommand,
+  resolveEscapeShell,
   runShellCommand,
 } from "../src/shell.js";
 import { MessageRow, piMarkdownTheme } from "../src/rows.js";
@@ -42,6 +43,87 @@ test("runShellCommand captures stdout and the exit code", async () => {
     assert.notEqual(missing.exitCode, 0);
   } finally {
     rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("resolveEscapeShell picks the user's bash/zsh with -i, else /bin/sh", () => {
+  const exists = () => true;
+  assert.deepEqual(
+    resolveEscapeShell("ls", { env: { SHELL: "/usr/bin/zsh" }, exists }),
+    { args: ["-ic", "ls"], file: "/usr/bin/zsh", interactive: true },
+  );
+  assert.deepEqual(
+    resolveEscapeShell("ls", { env: { SHELL: "/opt/homebrew/bin/bash" }, exists }),
+    { args: ["-ic", "ls"], file: "/opt/homebrew/bin/bash", interactive: true },
+  );
+  // 非 bash/zsh 的 SHELL 与缺失/不可执行一律回退 /bin/sh（不读 rc）。
+  for (const shell of ["/usr/bin/fish", "/usr/bin/nu", "/bin/zsh", ""]) {
+    const spec = resolveEscapeShell("ls", {
+      env: shell ? { SHELL: shell } : {},
+      exists: (path) => path !== "/bin/zsh",
+    });
+    assert.equal(spec.file, "/bin/sh", shell);
+    assert.equal(spec.interactive, false);
+    assert.deepEqual(spec.args, ["-c", "ls"]);
+  }
+  const win = resolveEscapeShell("dir", {
+    env: { ComSpec: "C:\\Windows\\cmd.exe" },
+    platform: "win32",
+  });
+  assert.deepEqual(win.args, ["/d", "/s", "/c", "dir"]);
+  assert.equal(win.interactive, false);
+});
+
+// `!` 必须读到用户 rc：alias/函数只在交互 shell 里定义。
+// 用临时 HOME + 种子 rc 证明 `-ic` 让 alias 生效，且启动噪声不进输出。
+const interactiveShellCases = [
+  { rcFile: ".bashrc", shell: "/bin/bash" },
+  { rcFile: ".zshrc", shell: "/usr/bin/zsh" },
+] as const;
+
+for (const { rcFile, shell } of interactiveShellCases) {
+  test(`\`!cmd\` sees ${rcFile} aliases via ${shell} -ic`, async (t) => {
+    if (!existsSync(shell)) {
+      t.skip(`${shell} not installed`);
+      return;
+    }
+    const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-rc-"));
+    const home = mkdtempSync(join(tmpdir(), "zcode-shell-home-"));
+    try {
+      writeFileSync(join(home, rcFile), "alias zz_piz_probe='echo rc-alias-ok'\n");
+      const env = { ...process.env, HOME: home, SHELL: shell };
+      const run = await runShellCommand({ command: "zz_piz_probe", cwd, env });
+      assert.equal(run.exitCode, 0, run.output);
+      assert.ok(run.output.includes("rc-alias-ok"), run.output);
+      assert.ok(!run.output.includes("job control"), run.output);
+      assert.ok(!run.output.includes("terminal process group"), run.output);
+    } finally {
+      rmSync(cwd, { force: true, recursive: true });
+      rmSync(home, { force: true, recursive: true });
+    }
+  });
+}
+
+test("`!cmd` keeps real stderr while stripping shell startup noise", async (t) => {
+  const shell = ["/bin/bash", "/usr/bin/zsh"].find((path) => existsSync(path));
+  if (!shell) {
+    t.skip("no bash/zsh installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-err-"));
+  const home = mkdtempSync(join(tmpdir(), "zcode-shell-home-"));
+  try {
+    const env = { ...process.env, HOME: home, SHELL: shell };
+    const run = await runShellCommand({
+      command: "echo real-stderr >&2",
+      cwd,
+      env,
+    });
+    assert.ok(run.output.includes("real-stderr"), run.output);
+    assert.ok(!run.output.includes("job control"), run.output);
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+    rmSync(home, { force: true, recursive: true });
   }
 });
 
