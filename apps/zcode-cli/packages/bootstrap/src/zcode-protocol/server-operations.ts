@@ -2417,6 +2417,7 @@ export async function forkSession(context: ZCodeProtocolAgentServerContext, rawP
   ensureNoActiveTurn(record, "Cannot fork while a prompt is running");
   const forkTarget = await resolveForkTarget(context, record, params.target);
   const parentMode = record.app.getMode();
+  const parentPlanEnabled = record.app.runtime.getPlanEnabled?.() ?? false;
   const parentModel = record.app.getModel();
   const parentThoughtLevel = record.app.getThoughtLevel();
   const fork = await record.app.forkFromCheckpoint({
@@ -2426,6 +2427,7 @@ export async function forkSession(context: ZCodeProtocolAgentServerContext, rawP
   return await registerForkedSession(context, record, fork, {
     runtimeConfig: {
       mode: parentMode,
+      planEnabled: parentPlanEnabled,
       model: parentModel,
       thoughtLevel: parentThoughtLevel,
     },
@@ -2444,6 +2446,7 @@ export async function registerForkedSession(
   options: {
     runtimeConfig: {
       mode: CollaborationMode;
+      planEnabled?: boolean;
       model: string;
       thoughtLevel?: string;
       followupMode?: "queue" | "guide";
@@ -2452,6 +2455,7 @@ export async function registerForkedSession(
   },
 ) {
   const parentMode = options.runtimeConfig.mode;
+  const parentPlanEnabled = options.runtimeConfig.planEnabled ?? false;
   const parentModel = options.runtimeConfig.model;
   const parentThoughtLevel = options.runtimeConfig.thoughtLevel;
   const parentFollowupMode = options.runtimeConfig.followupMode;
@@ -2481,6 +2485,14 @@ export async function registerForkedSession(
     // 于是 fork 后的当前模型/模式会被最新默认设置覆盖。这里在 resume 前显式继承父会话设置。
     if (forkRecord.app.getMode() !== parentMode) {
       await forkRecord.app.setMode(parentMode);
+      forkRecord.stateRevision++;
+    }
+    // plan 是叠加开关（planEnabled），不是 mode 值：child 只继承了 permission
+    // mode，必须额外补一层 setMode("plan")，runtime 经 resolveExecutionState
+    // 在保留 base mode 的同时翻转 planEnabled。直写 config.mode="plan" 走不通——
+    // getMode() 回 "plan" 但 planEnabled 仍是 false，模型不会收到 plan 约束。
+    if (parentPlanEnabled && !forkRecord.app.runtime.getPlanEnabled?.()) {
+      await forkRecord.app.setMode("plan");
       forkRecord.stateRevision++;
     }
     if (parentModel && forkRecord.app.getModel() !== parentModel) {

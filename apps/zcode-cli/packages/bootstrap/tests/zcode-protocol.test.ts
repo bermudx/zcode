@@ -174,6 +174,32 @@ describe("mapSessionSettings", () => {
     });
     expect(settings.thoughtLevel.current).toBeUndefined();
   });
+
+  it("reports plan overlay as the collaboration mode while permission mode keeps the base mode", async () => {
+    const app = createFakeApp(undefined, {
+      getMode: () => "yolo",
+      runtime: {
+        getPlanEnabled: () => true,
+        getSessionModelSelection: () => undefined,
+      } as never,
+    });
+
+    const settings = await mapSessionSettings(app);
+
+    expect(settings.mode.current).toBe("plan");
+    expect(settings.permission?.mode).toBe("yolo");
+  });
+
+  it("reports the permission mode when plan overlay is off", async () => {
+    const app = createFakeApp(undefined, {
+      getMode: () => "guarded",
+    });
+
+    const settings = await mapSessionSettings(app);
+
+    expect(settings.mode.current).toBe("guarded");
+    expect(settings.permission?.mode).toBe("guarded");
+  });
 });
 
 describe("conditional session close", () => {
@@ -185,6 +211,45 @@ describe("conditional session close", () => {
 });
 
 describe("ZCodeProtocolAgentServer", () => {
+  it("session/setMode plan reports collaboration mode while permission.mode keeps the base mode", async () => {
+    const server = new ZCodeProtocolAgentServer({
+      createZCodeApp: (options) =>
+        createFakeApp({
+          ...options,
+          runtimeConfig: { ...options?.runtimeConfig, mode: "yolo" },
+        }),
+      cwd: workspace.workspacePath,
+      version: "test-version",
+    });
+
+    const created = zcodeSessionStateSnapshotSchema.parse(
+      await requestResult(server, {
+        id: "plan-create",
+        method: zcodeProtocolMethods.sessionCreate,
+        params: { workspace },
+      }),
+    );
+    const planSnapshot = zcodeSessionStateSnapshotSchema.parse(
+      await requestResult(server, {
+        id: "plan-set",
+        method: zcodeProtocolMethods.sessionSetMode,
+        params: { sessionId: created.session.sessionId, mode: "plan" },
+      }),
+    );
+    expect(planSnapshot.settings.mode.current).toBe("plan");
+    expect(planSnapshot.settings.permission?.mode).toBe("yolo");
+
+    const exitSnapshot = zcodeSessionStateSnapshotSchema.parse(
+      await requestResult(server, {
+        id: "plan-exit",
+        method: zcodeProtocolMethods.sessionSetMode,
+        params: { sessionId: created.session.sessionId, mode: "guarded" },
+      }),
+    );
+    expect(exitSnapshot.settings.mode.current).toBe("guarded");
+    expect(exitSnapshot.settings.permission?.mode).toBe("guarded");
+  });
+
   it("所有 Entry 都不再接受旧 Workspace Provider 写协议", async () => {
     const server = new ZCodeProtocolAgentServer({
       createZCodeApp: (options) => createFakeApp(options),
@@ -570,6 +635,7 @@ describe("ZCodeProtocolAgentServer", () => {
         },
         listThoughtLevels: () => [],
         runtime: {
+          getPlanEnabled: () => false,
           getSessionModelSelection: () => ({ providerId: "provider", modelId: "current-model" }),
           getProjection: async () =>
             ({
@@ -621,6 +687,7 @@ describe("ZCodeProtocolAgentServer", () => {
       { sessionId },
       {
         runtime: {
+          getPlanEnabled: () => false,
           getSessionModelSelection: () => undefined,
           getProjection: async () =>
             ({
@@ -696,6 +763,7 @@ describe("ZCodeProtocolAgentServer", () => {
       { sessionId },
       {
         runtime: {
+          getPlanEnabled: () => false,
           getSessionModelSelection: () => undefined,
           getProjection: async () =>
             ({
@@ -742,6 +810,7 @@ describe("ZCodeProtocolAgentServer", () => {
       { sessionId },
       {
         runtime: {
+          getPlanEnabled: () => false,
           getSessionModelSelection: () => undefined,
           getProjection: async () =>
             ({

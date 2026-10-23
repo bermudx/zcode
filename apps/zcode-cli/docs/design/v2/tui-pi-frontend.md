@@ -93,6 +93,8 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   详情 + 错误 + diff，`invalidate` + `requestRender` 驱动流式更新）。
 - 状态行：mode | model | thoughtLevel | status | ctx；`busy` 时 Composer 旁挂
   `Loader`，busy 不锁输入（steer 语义经 `sendInput` `delivery:"auto"`）。
+  mode 显示协作模式（来自快照 `settings.mode.current`，plan 覆盖期间为
+  `plan`，见 tui-mode-switching.md 与 tui-attach-shared-core.md）。
 - `submitPrompt` / `sendInput` 分支语义与 `app-submit.ts` 相同：空闲→
   `submitPrompt`；`busy`→`sendInput`，queued → 队列区（`TurnSteerQueued`/
   `Drained`/`Discarded` 同步），rejected → status 提示。本地 user row 乐观追加，

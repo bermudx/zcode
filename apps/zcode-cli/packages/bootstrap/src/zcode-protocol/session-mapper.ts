@@ -251,7 +251,11 @@ export async function mapSessionSettings(
       : app.listModels();
   return {
     mode: {
-      current: app.getMode(),
+      // plan 在 runtime 是叠加开关（ExecutionState.planEnabled），不是 mode 枚举值：
+      // 经 setMode("plan")/EnterPlanMode 进入 plan 后 config.mode 仍是原 permission
+      // mode（如 yolo）。settings.mode.current 面向 UI 协作模式目录（含 plan），
+      // 必须按 planEnabled 推导，否则 attach/TUI 状态行把 plan 会话误报为 yolo。
+      current: app.runtime.getPlanEnabled() ? "plan" : app.getMode(),
     },
     model: {
       // app/stdio 场景下 provider catalog 属于 app 状态，不应随每次 session/read、

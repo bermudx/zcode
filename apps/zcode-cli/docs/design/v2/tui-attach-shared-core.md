@@ -256,6 +256,16 @@ legacy `session/setModel`/`setThoughtLevel`/`setMode` 与订阅事件不同源�
   合成 `model_selected`（current 变化时），其他 pane 的状态行才能
   跟上远端切模。
 
+### 模式投影（settings.mode.current）
+
+`settings.mode.current` 是协作模式投影：runtime 的 plan 是叠加在
+permission mode 上的独立开关（`planEnabled`），不是 mode 枚举值，core 按
+`planEnabled ? "plan" : mode` 下发；`settings.permission.mode` 保留真实
+permission mode，二者在 plan 会话中刻意不同。attach 的 `initialMode`、
+`loadStartupOptions`、`getMode()`、回合 `result.mode` 与 `setMode` 回显
+都读 `settings.mode.current`——状态行因此在 plan 会话显示 `mode:plan`
+而不是底层 permission mode（如 yolo）。
+
 ### core 自登记（.pid/.info 所有权）
 
 `.pid/.info` 由 **bind 成功的 server 进程**在 listen 后自写

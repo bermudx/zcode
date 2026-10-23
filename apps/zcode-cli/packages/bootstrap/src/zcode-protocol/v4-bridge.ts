@@ -1310,6 +1310,7 @@ export function createConversationV4Gateway(
         commandId: options.sourceCommandId,
         runtimeConfig: {
           mode: record.app.getMode(),
+          planEnabled: record.app.runtime.getPlanEnabled?.() ?? false,
           model: modelSelection ? `${modelSelection.providerId}/${modelSelection.modelId}` : "",
           ...(modelSelection?.options?.reasoningLevel
             ? { thoughtLevel: modelSelection.options.reasoningLevel }
@@ -1360,6 +1361,7 @@ export function createConversationV4Gateway(
         commandId: sourceCommandId,
         runtimeConfig: {
           mode: stableForkMode(boundary.info.mode, record.app.getMode()),
+          planEnabled: record.app.runtime.getPlanEnabled?.() ?? false,
           model: modelSelection ? `${modelSelection.providerId}/${modelSelection.modelId}` : "",
           ...(modelSelection?.options?.reasoningLevel
             ? { thoughtLevel: modelSelection.options.reasoningLevel }
@@ -1495,6 +1497,7 @@ export function createConversationV4Gateway(
         commandId: envelope.commandId,
         runtimeConfig: {
           mode: record.app.getMode(),
+          planEnabled: record.app.runtime.getPlanEnabled?.() ?? false,
           model: modelSelection ? `${modelSelection.providerId}/${modelSelection.modelId}` : "",
           ...(modelSelection?.options?.reasoningLevel
             ? { thoughtLevel: modelSelection.options.reasoningLevel }

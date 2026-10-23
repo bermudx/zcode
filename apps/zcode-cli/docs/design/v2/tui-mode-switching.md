@@ -57,6 +57,17 @@ The terminal UI must make the active collaboration mode visible and allow the us
 - CLI command-center owns `/mode` parsing and dispatch. This keeps the command policy beside `/compact`, `/resume`, and `/skill`.
 - Bootstrap exposes the app's active mode through a narrow app-level contract. The command-center must not reach into runtime internals other than this explicit API.
 - Core runtime mode changes go through `AgentRuntime.updateConfig({ mode })`, so the existing permission executor callback observes the new value on subsequent tool checks.
+- 协议快照 `settings.mode.current` 面向客户端呈现协作模式：plan 是叠加在
+  permission mode 上的独立开关（`ExecutionState = {mode, planEnabled}`，
+  经 `EnterPlanMode`/`ExitPlanMode` 工具或 `session/setMode "plan"` 翻转），
+  启用期间该字段必须为 `plan`；`settings.permission.mode` 保留真实
+  permission mode（如 yolo），二者在 plan 会话中刻意不同。只按
+  `getMode()`（permission mode）投影会把 plan 会话误报为原模式。
+- `session/fork` 与 V4 running fork 继承父会话执行状态必须同时携带
+  `planEnabled`：child 先继承 permission mode，再以 `setMode("plan")`
+  补上叠加层——该调用经 `resolveExecutionState` 保留 base mode 并翻转
+  `planEnabled`。只传 `getMode()` 的 fork 会让 plan 会话的子分支静默
+  退回普通模式（模型不再收到 plan 约束）。
 
 ## Plan Mode Restore Contract
 

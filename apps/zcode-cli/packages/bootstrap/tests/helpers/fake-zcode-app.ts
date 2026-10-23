@@ -1,4 +1,5 @@
 import type { ExecutionShellSelection, SessionId } from "@zcode/contracts";
+import { resolveExecutionState, type ExecutionState } from "@zcode/shared";
 import type { ZCodeApp, ZCodeAppOptions } from "../../src/app/types.js";
 
 export function createFakeApp(
@@ -8,6 +9,10 @@ export function createFakeApp(
   const sessionId = options?.sessionId ?? ("sess_test" as SessionId);
   const traceId = options?.traceContext?.traceId ?? ("trace_test" as never);
   let mode = options?.runtimeConfig?.mode ?? "build";
+  // 与真实 runtime 的 ExecutionState 同构：plan 是叠加开关而非 mode 值。
+  // runtimeConfig.mode="plan" 的直写种子按 resolveExecutionState 归一化为
+  // planEnabled=true（真实 getMode() 会原样回 "plan"，这里保留同一行为）。
+  let planEnabled = options?.runtimeConfig?.planEnabled ?? mode === "plan";
   let model = options?.runtimeConfig?.modelSelection
     ? `${options.runtimeConfig.modelSelection.providerId}/${options.runtimeConfig.modelSelection.modelId}`
     : "glm/glm-4.6";
@@ -121,6 +126,7 @@ export function createFakeApp(
           updatedAt: new Date(1),
         }) as never,
       getActiveTurnInfo: () => undefined,
+      getPlanEnabled: () => planEnabled,
       hasActiveOrQueuedTurnWork: () => false,
       hasResidencyBlockingWork: () => false,
       hasRunningBackgroundTasks: () => false,
@@ -166,7 +172,16 @@ export function createFakeApp(
     }),
     setMode: async (nextMode) => {
       const previousMode = mode;
-      mode = nextMode;
+      // 忠实复刻 AgentRuntime.setExecutionState：mode 值域不含 "plan"，
+      // "plan" 只翻转 planEnabled、保留原 permission mode。直写 mode=nextMode
+      // 会把 plan 会话伪装成 mode==="plan"，掩盖 settings.mode.current 的
+      // planEnabled 推导缺口。
+      const resolved = resolveExecutionState(
+        { mode: nextMode },
+        { mode: mode as ExecutionState["mode"], planEnabled },
+      );
+      mode = resolved.mode;
+      planEnabled = resolved.planEnabled;
       return { mode, previousMode, traceId };
     },
     setPluginEnabled: async () => {

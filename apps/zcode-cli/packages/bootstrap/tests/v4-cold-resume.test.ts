@@ -17,8 +17,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSqliteSessionStore } from "@zcode/adapters/storage";
 import {
+  resolveExecutionState,
   zcodeProtocolMethods,
   zcodeSessionStateSnapshotSchema,
+  type ExecutionState,
   type ZCodeProtocolMessage,
 } from "@zcode/shared";
 import {
@@ -860,6 +862,7 @@ function createColdFakeApp(
   const traceId = options?.traceContext?.traceId ?? ("trace_cold" as never);
   let runtimeSink: { onSessionEvent(event: SessionEvent): Promise<void> | void } | undefined;
   let mode = options?.runtimeConfig?.mode ?? "build";
+  let planEnabled = options?.runtimeConfig?.planEnabled ?? mode === "plan";
   let model = options?.runtimeConfig?.modelSelection
     ? `${options.runtimeConfig.modelSelection.providerId}/${options.runtimeConfig.modelSelection.modelId}`
     : "glm/glm-4.6";
@@ -979,6 +982,7 @@ function createColdFakeApp(
       // 合并后 sendText 的 afterLegacyStateMutation 会经 auto-drain 读前台执行位；
       // 与上面同一条论证：fake 必须显式声明没有前台工作，而不是让属性缺席变成 TypeError。
       getActiveForegroundExecutionId: () => undefined,
+      getPlanEnabled: () => planEnabled,
       getSessionModelSelection: () => {
         const separator = model.indexOf("/");
         return {
@@ -1042,7 +1046,13 @@ function createColdFakeApp(
     }),
     setMode: async (nextMode) => {
       const previousMode = mode;
-      mode = nextMode;
+      // 与 shared fake 一致：mode 值域不含 "plan"，"plan" 只翻转 planEnabled。
+      const resolved = resolveExecutionState(
+        { mode: nextMode },
+        { mode: mode as ExecutionState["mode"], planEnabled },
+      );
+      mode = resolved.mode;
+      planEnabled = resolved.planEnabled;
       return { mode, previousMode, traceId };
     },
     setPluginEnabled: async () => {
