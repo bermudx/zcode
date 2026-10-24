@@ -19,7 +19,6 @@ import type {
   TuiPromptInput,
   TuiStartupOptions,
   TuiSubmitPromptResult,
-  TuiSwitchableMode,
 } from "@zcode/tui/internals";
 import {
   EMPTY_TUI_WORKFLOW_MIRROR,
@@ -29,7 +28,6 @@ import {
   SIDEBAR_HIDDEN_STATUS,
   SIDEBAR_LEADER_HINT,
   SIDEBAR_SHOWN_STATUS,
-  TUI_SWITCHABLE_MODES,
   applyMainSessionEvent,
   applyWorkflowProgressToMirror,
   appendAgentResult,
@@ -66,7 +64,11 @@ import { PiInputHistory } from "./input-history.js";
 import { keyEventFromInput } from "./keys.js";
 import { ApprovalPanel, QueuedInputsRow, SelectionPanel } from "./panels.js";
 import { MessageRow, piMarkdownTheme, reconcileTranscript } from "./rows.js";
+import { cycleCollaborationMode } from "./mode-switch.js";
+import { formatStatusLine } from "./status-line.js";
 import { AppStore } from "./store.js";
+import { SubagentDirectory } from "./subagents.js";
+import { UsageTotalsAccumulator } from "./usage-totals.js";
 import type { PiTheme } from "./theme.js";
 import { WorkflowCard } from "./workflow.js";
 
@@ -115,6 +117,10 @@ export class PiTuiApp {
   private loaderMounted = false;
   private startupApplied = false;
   private readonly history: PiInputHistory;
+  /** 子代理目录唯一 owner；组件只读 store。 */
+  private readonly subagents: SubagentDirectory;
+  /** 状态行 ↑↓R 的 session 累计用量 owner（turn 内 state.usage 是单请求口径）。 */
+  private readonly usageTotals: UsageTotalsAccumulator;
   /** `!cmd` 执行器：本地跑命令、打印结果、把输出缓到下一条 prompt。 */
   private readonly shellEscape: ShellEscapeRunner;
   private attachmentSequence = 0;
@@ -213,6 +219,9 @@ export class PiTuiApp {
 
     this.store.onChange((key) => this.onStateChanged(key));
     this.tui.setFocus(this.editor);
+    this.subagents = new SubagentDirectory(this.store, this.options);
+    this.usageTotals = new UsageTotalsAccumulator(this.store, this.options);
+    this.subagents.refresh();
     this.refreshPanels();
     this.updateStatusLine();
   }
@@ -322,6 +331,9 @@ export class PiTuiApp {
       toolNamesById: this.store.toolNamesById,
       workspaceDirectory: this.options.workspaceDirectory,
     });
+    // ↑↓R/CH 与目录刷新均由各 owner 消费同一事件（共享投影先行）。
+    this.usageTotals.handleEvent(event);
+    this.subagents.handleEvent(event);
   };
 
   private workflowMirrorSetter = (
@@ -366,7 +378,10 @@ export class PiTuiApp {
     store.set("liveModelText", "");
     // settle 回合不得回写 activeTurnId：socket 事件先清零，无条件回写会把已完成回合复活成 busy。
     if (result.turnId && store.state.activeTurnId === result.turnId) store.set("activeTurnId", undefined);
-    if (result.usage) store.set("usage", result.usage);
+    if (result.usage) {
+      store.set("usage", result.usage);
+      this.usageTotals.adopt(result.usage);
+    }
     if (result.projection) {
       store.setter("contextUsage")((current) => ({
         ...current,
@@ -381,6 +396,8 @@ export class PiTuiApp {
       store.set("networkRequests", []);
       store.set("modifiedFiles", []);
       store.modifiedFileToolCallIds.clear();
+      this.subagents.reset();
+      this.usageTotals.reset();
     }
     store.set("selection", createSelectionState(result.selection));
     store.set("queuedInputs", []);
@@ -650,8 +667,13 @@ export class PiTuiApp {
       this.closeInfoPanel();
       return;
     }
-    const panel = new SessionInfoPanel(this.tui, this.store, this.theme, this.options, () =>
-      this.closeInfoPanel(),
+    const panel = new SessionInfoPanel(
+      this.tui,
+      this.store,
+      this.theme,
+      this.options,
+      () => this.closeInfoPanel(),
+      () => this.subagents.refresh(),
     );
     // nonCapturing：React sidebar 不抢 composer 焦点，开着信息面板时输入仍进
     // 编辑器；Esc 由 dispatchChord 的全局 chord 关闭。
@@ -673,31 +695,7 @@ export class PiTuiApp {
   }
 
   private cycleMode(): void {
-    const store = this.store;
-    const setModeHandler = this.options.setMode;
-    if (!setModeHandler) {
-      store.set("status", "Mode switching is not available in this client.");
-      return;
-    }
-    const previousMode = store.state.mode;
-    const index = TUI_SWITCHABLE_MODES.findIndex((mode) => mode === previousMode);
-    const nextMode = TUI_SWITCHABLE_MODES[(index < 0 ? 0 : index + 1) % TUI_SWITCHABLE_MODES.length];
-    store.set("mode", nextMode);
-    void Promise.resolve(setModeHandler(nextMode as TuiSwitchableMode)).then(
-      (result) => {
-        store.set("mode", result.mode);
-        store.set(
-          "status",
-          result.response ??
-            `Mode switched to ${`${result.mode}`.slice(0, 1).toUpperCase()}${`${result.mode}`.slice(1)}.`,
-        );
-      },
-      (error: unknown) => {
-        store.set("mode", previousMode);
-        const message = error instanceof Error ? error.message : String(error);
-        store.set("status", `Mode switch failed: ${message}`);
-      },
-    );
+    cycleCollaborationMode(this.store, this.options);
   }
 
   /* ---------- render pipeline ---------- */
@@ -768,19 +766,7 @@ export class PiTuiApp {
   }
 
   private updateStatusLine(): void {
-    const s = this.store.state;
-    const parts: string[] = [];
-    if (s.mode) parts.push(`mode:${s.mode}`);
-    if (s.model) parts.push(s.model.split("/").pop() ?? s.model);
-    if (s.thoughtLevel) parts.push(`thought:${s.thoughtLevel}`);
-    if (s.busy) parts.push("busy");
-    if (s.status) parts.push(s.status);
-    const ctx = s.contextUsage.contextUsed;
-    const window = s.contextUsage.contextWindow;
-    if (ctx !== undefined && window) {
-      parts.push(`ctx ${Math.round((ctx / window) * 100)}%`);
-    }
-    this.statusLine.setText(` ${this.theme.muted(parts.join("  |  "))}`);
+    this.statusLine.setText(` ${this.theme.muted(formatStatusLine(this.store.state))}`);
   }
 
   /* ---------- lifecycle ---------- */
@@ -788,6 +774,7 @@ export class PiTuiApp {
   async stop(): Promise<void> {
     this.removeInputListener();
     this.unsubscribeSession?.();
+    this.subagents.dispose();
     this.unsubscribeConnectionStatus?.();
     this.loader.stop();
     for (const approval of this.store.state.approvalQueue) {

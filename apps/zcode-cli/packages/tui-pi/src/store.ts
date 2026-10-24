@@ -3,6 +3,7 @@
 // same call shape without React.
 
 import type { ModelUsageSummary, SessionEvent, TodoItem, TurnId } from "@zcode/contracts";
+import type { ZCodeSessionSubagentsResult } from "@zcode/shared";
 import type {
   ApprovalPrompt,
   CacheStats,
@@ -24,11 +25,19 @@ export type MutableRef<T> = { current: T };
 
 export const ref = <T>(initial: T): MutableRef<T> => ({ current: initial });
 
+/** Session 累计用量（pi footer ↑↓R 的累计口径），UsageTotalsAccumulator 持有。 */
+export type UsageTotals = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+};
+
 export class AppStore {
   readonly state = {
     activeTurnId: undefined as TurnId | undefined,
     approvalQueue: [] as ApprovalPrompt[],
     busy: false,
+    cacheHitRate: undefined as number | undefined,
     cacheStats: undefined as CacheStats | undefined,
     contextUsage: {} as ContextUsage,
     draftAttachments: [] as DraftAttachment[],
@@ -49,9 +58,12 @@ export class AppStore {
     slashSelection: undefined as SlashSelectionState | undefined,
     status: "",
     statusDetails: [] as string[],
+    subagents: undefined as ZCodeSessionSubagentsResult | undefined,
+    subagentsError: undefined as string | undefined,
     todos: [] as TodoItem[],
     traceId: undefined as string | undefined,
     usage: undefined as ModelUsageSummary | undefined,
+    usageTotals: undefined as UsageTotals | undefined,
   };
 
   /** Maps used by the shared projection; stable identity matters. */

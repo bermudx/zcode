@@ -1,12 +1,13 @@
 // Session info overlay (Ctrl+X B): mode/model/thought, context usage, todos,
 // modified files, subagents, MCP servers, network requests. Mirrors the
 // React frontend's sidebar content; state comes from the shared event
-// projection and the readSubagents/listMcpServers option ports.
+// projection, the store's SubagentDirectory snapshot (single owner — the
+// panel renders store.state.subagents and only triggers a refresh), and a
+// one-shot listMcpServers port read (MCP has no event source).
 
 import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
 import type { TuiOptions } from "@zcode/tui/internals";
 import type { McpServerStatus } from "@zcode/contracts";
-import type { ZCodeSessionSubagentsResult } from "@zcode/shared";
 import type { AppStore } from "./store.js";
 import type { PiTheme } from "./theme.js";
 
@@ -21,7 +22,6 @@ const sectionHeader = (theme: PiTheme, title: string): string =>
 
 export class SessionInfoPanel implements Component, Focusable {
   focused = false;
-  private subagents: ZCodeSessionSubagentsResult | undefined;
   private mcpServers: Record<string, McpServerStatus> | undefined;
   private loadFailed = false;
 
@@ -31,6 +31,7 @@ export class SessionInfoPanel implements Component, Focusable {
     private readonly theme: PiTheme,
     private readonly options: TuiOptions,
     private readonly onClose: () => void,
+    private readonly refreshSubagents?: () => void,
   ) {
     void this.load();
   }
@@ -47,13 +48,13 @@ export class SessionInfoPanel implements Component, Focusable {
   }
 
   private async load(): Promise<void> {
-    const { listMcpServers, readSubagents } = this.options;
+    const { listMcpServers } = this.options;
     try {
-      if (readSubagents) this.subagents = await readSubagents();
       if (listMcpServers) this.mcpServers = await listMcpServers();
     } catch {
       this.loadFailed = true;
     }
+    this.refreshSubagents?.();
     this.tui.requestRender();
   }
 
@@ -98,8 +99,9 @@ export class SessionInfoPanel implements Component, Focusable {
       }
     }
 
-    const running = this.subagents?.running ?? [];
-    const endedTotal = this.subagents?.ended.total ?? 0;
+    const subagents = s.subagents;
+    const running = subagents?.running ?? [];
+    const endedTotal = subagents?.ended.total ?? 0;
     if (running.length > 0 || endedTotal > 0) {
       lines.push(
         sectionHeader(theme, `Subagents (${running.length} running, ${endedTotal} ended)`),
@@ -109,7 +111,7 @@ export class SessionInfoPanel implements Component, Focusable {
           `    ${theme.accent("●")} ${theme.text(truncate(agent.title, inner - 24))} ${theme.muted(agent.subagentType)}`,
         );
       }
-      for (const agent of (this.subagents?.ended.items ?? []).slice(0, 3)) {
+      for (const agent of (subagents?.ended.items ?? []).slice(0, 3)) {
         const glyph = agent.status === "success" ? theme.success("✓") : theme.danger("✗");
         lines.push(`    ${glyph} ${theme.dim(truncate(agent.title, inner - 3))}`);
       }
@@ -135,7 +137,7 @@ export class SessionInfoPanel implements Component, Focusable {
       }
     }
 
-    if (this.loadFailed) {
+    if (this.loadFailed || s.subagentsError) {
       lines.push(`  ${theme.muted("(subagent / MCP data unavailable)")}`);
     }
     lines.push(`  ${theme.muted("Ctrl+X B or Esc to close")}`);
