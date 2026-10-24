@@ -190,6 +190,52 @@ test("busy stop & quit without requestStopActiveTurn falls back to a local abort
   await h.stop();
 });
 
+test("busy + approval panel: Ctrl+C still arms the quit choice instead of dying in the panel", async () => {
+  // 等交互也算 busy：面板持有键盘时退出键不能死键——Ctrl-C 必须先走退出决策
+  // （与 SIGINT 路径一致），而不是被 ApprovalPanel 吞掉。
+  const h = createHarness();
+  h.store.set("busy", true);
+  h.store.set("approvalQueue", [
+    {
+      cleanup: () => {},
+      reject: () => {},
+      request: {
+        requestId: "req-1",
+        sessionId: "sess-1",
+        traceId: "trace-1",
+        toolCallId: "tc-1",
+        toolName: "Bash",
+        input: { command: "ls" },
+        mode: "build",
+        ruleId: "rule-1",
+        reason: "test approval",
+        riskLevel: "medium",
+        requestedAt: new Date(),
+      },
+      resolve: () => {},
+      selectedDecision: "deny",
+    } as never,
+  ]);
+  h.feed(CTRL_C);
+  assert.equal(h.store.state.status, BUSY_QUIT_CHOICE_PROMPT);
+  // armed 内 Ctrl-D 照常分离退出。
+  h.feed(CTRL_D);
+  assert.equal(h.exitCode(), 0);
+  await h.stop();
+});
+
+test("busy + non-empty draft: Ctrl+C clears the draft instead of arming", async () => {
+  // 草稿清空语义优先于三选一：非空草稿的第一下 Ctrl-C 只清草稿。
+  const h = createHarness();
+  h.store.set("busy", true);
+  h.feed("draft text");
+  h.feed(CTRL_C);
+  assert.equal(h.store.state.status, PROMPT_DRAFT_CLEARED_STATUS);
+  assert.equal(h.draftText(), "");
+  assert.equal(h.exitCode(), undefined);
+  await h.stop();
+});
+
 test("Shift+Tab cycles collaboration mode through options.setMode", async () => {
   const seen: string[] = [];
   const h = createHarness({

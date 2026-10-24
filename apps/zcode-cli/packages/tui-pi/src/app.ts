@@ -534,15 +534,14 @@ export class PiTuiApp {
   private dispatchChord(data: string): { consume?: boolean } | undefined {
     const store = this.store;
 
+    // 退出键先行：busy 三选一不能被面板/补全的键盘所有权挡住（SIGINT 一致性见 quit-choice.ts）。
+    if (this.quitChoice.handleEarlyQuitKey(data, this.editor.getText())) return { consume: true };
+
     // Panels own the keyboard while visible.
     if (this.approvalPanel || this.selectionPanel) return undefined;
 
     // Autocomplete owns the keyboard while open.
     if (this.editor.isShowingAutocomplete()) return undefined;
-
-    // busy 退出三选一 armed 中：Ctrl-D 分离 / Esc 留下在这里消费；
-    // Ctrl-C 让位 handleCtrlCIntent；其余键静默取消 armed 后照常处理。
-    if (this.quitChoice.interceptArmedKey(data)) return { consume: true };
 
     // Ctrl+X leader for the session-info overlay (same chord as the React
     // frontend's sidebar): Ctrl+X arms, B toggles.

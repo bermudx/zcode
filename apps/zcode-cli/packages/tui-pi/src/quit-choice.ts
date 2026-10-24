@@ -56,9 +56,14 @@ export class BusyQuitChoice {
   }
 
   private async stopActiveThenExit(): Promise<void> {
-    await this.deps.requestStopActiveTurn?.();
-    this.deps.abortTurn();
-    this.deps.exit(0);
+    try {
+      await this.deps.requestStopActiveTurn?.();
+    } finally {
+      // requestStopActiveTurn 的契约是"有界且尽力而为"；这里只兜住 rejection，
+      // 不重复设超时——悬挂防护由 supplier 的有界等待承担。
+      this.deps.abortTurn();
+      this.deps.exit(0);
+    }
   }
 
   /**
@@ -84,6 +89,26 @@ export class BusyQuitChoice {
       guard: this.ctrlCGuard,
       setStatus: this.deps.setStatus,
     });
+  }
+
+  /**
+   * dispatchChord 的早退键段，先于面板/补全的键盘所有权：
+   * armed 拦截 → busy/armed 的 Ctrl-C 走退出决策 → busy 的 Ctrl-D arm。
+   * 等审批时 Ctrl-C/Ctrl-D 若被面板吞成死键，SIGINT 路径却仍可达——两条路径必须一致。
+   */
+  handleEarlyQuitKey(data: string, draft: string): boolean {
+    if (this.interceptArmedKey(data)) return true;
+    if (matchesKey(data, "ctrl+c") && this.shouldHandleCtrlC()) {
+      this.onCtrlC(draft);
+      return true;
+    }
+    if (matchesKey(data, "ctrl+d") && this.onCtrlD()) return true;
+    return false;
+  }
+
+  /** busy（含等交互）或 armed 时 Ctrl-C 属于退出决策而非面板/补全键。 */
+  private shouldHandleCtrlC(): boolean {
+    return this.armed() || this.deps.turnBusy();
   }
 
   /** Ctrl-D：armed 窗口内 = 分离退出；busy = arm 三选一。返回 true 表示已消费。 */

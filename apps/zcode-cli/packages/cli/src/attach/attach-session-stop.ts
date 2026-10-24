@@ -17,8 +17,10 @@ export async function requestSessionStopBestEffort(
   } catch {
     return;
   }
+  // unref：ack 先到时残留的定时器不能拖住退出——zcode-attach 靠事件循环
+  // 排空退出（process.exitCode），ref 住的 timer 会让进程白挂到超时。
   await Promise.race([
     client.request(zcodeProtocolMethods.sessionStop, { sessionId }).catch(() => undefined),
-    new Promise<void>((resolve) => setTimeout(resolve, STOP_ACTIVE_TURN_ACK_TIMEOUT_MS)),
+    new Promise<void>((resolve) => setTimeout(resolve, STOP_ACTIVE_TURN_ACK_TIMEOUT_MS).unref()),
   ]);
 }

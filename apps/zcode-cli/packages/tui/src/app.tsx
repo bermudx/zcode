@@ -326,6 +326,27 @@ export function TuiApp({
     setStatus,
   });
 
+  // "stop & quit"：attach 宿主下 busy 中退出先显式上达 session/stop 再退——
+  // soft detach 会让会话在 core 上继续跑，裸退出把 agent 悄悄留成孤儿
+  // （旧语义是断开即终止）。idle 直通；无 requestStopActiveTurn 时退化为本地退出。
+  const requestStopActiveTurn = options.requestStopActiveTurn;
+  const onExitStopsAgentFirst = useCallback(
+    (code: number) => {
+      if (!busy || !requestStopActiveTurn) {
+        onExit(code);
+        return;
+      }
+      void (async () => {
+        try {
+          await requestStopActiveTurn();
+        } finally {
+          onExit(code);
+        }
+      })();
+    },
+    [busy, onExit, requestStopActiveTurn],
+  );
+
   useTuiKeyboardControls({
     readOnlyView: subagents.selected ? { back: subagents.back } : undefined,
     abortControllerRef,
@@ -340,7 +361,7 @@ export function TuiApp({
     filteredModelOptions: modelCommand.filteredOptions,
     handleFileMentionKey: fileMentions.handleKey,
     hasDraftAttachments: () => draftAttachmentsRef.current.length > 0,
-    onExit,
+    onExit: onExitStopsAgentFirst,
     pasteClipboardImage,
     recallNextInput,
     recallPreviousInput,
