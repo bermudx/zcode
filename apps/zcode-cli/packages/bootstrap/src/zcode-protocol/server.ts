@@ -450,7 +450,8 @@ export class ZCodeProtocolAgentServer {
   markClientDetached(error: Error): void {
     this.networkCapture.setCaptureId(null);
     this.clientDetached = true;
-    this.clientDetachedAt = Date.now();
+    // detachConnection 的幂等补标记会二次进来：收养窗口以首次真正断链为起点。
+    this.clientDetachedAt ??= Date.now();
     this.messageSink = undefined;
     for (const controller of this.workspaceGenerateTextControllers.values()) {
       controller.abort(error);
