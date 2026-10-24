@@ -181,6 +181,62 @@ test("editing out the placeholder drops the draft attachment", async () => {
   }
 });
 
+test("deleting a placeholder mid-text also drops the attachment", async () => {
+  const h = createHarness({ readClipboardImage: async () => pngImage });
+  try {
+    h.feed("x ");
+    h.feed(CTRL_V);
+    await h.flush();
+    h.feed(" y");
+    assert.equal(h.draftText(), "x [image #1] y");
+    // 光标移到占位符中间再删：左移两次（过 "y" 与空格）后 backspace 掉 `]`。
+    h.feed("\x1b[D");
+    h.feed("\x1b[D");
+    h.feed(BACKSPACE);
+    await h.flush();
+    assert.equal(h.draftText(), "x [image #1 y");
+    assert.equal(h.store.state.draftAttachments.length, 0);
+  } finally {
+    await h.stop();
+  }
+});
+
+test("pasting into a non-whitespace token inserts a separating space", async () => {
+  const h = createHarness({ readClipboardImage: async () => pngImage });
+  try {
+    h.feed("foo");
+    h.feed(CTRL_V);
+    await h.flush();
+    // 占位符不能粘进前一个 token（foo[image #1] 会让 reconcile/submit 都失配）。
+    assert.equal(h.draftText(), "foo [image #1]");
+  } finally {
+    await h.stop();
+  }
+});
+
+test("slash-command submits still forward draft image attachments to the handler", async () => {
+  const { prompts, submitPrompt } = collectPrompts();
+  const h = createHarness({
+    readClipboardImage: async () => pngImage,
+    submitPrompt,
+  });
+  try {
+    h.feed("/model");
+    h.feed(CTRL_V);
+    await h.flush();
+    h.feed(ENTER);
+    await h.flush();
+    // TUI 层不静默丢附件：`/` 前缀草稿把 attachments 原样交给 prompt handler，
+    // 由 command-center 决定拒绝（不在本层消失）。
+    const input = prompts[0]!;
+    assert.ok(typeof input !== "string");
+    assert.equal(input.text, "/model [image #1]");
+    assert.equal(input.attachments?.length, 1);
+  } finally {
+    await h.stop();
+  }
+});
+
 test("a partially edited @file mention no longer resolves to an attachment", async () => {
   const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
