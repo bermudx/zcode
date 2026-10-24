@@ -24,6 +24,9 @@ export class UsageTotalsAccumulator {
   ) {}
 
   handleEvent(event: SessionEvent): void {
+    // 只计主会话：subagent tool mirror 与子会话事件（含 turn_complete
+    // 权威 summary）统一由 isMainSessionEvent 排除，与目录/转写投影同门。
+    if (!isMainSessionEvent(event, this.options.getMainSessionId?.())) return;
     if (event.type === SessionEventType.TurnComplete) {
       // turn_complete 的 usage 是权威 session summary：整段采信，回合内折叠
       // 误差与 sidecar 用量在此归并（替换非累加，不双计）。
@@ -34,9 +37,6 @@ export class UsageTotalsAccumulator {
       return;
     }
     if (event.type !== SessionEventType.ModelComplete) return;
-    // 只计主会话：subagent tool mirror 与子会话 model_complete 已由
-    // isMainSessionEvent 排除，与子代理目录/转写投影的主会话门一致。
-    if (!isMainSessionEvent(event, this.options.getMainSessionId?.())) return;
     const payload = event.payload as ModelCompletePayload | undefined;
     const usage = payload?.usage;
     if (usage) {

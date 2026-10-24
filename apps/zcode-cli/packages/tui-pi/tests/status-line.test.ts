@@ -123,3 +123,54 @@ test("turn_complete authoritative summary replaces folded totals", async () => {
     await h.stop();
   }
 });
+
+test("child-session usage events never reach the main footer", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    h.resetOutput();
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "main turn",
+        stopReason: "stop",
+        usage: { inputTokens: 500, outputTokens: 5 },
+      }),
+    );
+    // 子会话自己的 model_complete / turn_complete：footer 只显示主会话累计。
+    h.app.applyEvent(
+      sessionEvent(
+        "model_complete",
+        {
+          content: "subagent turn",
+          stopReason: "stop",
+          usage: { inputTokens: 9_000_000, outputTokens: 900_000 },
+        },
+        { sessionId: "child-session-9" },
+      ),
+    );
+    h.app.applyEvent(
+      sessionEvent(
+        "turn_complete",
+        {
+          usage: {
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            inputTokens: 9_000_000,
+            modelRequestCount: 9,
+            outputTokens: 900_000,
+            reasoningTokens: 0,
+            source: "provider",
+            totalTokens: 9_900_000,
+            webFetchRequests: 0,
+            webSearchRequests: 0,
+          },
+        },
+        { sessionId: "child-session-9" },
+      ),
+    );
+    await h.flush();
+    assert.match(h.output(), /↑500 ↓5 R0/);
+    assert.doesNotMatch(h.output(), /9\.9M|↑9M/);
+  } finally {
+    await h.stop();
+  }
+});
