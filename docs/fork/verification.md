@@ -207,3 +207,18 @@ mode token. All passing unless stated:
 Still NOT done: the full acceptance gate above (model turn, signing against
 the real provider request, allowance evidence, Ctrl-C signal path, memory
 matrix) remains open and unchanged.
+
+## 2026-10-24 — /commands attach support (ff36a0fd) + piz --model (810629b3 merge of 3db70344)
+
+- `patch/attach-custom-commands` verified in a clean-session detached
+  worktree by a second agent: full battery re-run (root+CLI typecheck,
+  lint, architecture:check, cli suite, bootstrap, tui-pi, signing) plus
+  live attach check (/ panel, /help metadata, core-side expansion probe)
+  — verdict APPROVE, no blocking findings. Reports:
+  ~/goblin/state/delegations/6 (builder) and 8 (verifier).
+- `patch/model-flag` verified by its builder with 16 new tests, attach
+  suite 73/73, live pty check against the real catalog; full isolated
+  build deferred to promotion (worktree shared node_modules with the
+  main checkout during the /commands build — deliberate isolation
+  avoidance, noted in report ~/goblin/state/delegations/7).
+- Merged to main: ff (fast-forward), model-flag via --no-ff 810629b3.
