@@ -1,7 +1,8 @@
 // Footer stats 行布局（pi-mono footer 同构）：左区 session 用量簇
 // （↑in ↓out R… CH%）+ ctx 仪表 `{pct}%/{win}`，右区身份簇
 // `(provider) model · thought · mode · agents:N`。pwd 行（`~/cwd (branch)`）
-// 见 formatPwdLine。收缩顺序：左区行尾截断 → 右区按剩余宽度截断。
+// 见 formatPwdLine。收缩顺序：左区行尾截断 → 右区按剩余宽度截断
+// （余窗不足 MIN_RIGHT_WIDTH 时右区整体退场，不留碎片）。
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ContextUsage } from "@zcode/tui/internals";
@@ -117,18 +118,21 @@ const formatStatsLeft = (s: AppStore["state"]): string =>
 
 /**
  * stats 行整行组装：左区放不下先行尾截断，右区再按剩余宽度截断
- * （pi footer 同序；右区截断无标记，避免挤掉身份簇尾部）。
+ * （pi footer 同序；右区截断无标记，避免挤掉身份簇尾部）。余窗不足
+ * MIN_RIGHT_WIDTH 时右区整体退场——1–3 列只够渲染 `(`/`(p`/`(pr` 级
+ * 碎片，会在收缩谱上留一截可见毛刺。
  */
 export function formatStatsLine(input: { state: AppStore["state"]; width: number }): string {
   const { state, width } = input;
   if (width < 1) return "";
   const MIN_PADDING = 2;
+  const MIN_RIGHT_WIDTH = 4;
   let left = formatStatsLeft(state);
   if (visibleWidth(left) > width) left = truncateToWidth(left, width, "…");
   const leftWidth = visibleWidth(left);
   const availableForRight = width - leftWidth - MIN_PADDING;
   const right = formatIdentityCluster(state) ?? "";
-  if (availableForRight <= 0) return left;
+  if (availableForRight < MIN_RIGHT_WIDTH) return left;
   const rightText =
     visibleWidth(right) > availableForRight ? truncateToWidth(right, availableForRight, "") : right;
   const padding = " ".repeat(Math.max(0, width - leftWidth - visibleWidth(rightText)));

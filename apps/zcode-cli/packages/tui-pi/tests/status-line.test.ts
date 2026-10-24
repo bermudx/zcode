@@ -149,6 +149,36 @@ test("stats line truncates left first, then right, as the width shrinks", () => 
   assert.match(tiny, /^↑1\.9M/);
 });
 
+test("right zone drops out below a 4-column window instead of leaving a fragment", () => {
+  const s = state({
+    cacheHitRate: 0.995,
+    contextUsage: { contextWindow: 255_000, contextUsed: 103_000 },
+    mode: "yolo",
+    model: "prov/model",
+    thoughtLevel: "max",
+    usageTotals: totals(1_900_000, 43_000, 1_800_000),
+  });
+  const left = "↑1.9M ↓43k R1.8M CH99.5% 40.4%/255k";
+  // 左区 35 列：38–40 列时右区余窗仅 1–3 列（`(`/`(p`/`(pr` 碎片带）→
+  // 右区整体退场，不留可见毛刺。
+  for (const width of [38, 39, 40]) {
+    assert.equal(formatStatsLine({ state: s, width }), left, `width=${width}`);
+  }
+  // 41 列：余窗回到 4 列，右区以 ≥4 列前缀重新进场，≥2 空格间距保持。
+  const back = formatStatsLine({ state: s, width: 41 });
+  assert.equal(visibleWidth(back), 41);
+  assert.ok(back.startsWith(`${left}  (pro`), back);
+  // 整段收缩谱不变式（35–100 列）：右区要么退场，要么以 ≥4 列在场。
+  for (let width = 35; width <= 100; width++) {
+    const line = formatStatsLine({ state: s, width });
+    assert.ok(visibleWidth(line) <= width, `width=${width}: ${line}`);
+    if (line === left) continue;
+    assert.ok(line.startsWith(`${left}  `), `width=${width}: ${line}`);
+    const rest = line.slice(left.length + 2);
+    assert.ok(visibleWidth(rest) >= 4, `width=${width}: ${JSON.stringify(rest)}`);
+  }
+});
+
 test("model_complete accumulates per-request usage + latestHitRate", async () => {
   const h = createHarness({ getMainSessionId: () => "sess-test" });
   try {

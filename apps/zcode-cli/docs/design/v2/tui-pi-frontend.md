@@ -132,7 +132,8 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     `↑{in} ↓{out} R{cacheRead} CH{hit}% {ctxPct}%/{ctxWindow}`（ctx 仪表
     紧贴用量簇，pi footer 同构；窗口缺失降级 `ctx {compact(used)}`），右区
     `(provider) model · thought · mode · agents:N`，两区间距 ≥2 空格。
-    宽度收缩顺序：左区行尾 "…" 截断 → 右区按剩余宽度截断（pi footer 同序）。
+    宽度收缩顺序：左区行尾 "…" 截断 → 右区按剩余宽度截断（pi footer 同序）；
+    右区余窗不足 4 列时整体退场——1–3 列只够渲染 `(` 级碎片，留了毛刺窗。
   - 三行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
     status 也不会把 footer 撑过三行。
   - pi footer 的 `(auto)`（auto-compact 开关）与 5h/7d 额度窗口（用户 pi 侧
