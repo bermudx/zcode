@@ -64,6 +64,8 @@ export class AppStore {
     traceId: undefined as string | undefined,
     usage: undefined as ModelUsageSummary | undefined,
     usageTotals: undefined as UsageTotals | undefined,
+    /** CLI 启动快照（`TuiStartupOptions.workspaceGitBranch`），无 live watcher。 */
+    workspaceGitBranch: undefined as string | undefined,
   };
 
   /** Maps used by the shared projection; stable identity matters. */

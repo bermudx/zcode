@@ -1,11 +1,11 @@
-// Footer 双行组件：statusBox 恒挂活动行 + meta 行两个单行组件，高度不随
+// Footer 恒三行组件：statusBox 恒挂活动行 + pwd 行 + stats 行，高度不随
 // busy/内容变化。pi-tui `Loader.render` 固定产出「空行 + 内容行」（给编辑器
 // 留呼吸位），`Text.render` 会把溢出文本折成多行——恒定布局要求每个子组件
 // 恰好一行，故两者都只取渲染首行（Text 已按宽度换行并补齐，首行即天然单行
 // 截断，窄终端/长 status 也不会撑高 footer）。
 
 import { Container, Loader, type Component, type TUI } from "@earendil-works/pi-tui";
-import { formatMetaLine } from "./status-line.js";
+import { formatPwdLine, formatStatsLine } from "./status-line.js";
 import type { AppStore } from "./store.js";
 import type { PiTheme } from "./theme.js";
 
@@ -23,40 +23,57 @@ export class ActivityLine extends Loader {
   }
 }
 
-/**
- * meta 行：左区 cwd + 用量簇，右区 ctx + `model · thought · mode`。持有最新
- * state 在 render(width) 时按需收缩（formatMetaLine），恒为单行。
- */
-export class MetaLine implements Component {
+/** pwd 行：`~/cwd (branch)` 单行；branch 是 CLI 启动快照，无 live watcher。 */
+export class PwdLine implements Component {
+  private branch: string | undefined;
   private cwdLabel = "";
-  private state: AppStore["state"] | undefined;
 
   constructor(private readonly theme: PiTheme) {}
 
-  setState(state: AppStore["state"], cwdLabel: string): void {
-    this.state = state;
+  setState(cwdLabel: string, branch: string | undefined): void {
     this.cwdLabel = cwdLabel;
+    this.branch = branch;
   }
 
   invalidate(): void {}
 
   render(width: number): string[] {
-    const line = this.state
-      ? formatMetaLine({ cwdLabel: this.cwdLabel, state: this.state, width })
-      : "";
+    const line = formatPwdLine({ branch: this.branch, cwdLabel: this.cwdLabel, width });
     return [this.theme.muted(line)];
   }
 }
 
 /**
- * Footer 恒定两行的唯一 owner：活动行（spinner + status）与 meta 行常驻，
- * 只换内容不换结构。活动判定与 quitChoice.turnBusy 同口径（busy 或前台
- * activeTurnId），attach 会话的远端 turn 也转 spinner；指示切换只在 busy
- * 沿变化时发生，空闲指示帧数 ≤1，idle 下没有帧定时器空转。
+ * stats 行：左区用量簇 + ctx 仪表，右区身份簇。持有最新 state 在
+ * render(width) 时按需收缩（formatStatsLine），恒为单行。
+ */
+export class StatsLine implements Component {
+  private state: AppStore["state"] | undefined;
+
+  constructor(private readonly theme: PiTheme) {}
+
+  setState(state: AppStore["state"]): void {
+    this.state = state;
+  }
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    const line = this.state ? formatStatsLine({ state: this.state, width }) : "";
+    return [this.theme.muted(line)];
+  }
+}
+
+/**
+ * Footer 恒定三行的唯一 owner：活动行（spinner + status）、pwd 行与 stats
+ * 行常驻，只换内容不换结构。活动判定与 quitChoice.turnBusy 同口径（busy 或
+ * 前台 activeTurnId），attach 会话的远端 turn 也转 spinner；指示切换只在
+ * busy 沿变化时发生，空闲指示帧数 ≤1，idle 下没有帧定时器空转。
  */
 export class StatusFooter extends Container {
   private readonly activity: ActivityLine;
-  private readonly meta: MetaLine;
+  private readonly pwd: PwdLine;
+  private readonly stats: StatsLine;
   private activityActive = false;
 
   constructor(tui: TUI, theme: PiTheme) {
@@ -66,9 +83,11 @@ export class StatusFooter extends Container {
     // footer 恒定挂载形态下立刻用空闲指示接管——帧数 ≤1 不启动定时器，
     // 否则空转 tick 会阻止进程退出。
     this.activity.setIndicator(ACTIVITY_IDLE_INDICATOR);
-    this.meta = new MetaLine(theme);
+    this.pwd = new PwdLine(theme);
+    this.stats = new StatsLine(theme);
     this.addChild(this.activity);
-    this.addChild(this.meta);
+    this.addChild(this.pwd);
+    this.addChild(this.stats);
   }
 
   update(input: {
@@ -83,7 +102,8 @@ export class StatusFooter extends Container {
       this.activity.setIndicator(active ? undefined : ACTIVITY_IDLE_INDICATOR);
     }
     this.activity.setMessage(state.status || (active ? input.idleHint : ""));
-    this.meta.setState(state, input.cwdLabel);
+    this.pwd.setState(input.cwdLabel, state.workspaceGitBranch);
+    this.stats.setState(state);
   }
 
   stop(): void {

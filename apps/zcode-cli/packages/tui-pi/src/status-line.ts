@@ -1,12 +1,11 @@
-// Footer meta 行布局：左区 cwd + session 用量簇（↑in ↓out R… CH%），
-// 右区 ctx 仪表 + 模型身份 `(provider) model · thought · mode · agents:N`。
-// 宽度不够时依次退让：先丢用量簇，再省略 cwd，最后截右区尾部。
+// Footer stats 行布局（pi-mono footer 同构）：左区 session 用量簇
+// （↑in ↓out R… CH%）+ ctx 仪表 `{pct}%/{win}`，右区身份簇
+// `(provider) model · thought · mode · agents:N`。pwd 行（`~/cwd (branch)`）
+// 见 formatPwdLine。收缩顺序：左区行尾截断 → 右区按剩余宽度截断。
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ContextUsage } from "@zcode/tui/internals";
 import type { AppStore, UsageTotals } from "./store.js";
-
-const ZONE_GAP = 2;
 
 /** pi-mono `formatTokens` 等值（footer.js）：紧凑计数 103k / 1.8M / 255k。 */
 export function formatTokens(count: number): string {
@@ -68,7 +67,7 @@ export function formatModelLabel(model: string): string | undefined {
   return `(${model.slice(0, slash)}) ${model.slice(slash + 1)}`;
 }
 
-/** 右区身份簇：ctx 仪表空两格接 `model · thought · mode · agents:N`。 */
+/** 右区身份簇：`model · thought · mode · agents:N`。ctx 仪表在左区用量簇旁。 */
 export function formatIdentityCluster(s: AppStore["state"]): string | undefined {
   const identity = [
     formatModelLabel(s.model),
@@ -77,9 +76,7 @@ export function formatIdentityCluster(s: AppStore["state"]): string | undefined 
   ].filter(Boolean);
   const running = s.subagents?.running.length ?? 0;
   if (running > 0) identity.push(`agents:${running}`);
-  const ctx = formatContextSegment(s.contextUsage);
-  const identityText = identity.join(" · ");
-  const text = [ctx, identityText].filter((part) => part && part.length > 0).join("  ");
+  const text = identity.join(" · ");
   return text.length > 0 ? text : undefined;
 }
 
@@ -93,56 +90,47 @@ export function formatCwdLabel(input: { cwd?: string; home?: string }): string {
   return cwd;
 }
 
-/** 保留路径尾部的左省略：`budget` 不足 2 时整段隐藏。 */
-const ellipsizeLeft = (text: string, budget: number): string => {
-  if (budget < 1) return "";
-  if (visibleWidth(text) <= budget) return text;
-  if (budget < 2) return "";
-  // 按码点从尾部往回取，宽字符（CJK 路径）也不会超出预算。
-  const chars = [...text];
-  let tail = "";
-  for (let i = chars.length - 1; i >= 0; i -= 1) {
-    const next = chars[i] + tail;
-    if (visibleWidth(next) >= budget) break;
-    tail = next;
-  }
-  return `…${tail}`;
-};
-
-/** `left + 空白 + right` 单行拼接；放不下返回 undefined。 */
-const composeZones = (left: string, right: string, width: number): string | undefined => {
-  if (width < 1) return "";
-  if (!left) return visibleWidth(right) <= width ? right : undefined;
-  if (!right) return visibleWidth(left) <= width ? left : undefined;
-  const gap = width - visibleWidth(left) - visibleWidth(right);
-  if (gap < ZONE_GAP) return undefined;
-  return `${left}${" ".repeat(gap)}${right}`;
-};
-
-/**
- * meta 行整行组装：左区 `cwd  用量簇`，右区 ctx + 身份簇。
- * 收缩顺序：丢用量簇 → cwd 左省略 → 只剩右区 → 右区硬截断。
- */
-export function formatMetaLine(input: {
+/** pwd 行：`~/cwd (branch)`，行尾 "…" 截断（pi 同款）；branch 缺省只显 cwd。 */
+export function formatPwdLine(input: {
+  branch?: string;
   cwdLabel?: string;
-  state: AppStore["state"];
   width: number;
 }): string {
-  const { state, width } = input;
-  const right = formatIdentityCluster(state) ?? "";
-  const cluster = formatUsageCluster({
-    cacheHitRate: state.cacheHitRate,
-    usageTotals: state.usageTotals,
-  });
-  const cwd = input.cwdLabel ?? "";
+  if (input.width < 1) return "";
+  const base = input.cwdLabel ?? "";
+  const text = input.branch ? `${base} (${input.branch})` : base;
+  if (text.length === 0) return "";
+  return truncateToWidth(text, input.width, "…");
+}
 
-  for (const left of [cluster ? `${cwd}${cwd ? "  " : ""}${cluster}` : cwd, cwd]) {
-    if (!left) continue;
-    const line = composeZones(left, right, width);
-    if (line !== undefined) return line;
-  }
-  const budget = Math.max(0, width - visibleWidth(right) - ZONE_GAP);
-  const shrunk = composeZones(ellipsizeLeft(cwd, budget), right, width);
-  if (shrunk !== undefined) return shrunk;
-  return truncateToWidth(right, Math.max(1, width));
+/** stats 行左区：用量簇与 ctx 仪表同侧（pi footer 同构），空段跳过。 */
+const formatStatsLeft = (s: AppStore["state"]): string =>
+  [
+    formatUsageCluster({
+      cacheHitRate: s.cacheHitRate,
+      usageTotals: s.usageTotals,
+    }),
+    formatContextSegment(s.contextUsage),
+  ]
+    .filter((part) => part && part.length > 0)
+    .join(" ");
+
+/**
+ * stats 行整行组装：左区放不下先行尾截断，右区再按剩余宽度截断
+ * （pi footer 同序；右区截断无标记，避免挤掉身份簇尾部）。
+ */
+export function formatStatsLine(input: { state: AppStore["state"]; width: number }): string {
+  const { state, width } = input;
+  if (width < 1) return "";
+  const MIN_PADDING = 2;
+  let left = formatStatsLeft(state);
+  if (visibleWidth(left) > width) left = truncateToWidth(left, width, "…");
+  const leftWidth = visibleWidth(left);
+  const availableForRight = width - leftWidth - MIN_PADDING;
+  const right = formatIdentityCluster(state) ?? "";
+  if (availableForRight <= 0) return left;
+  const rightText =
+    visibleWidth(right) > availableForRight ? truncateToWidth(right, availableForRight, "") : right;
+  const padding = " ".repeat(Math.max(0, width - leftWidth - visibleWidth(rightText)));
+  return `${left}${padding}${rightText}`;
 }

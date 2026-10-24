@@ -285,6 +285,9 @@ export class PiTuiApp {
     if (startup.slashCommands) this.options.slashCommands = startup.slashCommands;
     if (startup.skillSuggestions) this.options.skillSuggestions = startup.skillSuggestions;
     if (startup.slashCommands || startup.skillSuggestions) this.editor.refreshAutocomplete();
+    if (startup.workspaceGitBranch !== undefined) {
+      store.set("workspaceGitBranch", startup.workspaceGitBranch);
+    }
     this.updateFooter();
     void this.seedWorkflowRuns();
   }
@@ -765,7 +768,7 @@ export class PiTuiApp {
     }
   }
 
-  /** Footer 两行的 owner 在 footer.ts；这里只把最新 state 递下去。 */
+  /** Footer 三行的 owner 在 footer.ts；这里只把最新 state 递下去。 */
   private updateFooter(): void {
     this.statusBox.update({
       cwdLabel: this.cwdLabel,

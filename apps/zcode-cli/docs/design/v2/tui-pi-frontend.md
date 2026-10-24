@@ -114,22 +114,30 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   heading/strong 用 bold 属性表达层级，inline code 叠 `backgroundPanel` 底色；
   `underline`/`strikethrough` 只叠加属性不带色——pi-tui 在 h1 与 link 内
   嵌套调用 `underline()`，带 fg 会顶掉 heading/link 颜色。
-- Footer 恒定两行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
+- Footer 恒定三行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
   `Container`）唯一 own：高度不随 busy 变化，挂载/卸载 spinner 不再把整屏
-  内容顶起/落下；`update({state, status, cwdLabel})` 一行委托两行。
+  内容顶起/落下；`update({state, status, cwdLabel})` 一行委托三行。布局
+  对齐 pi-mono footer：pwd 行独立，stats 行左右两区、ctx 仪表贴用量簇。
   - 活动行（`ActivityLine`，Loader 单行形态）：busy 或 `activeTurnId` 在场
     时动画 spinner + `status`（status 为空回退 `input.activeStatusHint`，
     "esc to interrupt"，与 React 前端同文案）；空闲时 spinner 位留空格对齐、
     显示 `status` 或留白。`activeTurnId` 并入活动判定与
     `quitChoice.turnBusy` 同口径——attach 会话远端发起的 turn 也可见
     spinner；指示切换只在 busy 沿变化时发生。
-  - meta 行（`MetaLine` + `status-line.ts` 纯格式化）：左右两区。
-    左区 `cwd  ↑{in} ↓{out} R{cacheRead} CH{hit}%`，右区
-    `{ctxPct}%/{ctxWindow}  (provider) model · thought · mode · agents:N`，
-    两区间距随宽度浮动（≥2 空格）。宽度收缩顺序：先丢用量簇 → cwd 左省略
-    （保尾部，`$HOME` 折叠为 `~`）→ 只剩右区 → 右区硬截断。
-  - 两行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
-    status 也不会把 footer 撑过两行。
+  - pwd 行（`PwdLine`）：`~/cwd (branch)`，`$HOME` 折叠为 `~`。branch 取
+    `TuiStartupOptions.workspaceGitBranch`（CLI 组合层启动快照，与 React
+    sidebar 同一来源；无 live watcher，会话内切分支不刷新）。非 git 目录
+    只显示 cwd；行尾 "…" 截断（pi 同款）。
+  - stats 行（`StatsLine` + `status-line.ts` 纯格式化）：左区
+    `↑{in} ↓{out} R{cacheRead} CH{hit}% {ctxPct}%/{ctxWindow}`（ctx 仪表
+    紧贴用量簇，pi footer 同构；窗口缺失降级 `ctx {compact(used)}`），右区
+    `(provider) model · thought · mode · agents:N`，两区间距 ≥2 空格。
+    宽度收缩顺序：左区行尾 "…" 截断 → 右区按剩余宽度截断（pi footer 同序）。
+  - 三行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
+    status 也不会把 footer 撑过三行。
+  - pi footer 的 `(auto)`（auto-compact 开关）与 5h/7d 额度窗口（用户 pi 侧
+    provider-balance 扩展）在 TUI 契约均无客户端可见数据源——core 只在
+    compact 结果事件携带 `autoCompactThreshold`，非设置快照——不伪造。
   - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
     维护的 session 累计。契约没有 session 级权威用量源——`turn_complete`
     / `submitPrompt` 结果的 `usage` 都是 `createModelUsageSummaryFromEvents`

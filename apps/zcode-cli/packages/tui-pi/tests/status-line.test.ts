@@ -1,6 +1,6 @@
-// Footer meta 行：左区 cwd + 用量簇（↑in ↓out R… CH%），右区 ctx +
-// `(provider) model · thought · mode · agents:N`。覆盖纯 formatter 与
-// 事件 → UsageTotalsAccumulator → meta 行的端到端路径。
+// Footer stats 行：左区用量簇（↑in ↓out R… CH%）+ ctx 仪表，右区
+// `(provider) model · thought · mode · agents:N`；pwd 行 `~/cwd (branch)`。
+// 覆盖纯 formatter 与事件 → UsageTotalsAccumulator → stats 行的端到端路径。
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -9,8 +9,9 @@ import {
   formatContextSegment,
   formatCwdLabel,
   formatIdentityCluster,
-  formatMetaLine,
   formatModelLabel,
+  formatPwdLine,
+  formatStatsLine,
   formatTokens,
   formatUsageCluster,
 } from "../src/status-line.js";
@@ -65,20 +66,19 @@ test("model label splits provider/ into the pi form", () => {
   assert.equal(formatModelLabel(""), undefined);
 });
 
-test("identity cluster joins ctx + model · thought · mode", () => {
+test("identity cluster joins model · thought · mode (ctx gauge lives on the left)", () => {
   const line = formatIdentityCluster(
     state({
-      contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
       mode: "yolo",
       model: "prov/model",
       thoughtLevel: "max",
     }),
   );
-  assert.equal(line, "40.4%/255k  (prov) model · max · yolo");
+  assert.equal(line, "(prov) model · max · yolo");
 });
 
 test("agents segment appears only while running", () => {
-  const base = { contextUsage: {}, mode: "yolo", model: "m" };
+  const base = { mode: "yolo", model: "m" };
   assert.equal(formatIdentityCluster(state(base)), "m · yolo");
   assert.match(
     formatIdentityCluster(
@@ -101,7 +101,16 @@ test("cwd label folds the home prefix to ~", () => {
   assert.equal(formatCwdLabel({ cwd: "/opt/piz", home: "/home/daniel" }), "/opt/piz");
 });
 
-test("meta line lays out left cwd + cluster and right identity", () => {
+test("pwd line appends the branch and truncates the tail", () => {
+  assert.equal(formatPwdLine({ branch: "main", cwdLabel: "~/piz", width: 100 }), "~/piz (main)");
+  assert.equal(formatPwdLine({ cwdLabel: "~/piz", width: 100 }), "~/piz");
+  assert.equal(formatPwdLine({ branch: "main", cwdLabel: "~/piz", width: 0 }), "");
+  const truncated = formatPwdLine({ branch: "main", cwdLabel: "~/build/piz", width: 10 });
+  assert.equal(visibleWidth(truncated), 10);
+  assert.ok(truncated.startsWith("~/build"), truncated);
+});
+
+test("stats line lays out left cluster + ctx gauge and right identity", () => {
   const s = state({
     cacheHitRate: 0.995,
     contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
@@ -110,34 +119,34 @@ test("meta line lays out left cwd + cluster and right identity", () => {
     thoughtLevel: "max",
     usageTotals: totals(1_900_000, 43_000, 1_800_000),
   });
-  const left = "~/piz  ↑1.9M ↓43k R1.8M CH99.5%";
-  const right = "40.4%/255k  (prov) model · max · yolo";
+  const left = "↑1.9M ↓43k R1.8M CH99.5% 40.4%/255k";
+  const right = "(prov) model · max · yolo";
   assert.equal(
-    formatMetaLine({ cwdLabel: "~/piz", state: s, width: 100 }),
-    `${left}${" ".repeat(100 - left.length - right.length)}${right}`,
+    formatStatsLine({ state: s, width: 100 }),
+    `${left}${" ".repeat(100 - visibleWidth(left) - visibleWidth(right))}${right}`,
   );
 });
 
-test("meta line sheds cluster, then cwd, as the width shrinks", () => {
+test("stats line truncates left first, then right, as the width shrinks", () => {
   const s = state({
+    cacheHitRate: 0.995,
     contextUsage: { contextWindow: 255_000, contextUsed: 103_000 },
     mode: "yolo",
     model: "prov/model",
+    thoughtLevel: "max",
     usageTotals: totals(1_900_000, 43_000, 1_800_000),
   });
-  const right = "40.4%/255k  (prov) model · yolo";
-  // 60 列放不下 cluster + right：cluster 先退场。
-  assert.equal(
-    formatMetaLine({ cwdLabel: "~/piz", state: s, width: 60 }),
-    `~/piz${" ".repeat(60 - 5 - right.length)}${right}`,
-  );
-  // 再窄：cwd 左省略但尾部保留（budget = 40-31-2 = 7 → "…" + 6 格尾段）。
-  const shrunk = formatMetaLine({ cwdLabel: "~/build/piz", state: s, width: 40 });
-  assert.equal(shrunk, `…ld/piz${" ".repeat(40 - 7 - right.length)}${right}`);
-  // 极窄：只剩右区且硬截断（truncateToWidth 的 "..." 标记带 ANSI，按可见宽度断言）。
-  const tiny = formatMetaLine({ cwdLabel: "~/build/piz", state: s, width: 20 });
-  assert.equal(visibleWidth(tiny), 20);
-  assert.match(tiny, /^40\.4%/);
+  const left = "↑1.9M ↓43k R1.8M CH99.5% 40.4%/255k";
+  // 50 列：左区 36 列放得下，右区压到剩余 12 列（≥2 空格间距保住；
+  // truncateToWidth 的截断标记带零宽 ANSI，按可见宽度断言）。
+  const mid = formatStatsLine({ state: s, width: 50 });
+  assert.equal(visibleWidth(mid), 50);
+  assert.ok(mid.startsWith(`${left}  (prov) model`), mid);
+  assert.doesNotMatch(mid, /max/);
+  // 30 列：左区放不下 → 行尾 "…" 截断，右区退场。
+  const tiny = formatStatsLine({ state: s, width: 30 });
+  assert.equal(visibleWidth(tiny), 30);
+  assert.match(tiny, /^↑1\.9M/);
 });
 
 test("model_complete accumulates per-request usage + latestHitRate", async () => {
@@ -163,8 +172,8 @@ test("model_complete accumulates per-request usage + latestHitRate", async () =>
     await h.flush();
     assert.equal(h.store.state.cacheHitRate, 0.995);
     // Cumulative across both requests — not the second request's numbers alone.
-    // 用量簇在左区、ctx 仪表在右区，中间隔着对齐空白。
-    assert.match(h.output(), /↑1\.9M ↓43k R1\.8M CH99\.5% +40\.4%\/255k/);
+    // ctx 仪表贴用量簇（同区，pi footer 同构），单空格分隔。
+    assert.match(h.output(), /↑1\.9M ↓43k R1\.8M CH99\.5% 40\.4%\/255k/);
   } finally {
     await h.stop();
   }
