@@ -72,6 +72,12 @@ export interface ZCodeProtocolAgentDependencies {
    */
   locateSessionOwner?(sessionId: string): ZCodeProtocolDetachedSessionOwner | undefined;
   /**
+   * detached server 里常驻 idle session 的收养窗口（毫秒）：窗口内 entrypoint
+   * reaper 不得回收，逾期才可 shutdown。缺省用 server 的
+   * DETACHED_SESSION_ADOPT_WINDOW_MS；测试注入小值缩短窗口。
+   */
+  detachedAdoptWindowMs?: number;
+  /**
    * 进程级凭据鉴权端口（standalone 账号面自带）。
    * 存在时优先于按 workspace 回环 Host 的默认端口；socket core 没有能应答
    * interactionRequestProviderRuntimeHeaders 的 Host，必须由它签名模型请求。

@@ -5888,6 +5888,94 @@ describe("ZCodeProtocolAgentServer", () => {
       expect(serverA.isReapable()).toBe(true);
     });
 
+    it("keeps an idle detached session claimable inside the adopt window, reaps it after", async () => {
+      // 回归：idle session 若在下一趟 sweep 就可回收，收养窗口实际只剩 ~30s，
+      // detach-再-reattach 的用户路径会冷物化出第二个 runtime。
+      const serverA = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => createFakeApp(options),
+        cwd: workspace.workspacePath,
+        version: "test-version",
+      });
+      setTestNotificationSink(serverA, () => undefined);
+      const created = zcodeSessionStateSnapshotSchema.parse(
+        await requestResult(serverA, {
+          id: 1,
+          method: zcodeProtocolMethods.sessionCreate,
+          params: { workspace },
+        }),
+      );
+      serverA.markClientDetached(new Error("socket closed"));
+      expect(serverA.hasResidentSession(created.session.sessionId)).toBe(true);
+      // 窗口内：record 常驻即不可回收，即便它当前完全 idle。
+      expect(serverA.isReapable()).toBe(false);
+      // 窗口外（默认 10min）：idle 常驻 session 才可随 owner 落地。
+      expect(serverA.isReapable(Date.now() + 11 * 60_000)).toBe(true);
+    });
+
+    it("reaps a detached server that never held a session immediately", async () => {
+      const serverA = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => createFakeApp(options),
+        cwd: workspace.workspacePath,
+        version: "test-version",
+      });
+      serverA.markClientDetached(new Error("socket closed"));
+      expect(serverA.isReapable()).toBe(true);
+    });
+
+    it("reaps a detached server whose sessions were all claimed away immediately", async () => {
+      // 收养迁空后的 owner 是空壳：收养窗口保护的是"还有可收养的 record"，
+      // 空壳没有等待价值，等 10min 只是迟滞僵尸清理。
+      const outgoingA: ZCodeProtocolMessage[] = [];
+      const serverA = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => createFakeApp(options),
+        cwd: workspace.workspacePath,
+        version: "test-version",
+      });
+      setTestNotificationSink(serverA, (message) => outgoingA.push(message));
+      const created = zcodeSessionStateSnapshotSchema.parse(
+        await requestResult(serverA, {
+          id: 1,
+          method: zcodeProtocolMethods.sessionCreate,
+          params: { workspace },
+        }),
+      );
+      serverA.markClientDetached(new Error("socket closed"));
+
+      const serverB = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => createFakeApp(options),
+        cwd: workspace.workspacePath,
+        locateSessionOwner: (sessionId) =>
+          serverA.hasResidentSession(sessionId) ? serverA : undefined,
+        version: "test-version",
+      });
+      setTestNotificationSink(serverB, () => undefined);
+      await requestResult(serverB, {
+        id: 2,
+        method: zcodeProtocolMethods.sessionResume,
+        params: { sessionId: created.session.sessionId },
+      });
+      expect(serverA.hasResidentSession(created.session.sessionId)).toBe(false);
+      expect(serverA.isReapable()).toBe(true);
+    });
+
+    it("honours an injected detachedAdoptWindowMs", async () => {
+      const serverA = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => createFakeApp(options),
+        cwd: workspace.workspacePath,
+        detachedAdoptWindowMs: 5_000,
+        version: "test-version",
+      });
+      setTestNotificationSink(serverA, () => undefined);
+      await requestResult(serverA, {
+        id: 1,
+        method: zcodeProtocolMethods.sessionCreate,
+        params: { workspace },
+      });
+      serverA.markClientDetached(new Error("socket closed"));
+      expect(serverA.isReapable(Date.now() + 4_999)).toBe(false);
+      expect(serverA.isReapable(Date.now() + 5_000)).toBe(true);
+    });
+
     it("redirects late owner-side requests for an adopted session to the new owner", async () => {
       // 旧 app 的 broker 闭包仍持有旧 context.requestClient；收养后迟到的
       // 反向请求必须沿 sessionOwnerRedirects 落到收养方 sink，而不是 park 在孤儿上。

@@ -320,10 +320,21 @@ owner，命中则原子转出（`claimSessionRecord`：摘出 sessions 表 → �
 失败，不会永久挂住一个 turn。sink 恢复（`setNotificationSink`）时 park 的
 请求自动续投并撤除计时器。
 
-**回收**：entrypoint 每 30s 扫 detached 池，只有同时满足 detached、无
-pending/parked 反向请求、且无 session busy 事实（前台执行 / background
-task / finalization / model-only turn，与 resident pool 同一判据）的
-server 才 shutdown（`isReapable`）；挂着实例的孤儿等收养或超时自行落地。
+**收养窗口与回收**：detached session 的收养窗口是
+`detachedAdoptWindowMs`（默认 `DETACHED_SESSION_ADOPT_WINDOW_MS` = 10min，
+与孤儿请求同一本账期）——窗口内常驻 idle session 不可回收
+（`isReapable` 还要求：detached、无 pending/parked 反向请求、无 session
+busy 事实——前台执行 / background task / finalization / model-only turn，
+与 resident pool 同一判据）；窗口外 idle session 才可随 owner shutdown。
+空壳（从未建 session 或 sessions 已被收养迁空）不受窗口保护，下一趟
+30s sweep 即落地。busy session 永远不可 reap，turn 跑完前 owner 存活。
+
+**core 排空退出**：同一趟 30s sweep 在回收后检查 `attachedConnections`
+与 `detachedConnections` 全空（且没有 accepted-未登记的建链在途）→
+`lifecycle.requestShutdown()` 走正常关闭路径，core 进程退出——否则
+socket core 只剩空壳监听却常驻成僵尸（每 workspace 一个）。下一个
+attach 客户端 `ensureServer` 探测到死 socket 后走原子 reclaim 重拉新
+core，用户无感。detached session 仍在收养窗口内时池非空，core 照常活。
 
 **退出 UX（busy 三选一）**：turn 在跑（含等交互）时，退出必须显式选边——
 

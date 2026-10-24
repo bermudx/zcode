@@ -160,6 +160,14 @@ const MAX_CLIENT_REQUEST_REANNOUNCE_INTERVAL_MS = 10_000;
  * 客户端重连收养（session/resume → claimDetachedSession）会撤掉该计时器。
  */
 const DETACHED_CLIENT_REQUEST_TIMEOUT_MS = 10 * 60_000;
+/**
+ * detached session 的收养窗口：与 pending 反向请求同一本 10min 孤儿账期。
+ * 窗口内 entrypoint reaper 看到 idle session 也不得回收（等 session/resume
+ * 收养）；逾期 idle session 才可随 server shutdown 落地——busy session 不受
+ * 窗口限制，永远不可 reap。窗口从 markClientDetached 起算而非最后 busy，
+ * 让"回来接班"的时限可预期、孤儿 server 的生命有上界。
+ */
+const DETACHED_SESSION_ADOPT_WINDOW_MS = 10 * 60_000;
 
 type ZCodeProtocolOutboundMessage = ZCodeProtocolNotification | ZCodeProtocolRequest;
 
@@ -283,6 +291,9 @@ export class ZCodeProtocolAgentServer {
    * 的兼容 fallback，让 request-scoped 物化在销毁中的 server 上继续。
    */
   private clientDisconnectError: Error | undefined;
+  /** markClientDetached 时间戳：idle session 收养窗口的起点。 */
+  private clientDetachedAt: number | undefined;
+  private readonly detachedAdoptWindowMs: number;
   private readonly context: ZCodeProtocolAgentServerContext;
   private readonly logger;
   private readonly pendingClientRequests = new Map<
@@ -309,6 +320,8 @@ export class ZCodeProtocolAgentServer {
   private nextClientRequestId = 1;
 
   constructor(deps: ZCodeProtocolAgentDependencies) {
+    this.detachedAdoptWindowMs =
+      deps.detachedAdoptWindowMs ?? DETACHED_SESSION_ADOPT_WINDOW_MS;
     this.runtimeResources = new ProtocolRuntimeResources(deps.createZCodeApp);
     const resolvedDeps = {
       ...deps,
@@ -437,6 +450,7 @@ export class ZCodeProtocolAgentServer {
   markClientDetached(error: Error): void {
     this.networkCapture.setCaptureId(null);
     this.clientDetached = true;
+    this.clientDetachedAt = Date.now();
     this.messageSink = undefined;
     for (const controller of this.workspaceGenerateTextControllers.values()) {
       controller.abort(error);
@@ -1366,13 +1380,17 @@ export class ZCodeProtocolAgentServer {
     return true;
   }
 
-  /** entrypoint reaper 的判据：detached 且无活 turn、无在途反向请求才可 shutdown。 */
-  isReapable(): boolean {
-    if (!this.clientDetached) return false;
+  /**
+   * entrypoint reaper 的判据：detached、无活 turn、无在途反向请求，且
+   * （无常驻 session，或常驻 idle session 已超出收养窗口）才可 shutdown。
+   */
+  isReapable(now: number = Date.now()): boolean {
+    if (!this.isDetached()) return false;
     if (this.pendingClientRequests.size > 0 || this.parkedClientRequests.size > 0) {
       return false;
     }
-    for (const record of this.context.sessions.values()) {
+    const records = [...this.context.sessions.values()];
+    for (const record of records) {
       // busy 事实与 session-residency 同源：activeAbortController 只覆盖协议层
       // 前台执行，registry background task、finalization、model-only turn 都
       // 不挂在它上面（docs/session-idle-deactivation.md 同一条教训）——只查
@@ -1384,7 +1402,10 @@ export class ZCodeProtocolAgentServer {
       if (record.app.runtime.getActiveForegroundExecutionId() !== undefined) return false;
       if (record.app.runtime.hasResidencyBlockingWork()) return false;
     }
-    return true;
+    // 空壳（从未建 session，或 sessions 已全部被收养迁走）立即可回收；
+    // 常驻 idle session 先给满收养窗口，逾期才落地。
+    if (records.length === 0) return true;
+    return now - (this.clientDetachedAt ?? now) >= this.detachedAdoptWindowMs;
   }
 
   /** entrypoint locateSessionOwner 的归属判定：record 是否常驻在本 server。 */

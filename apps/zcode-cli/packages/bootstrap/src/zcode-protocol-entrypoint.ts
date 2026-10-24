@@ -389,12 +389,29 @@ export async function runZCodeProtocolAgent(
       return undefined;
     };
 
-    /** 全空闲孤儿 server 的兜底回收；reaper 判定（无活 turn/无 pending）在 server.isReapable。 */
+    /**
+     * 建链在途计数：socket accepted 但尚未进 attachedConnections 的连接。
+     * 排空退出判定必须把它算上，否则握手途中被 empty-exit 连监听一起拆掉。
+     */
+    let attachInFlight = 0;
+    /**
+     * 连接全排空时 core 只剩空壳监听——旧实现没有这条退出路径，socket core
+     * 从此常驻成僵尸（每 workspace 一个，实测堆出 ~2GB RSS）。走 lifecycle
+     * 正常关闭；下一个客户端由 ensureServer 探测死 socket → 原子 reclaim 重拉。
+     */
+    const exitWhenDrained = (): void => {
+      if (attachInFlight > 0) return;
+      if (attachedConnections.size > 0 || detachedConnections.size > 0) return;
+      if (options.lifecycle) options.lifecycle.requestShutdown();
+      else void socketListener?.close().catch(() => undefined);
+    };
+    /** 全空闲孤儿 server 的兜底回收；reaper 判定（无活 turn/无 pending/收养窗口）在 server.isReapable。 */
     const reapDetachedConnections = (): void => {
       for (const entry of detachedConnections) {
         if (!entry.server.isReapable()) continue;
         void detachConnection(entry, { orphan: false }).catch(() => undefined);
       }
+      exitWhenDrained();
     };
 
     // 每接入一条传输连接就建一套独立的协议会话 owner（server+connection），
@@ -561,20 +578,25 @@ export async function runZCodeProtocolAgent(
     if (socketPath) {
       const attachSocket = (socket: Socket): void => {
         if (socket.destroyed || socket.closed) return;
-        void attachConnection(socket, socket).then(
-          (entry) => {
-            // 建链期间客户端已断开：transport 不会重播已发射的 close，直接走 teardown。
-            if (socket.destroyed || socket.closed) void detachConnection(entry);
-          },
-          (error) => {
-            logger.warn("ZCode Protocol socket client attach failed", {
-              errorType: error instanceof Error ? error.name : typeof error,
-              event: "zcode_protocol.socket.client_attach.failed",
-              module: "bootstrap.zcode_protocol",
-            });
-            socket.destroy();
-          },
-        );
+        attachInFlight += 1;
+        void attachConnection(socket, socket)
+          .then(
+            (entry) => {
+              // 建链期间客户端已断开：transport 不会重播已发射的 close，直接走 teardown。
+              if (socket.destroyed || socket.closed) void detachConnection(entry);
+            },
+            (error) => {
+              logger.warn("ZCode Protocol socket client attach failed", {
+                errorType: error instanceof Error ? error.name : typeof error,
+                event: "zcode_protocol.socket.client_attach.failed",
+                module: "bootstrap.zcode_protocol",
+              });
+              socket.destroy();
+            },
+          )
+          .finally(() => {
+            attachInFlight -= 1;
+          });
       };
       socketListener = await acquireProtocolStartupResource({
         signal: options.lifecycle?.signal,
