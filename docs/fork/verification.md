@@ -264,6 +264,43 @@ stated:
     `/proc/<pid>/cwd` + socket `.sock.info` `workspaceIdentity` matching
     only scratch paths. Operator's live cores/clients untouched.
 
+## 2026-10-24 — promotion of the 9b46915f pair (resume prefix expansion + surfaced resume failures)
+
+Fix for `piz --resume sess_99f180d5 restores an empty screen` (three core
+`session.resume_persisted_missing` warnings 10-24 14:47/15:28, all against
+the pre-fix promoted pair). The fix commit landed 16:18 but had NOT been
+promoted — `dist-runtime` was still the 15:36 c6130f43 build; installed
+`resolveAttachResumeTarget` was the raw-passthrough version. Full battery
+re-run in the main checkout before promote, all green unless stated:
+
+- Root typecheck; CLI workspace typecheck (34/34); root lint 0 errors /
+  96 warnings (upstream noise); CLI lint via a faithful `npm_execpath`
+  JS shim driving `run-cli-lint.mjs` (mise's pnpm is an ELF binary the
+  wrapper cannot `node`-spawn): **0 errors / 71 warnings / 13 accepted**,
+  exact baseline match; `architecture:check --changed` 0 violations.
+- CLI suite (package script + explicit attach-resume-target,
+  attach-resume-fallback, attach-model-option): 619 total, 616 pass,
+  3 fail = exactly the known pre-existing set (build.test.mjs clientOnly
+  deep-equal + 2 SEA asset tests). Total grew from the documented 610
+  because 9b46915f itself added tests (11-case rewrite + 4 new).
+- tui-pi 165/165; adapters client-request-signing 9/9; bootstrap
+  socket-listener 4/4; shared attach contract (root vitest) 4/4.
+- Fresh dist pair (25/25) + `build:attach`; bundle grep confirmed the fix
+  strings (`is ambiguous: matches`, `Use a longer prefix or the full id`)
+  in `dist/zcode-attach.cjs` before promote.
+- `promote-piz.sh` atomic swap to dist-runtime (17:47).
+- Installed-pair smoke (real `piz` wrapper, util-linux `script` pty):
+  - isolated `ZCODE_DATA_BASE_DIR` scratch ws: `piz --resume sess_bogus123`
+    exits 1 with `Error: Session not found: sess_bogus123`, no TUI, and no
+    session store ever created in the isolated dir (no silent create).
+    Scratch core killed by its own-data-dir pid file after `/proc/<pid>/cwd`
+    check; operator's live cores/clients untouched.
+  - real store, `~/Documents/NewsWiki`: `piz --resume sess_99f180d5`
+    (the user's exact 8-char prefix) renders the restored transcript
+    (user prompt + assistant reply visible, marker ×4), banner + footer
+    correct, clean exit 0 on double Ctrl-C, and zero new session rows in
+    the operator's store (newest NewsWiki session still 2026-10-14).
+
 Still NOT done: the full acceptance gate above (model turn, signing against
 the real provider request, allowance evidence, Ctrl-C signal path, memory
 matrix) remains open and unchanged.
