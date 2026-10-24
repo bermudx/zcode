@@ -3,11 +3,20 @@
 // 的 slash 路由（client 侧），业务事实全部在 core。
 import type { SessionEvent } from "@zcode/contracts";
 import {
+  zcodePermissionRequestParamsSchema,
   zcodeProtocolErrorCodes,
   zcodeProtocolMethods,
   zcodeProtocolNotifications,
+  zcodeUserInputRequestParamsSchema,
   type ZCodeSessionRawEvent,
 } from "@zcode/shared";
+import type { PermissionBrokerResult } from "@zcode/contracts";
+import {
+  brokerResultToPermissionResponse,
+  brokerResultToUserInputResponse,
+  permissionParamsToBrokerRequest,
+  userInputParamsToBrokerRequest,
+} from "./attach-interactions.js";
 import type {
   TuiPromptInput,
   TuiSubmitPromptResult,
@@ -22,6 +31,15 @@ const RECONNECT_BACKOFF_START_MS = 1000;
 const RECONNECT_BACKOFF_MAX_MS = 30_000;
 const CONNECTION_LOST_TYPE = "session_notice";
 const METHOD_NOT_FOUND = -32601;
+const INVALID_PARAMS = -32602;
+const NO_INTERACTION_HANDLER_PERMISSION_RESPONSE = {
+  decision: "deny",
+  reason: "no interactive permission handler",
+} as const;
+const NO_INTERACTION_HANDLER_USER_INPUT_RESPONSE = {
+  action: "decline",
+  reason: "no interactive user-input handler",
+} as const;
 
 export type AttachRuntimeLogger = {
   warn?: (message: string, context?: Record<string, unknown>) => void;
@@ -137,20 +155,70 @@ export class AttachRuntime {
     if (method === zcodeProtocolMethods.sessionRequestRuntimePreferences) {
       return { nativeSearchEnhancementsEnabled: false, ...this.options.runtimePreferences };
     }
-    if (method === "interaction/requestPermission") {
-      const sessionId = (params as { sessionId?: string })?.sessionId;
-      const handle = sessionId
-        ? this.sessions.get(String(sessionId))
-        : this.current;
-      const callback = handle?.activeRequestPermission;
-      if (!callback) {
-        return { decision: "deny", reason: "no interactive permission handler" };
-      }
-      return await callback(params);
+    if (method === zcodeProtocolMethods.interactionRequestPermission) {
+      return await this.routePermissionInteraction(params);
+    }
+    if (method === zcodeProtocolMethods.interactionRequestUserInput) {
+      return await this.routeUserInputInteraction(params);
     }
     const error = new Error(`method not found: ${method}`) as Error & { code: number };
     error.code = METHOD_NOT_FOUND;
     throw error;
+  }
+
+  /** 普通审批：线上 params → PermissionBrokerRequest → TUI requester → option.response 原文。 */
+  private async routePermissionInteraction(params: unknown): Promise<unknown> {
+    const parsed = zcodePermissionRequestParamsSchema.safeParse(params);
+    if (!parsed.success) {
+      throw new AttachProtocolError(
+        INVALID_PARAMS,
+        "Invalid permission request params",
+        parsed.error.flatten(),
+      );
+    }
+    const handle = this.sessions.get(parsed.data.sessionId);
+    const callback = handle?.activeRequestPermission;
+    if (!handle || !callback) {
+      return NO_INTERACTION_HANDLER_PERMISSION_RESPONSE;
+    }
+    const request = permissionParamsToBrokerRequest(
+      parsed.data,
+      handle.getMode() ?? "build",
+    );
+    return await handle.serveInteraction(parsed.data.requestId, async (signal) =>
+      brokerResultToPermissionResponse(
+        (await callback(request, { signal })) as PermissionBrokerResult,
+        parsed.data.options,
+      ),
+    );
+  }
+
+  /** AskUserQuestion/ExitPlanMode：elicitation 走 requestUserInput，不是 requestPermission。
+   *  翻译失败（无可渲染 kind）或无 handler 一律如实 decline，不伪装成 deny。 */
+  private async routeUserInputInteraction(params: unknown): Promise<unknown> {
+    const parsed = zcodeUserInputRequestParamsSchema.safeParse(params);
+    if (!parsed.success) {
+      throw new AttachProtocolError(
+        INVALID_PARAMS,
+        "Invalid user input request params",
+        parsed.error.flatten(),
+      );
+    }
+    const handle = this.sessions.get(parsed.data.sessionId);
+    const callback = handle?.activeRequestPermission;
+    const translated = userInputParamsToBrokerRequest(
+      parsed.data,
+      handle?.getMode() ?? "build",
+    );
+    if (!handle || !callback || !translated) {
+      return NO_INTERACTION_HANDLER_USER_INPUT_RESPONSE;
+    }
+    return await handle.serveInteraction(parsed.data.requestId, async (signal) =>
+      brokerResultToUserInputResponse(
+        (await callback(translated.request, { signal })) as PermissionBrokerResult,
+        translated,
+      ),
+    );
   }
 
   private onDisconnected(): void {

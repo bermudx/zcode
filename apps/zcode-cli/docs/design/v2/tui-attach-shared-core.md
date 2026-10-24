@@ -293,3 +293,43 @@ Ctrl-C 有两条投递路径，二者必须共享同一条 guard（`PiTuiApp.han
 多路复用器环境下就会"首按即死"，与字节路径的"再按一次退出"不一致。
 因此 `run-tui` 装 SIGINT handler 转发到同一 intent；退出时摘掉 handler
 （signal handler 是 ref 句柄，不摘会让进程在 TUI 退出后挂着不退）。
+
+### 审批与提问反向请求（interaction/*）
+
+in-process 模式下 core 的 permission broker 直接调用 TUI requester；attach
+模式下 broker 在服务端，反向请求经 socket 到达客户端
+（`interaction/requestPermission` 与 `interaction/requestUserInput`）。
+attach 客户端必须实现这条回路，否则审批/提问工具整体不可用（2026-10-23
+实测：AskUserQuestion 在 attach 下报 "Permission request failed"，且
+PermissionBrokerResult 原样回传被服务端 strict schema 拒绝）。
+
+分层：`attach-interactions.ts` 是纯翻译层（线上 params ↔
+PermissionBrokerRequest/Result），`PendingInteractions` 持有同业务
+requestId 的去重与 abort 生命周期，`AttachRuntime.routeReverseRequest`
+做 zod 校验与路由，`AttachSessionHandle.serveInteraction` 只把当前回合
+abortSignal 传下去。
+
+- **requestPermission → 审批面板**：wire `options[]` 每项自带权威
+  `response` 原文；应答回 option.response，不从 broker 结果重新组装
+  （allow_project 项内含服务端算好的 permissionUpdates，客户端重猜会
+  失真；`resolvedAt` 等内部字段原样回传会被 strict schema 拒掉）。
+  options 全落 allow_once/deny 时还原 `approvalMode:"user-once"`。
+- **requestUserInput → 两条渲染路径**：`toolName=AskUserQuestion` 走
+  question wizard（TUI requester 用 AskUserQuestionInputSchema 校验
+  input）；ExitPlanMode/`interaction:"plan_approval"` 只有一个
+  "Approve" 选项、不满足 min(2)，走普通审批面板（allow=approve）。
+  wizard 的 modify 结果只回 `content.answers/annotations`——服务端
+  normalize 只取这两键，多带不会泄漏但也不该带。MCP elicitation 等
+  未知 kind 如实 decline，不冒充用户输入。
+- **去重**：服务端恢复链路在等待应答期间按同一业务 requestId 周期
+  reannounce；`PendingInteractions.serve` 复用首个 promise，重发不
+  重开面板。首个应答送达后短留 2s grace，迟到的重发拿同一份应答。
+- **撤下**：`permission_resolved`（服务端先 settle：自动应答/另一
+  客户端/v4 竞速）、turn end、本地回合 abortSignal 三路都触发
+  controller.abort()，TUI requester 据此出队面板。serve 内部把
+  invoke 与 abort 做 race——即使请求方注册监听晚于 abort 或根本不
+  理会 signal，服务端也总能拿到 error 应答，不会挂到超时。
+- **无 handler**：当前无在途回合（无 requester）时回显式
+  deny/decline，绝不伪造用户批准。
+- 渲染后即可被 herdr 的 piz manifest 识别为 blocked/needs-attention，
+  无需 herdr 侧改动。

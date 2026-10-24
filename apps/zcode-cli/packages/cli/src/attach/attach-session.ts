@@ -23,6 +23,7 @@ import type {
 import type { CollaborationMode, TurnId } from "@zcode/contracts";
 import type { AttachClient } from "./attach-client.js";
 import { toProtocolAttachments } from "./attach-attachments.js";
+import { PendingInteractions } from "./attach-interactions.js";
 import { mergeCatalog, modelOptionKey, thoughtLevelKey } from "./attach-catalog.js";
 import type { CommandCenterApp } from "../command-center.js";
 import { resolveTuiModelSelection } from "../command-center/handlers/model.js";
@@ -158,6 +159,10 @@ export class AttachSessionHandle {
   activeRequestPermission:
     | ((request: unknown, options?: unknown) => Promise<unknown>)
     | undefined;
+  /** 当前回合的 abortSignal：Ctrl-C/本地 abort 要同步撤下等待中的审批面板。 */
+  private activeTurnAbortSignal: AbortSignal | undefined;
+  /** 按业务 requestId 去重的在途交互（permission/userInput 反向请求）。 */
+  private readonly interactions = new PendingInteractions();
 
   constructor(input: {
     client: AttachClient | (() => AttachClient);
@@ -214,6 +219,13 @@ export class AttachSessionHandle {
 
   private routeTurnEvent(event: SessionEvent): void {
     const payload = (event.payload ?? {}) as Record<string, unknown>;
+    // 服务端先 settle（自动应答、v4 竞速、turn abort）时 emitPermissionResolved
+    // 仍带原 requestId——据此撤下本端还在等待的面板，避免残留僵尸审批。
+    if (event.type === SessionEventType.PermissionResolved) {
+      const requestId =
+        typeof payload.requestId === "string" ? payload.requestId : undefined;
+      if (requestId) this.interactions.drop(requestId);
+    }
     if (event.type === TURN_STARTED) {
       this.lastActiveTurnId = String(event.turnId);
       const inputId = typeof payload.inputId === "string" ? payload.inputId : undefined;
@@ -225,6 +237,8 @@ export class AttachSessionHandle {
       return;
     }
     if (!TURN_END_TYPES.has(event.type)) return;
+    // 回合结束时 broker 请求必然已 settle/cancel；仍挂着的交互都是孤儿。
+    this.interactions.drop();
     const pending =
       (event.turnId ? this.pendingByTurnId.get(String(event.turnId)) : undefined) ??
       this.findPendingByInputId(payload.inputId) ??
@@ -242,6 +256,18 @@ export class AttachSessionHandle {
     }
     pending.resolve(this.buildTurnResult(event, pending));
     this.scheduleQueuedFlush();
+  }
+
+  /**
+   * interaction/* 反向请求的执行口：去重/abort/grace 语义集中在
+   * PendingInteractions（attach-interactions.ts）；这里只把当前回合的
+   * abortSignal 传下去，使本地 Ctrl-C 一并撤下面板。
+   */
+  serveInteraction(
+    requestId: string,
+    invoke: (signal: AbortSignal) => Promise<unknown>,
+  ): Promise<unknown> {
+    return this.interactions.serve(requestId, invoke, this.activeTurnAbortSignal);
   }
 
   /** 本地合成的投影事件（queued/drained/notice）：只走 sinks，不进 routeTurnEvent。 */
@@ -309,6 +335,7 @@ export class AttachSessionHandle {
         requestOptions?: unknown,
       ) => Promise<unknown>;
     }
+    this.activeTurnAbortSignal = options?.abortSignal;
     const turnPromise = new Promise<TuiSubmitPromptResult>((resolve, reject) => {
       this.pendingTurns.set(inputId, { inputId, resolve, reject });
       options?.abortSignal?.addEventListener(
@@ -334,12 +361,14 @@ export class AttachSessionHandle {
     } catch (error) {
       this.pendingTurns.delete(inputId);
       this.activeRequestPermission = undefined;
+      this.activeTurnAbortSignal = undefined;
       throw error;
     }
     try {
       return await turnPromise;
     } finally {
       this.activeRequestPermission = undefined;
+      this.activeTurnAbortSignal = undefined;
     }
   }
 

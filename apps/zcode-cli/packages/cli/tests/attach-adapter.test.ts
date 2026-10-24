@@ -92,11 +92,15 @@ function rawEvent(params: {
 }
 
 type Captured = { method: string; params: Record<string, unknown> };
+type CapturedResponse = { error?: unknown; id: string; result?: unknown };
 
 type FakeCore = {
   requests: Captured[];
+  /** 客户端对 server 反向请求（interaction/*）的应答行。 */
+  responses: CapturedResponse[];
   socketPath: string;
   notify: (params: unknown) => void;
+  sendRequest: (id: string, method: string, params: unknown) => void;
   kill: () => Promise<void>;
   close: () => Promise<void>;
 };
@@ -107,10 +111,16 @@ async function startFakeCore(
   responder: (request: Captured, notify: (params: unknown) => void) => unknown,
 ): Promise<FakeCore> {
   const requests: Captured[] = [];
+  const responses: CapturedResponse[] = [];
   const sockets = new Set<Socket>();
   const notify = (params: unknown): void => {
     for (const socket of sockets) {
       socket.write(`${JSON.stringify({ method: "session/rawEvent", params })}\n`);
+    }
+  };
+  const sendRequest = (id: string, method: string, params: unknown): void => {
+    for (const socket of sockets) {
+      socket.write(`${JSON.stringify({ id, method, params })}\n`);
     }
   };
   const server: Server = createServer((socket) => {
@@ -126,10 +136,21 @@ async function startFakeCore(
         buffer = buffer.slice(index + 1);
         if (line.trim().length === 0) continue;
         const message = JSON.parse(line) as {
+          error?: unknown;
           id?: string;
           method?: string;
           params?: Record<string, unknown>;
+          result?: unknown;
         };
+        // 客户端对反向请求的应答行（id + result/error，无 method）。
+        if (message.method === undefined && message.id !== undefined) {
+          responses.push({
+            error: message.error,
+            id: String(message.id),
+            result: message.result,
+          });
+          continue;
+        }
         if (!message.method || message.id === undefined) continue;
         const request: Captured = {
           method: message.method,
@@ -167,6 +188,8 @@ async function startFakeCore(
     },
     notify,
     requests,
+    responses,
+    sendRequest,
     socketPath,
   };
 }
@@ -785,6 +808,422 @@ test("prompt 附件按 session/send 的协议形状下发（kind/localPath, kind
         mimeType: "image/png",
       },
     ]);
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// ---- interaction/* 反向请求（2026-10-23 实测 bug：attach 下 AskUserQuestion 不可用）----
+// 修复前两处断点：interaction/requestUserInput 落 method not found；
+// interaction/requestPermission 把 PermissionBrokerResult（含 resolvedAt）原样回传，
+// 被服务端 strict schema 拒绝——工具侧只见 "Permission request failed"。
+
+const INTERACTION_WAIT_MS = 2_000;
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + INTERACTION_WAIT_MS;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("waitFor timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+const PERMISSION_OPTIONS = [
+  {
+    kind: "allow_once",
+    name: "Allow once",
+    optionId: "allow_once",
+    response: { decision: "allow", reason: "Approved once" },
+  },
+  {
+    kind: "allow_always",
+    name: "Always allow in this project",
+    optionId: "allow_project",
+    response: {
+      decision: "allow",
+      permissionUpdates: [
+        { behavior: "allow", rules: [{ toolName: "Bash" }], type: "addRules" },
+      ],
+      reason: "Approved for this project",
+    },
+  },
+  {
+    kind: "deny",
+    name: "Deny",
+    optionId: "deny",
+    response: { decision: "deny", reason: "The user doesn't want to proceed." },
+  },
+];
+
+function interactionCoreResponder(request: Captured): unknown {
+  if (request.method === "session/subscribe") {
+    return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+  }
+  if (request.method === "session/send") {
+    return { accepted: true, sessionId: SID, stateRevision: 1 };
+  }
+  return {};
+}
+
+async function startInteractionFixture(dir: string): Promise<{
+  core: FakeCore;
+  handle: AttachSessionHandle;
+  runtime: AttachRuntime;
+}> {
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, interactionCoreResponder);
+  const runtime = new AttachRuntime({ socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  return { core, handle, runtime };
+}
+
+function finishTurn(core: FakeCore, inputId?: string): void {
+  core.notify(
+    rawEvent({
+      payload: { inputId, response: "done", resultType: "completed" },
+      seq: 9,
+      turnId: "turn-1",
+      type: "turn_complete",
+    }),
+  );
+}
+
+test("requestUserInput(AskUserQuestion) → wizard 请求 → accept + answers/annotations", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-interaction-"));
+  const { core, handle, runtime } = await startInteractionFixture(dir);
+  const captured: { options?: unknown; request?: unknown } = {};
+  try {
+    const turn = handle.submitPrompt("hi", {
+      requestPermission: async (request, options) => {
+        captured.request = request;
+        captured.options = options;
+        return {
+          decision: "modify",
+          modifiedInput: {
+            annotations: { "Pick one?": { preview: "pv" } },
+            answers: { "Pick one?": "A" },
+            questions: [],
+          },
+          reason: "Answered in TUI",
+          resolvedAt: new Date(),
+        };
+      },
+    });
+    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    core.sendRequest("srv-1", "interaction/requestUserInput", {
+      input: {
+        questions: [
+          {
+            header: "h",
+            options: [
+              { description: "d", label: "A" },
+              { description: "d", label: "B" },
+            ],
+            question: "Pick one?",
+          },
+        ],
+      },
+      prompt: "need clarification",
+      questions: [
+        {
+          header: "h",
+          options: [
+            { label: "A", value: "A" },
+            { label: "B", value: "B" },
+          ],
+          question: "Pick one?",
+        },
+      ],
+      requestId: "req-q1",
+      schema: { toolName: "AskUserQuestion" },
+      sessionId: SID,
+      toolCallId: "tc-1",
+      toolName: "AskUserQuestion",
+    });
+    await waitFor(() => core.responses.some((r) => r.id === "srv-1"));
+    const request = captured.request as {
+      input: { questions: Array<{ question: string }> };
+      toolName: string;
+    };
+    // requester 拿到的是 PermissionBrokerRequest 形态：toolName=AskUserQuestion 且
+    // input 原样——真实 TUI requester 据此建 questionState 渲染 wizard。
+    assert.equal(request.toolName, "AskUserQuestion");
+    assert.equal(request.input.questions[0]?.question, "Pick one?");
+    assert.ok(
+      (captured.options as { signal?: AbortSignal })?.signal instanceof AbortSignal,
+    );
+    const response = core.responses.find((r) => r.id === "srv-1");
+    assert.deepEqual(response?.result, {
+      action: "accept",
+      content: {
+        annotations: { "Pick one?": { preview: "pv" } },
+        answers: { "Pick one?": "A" },
+      },
+    });
+    finishTurn(core);
+    await turn;
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("requestUserInput 同 requestId 重发 → callback 只调一次，迟到的重发回同一份应答", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-interaction-"));
+  const { core, handle, runtime } = await startInteractionFixture(dir);
+  let calls = 0;
+  let release: (() => void) | undefined;
+  try {
+    const turn = handle.submitPrompt("hi", {
+      requestPermission: async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { decision: "deny", reason: "Denied in TUI", resolvedAt: new Date() };
+      },
+    });
+    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    const params = {
+      requestId: "req-dup",
+      schema: { interaction: "plan_approval", toolName: "ExitPlanMode" },
+      sessionId: SID,
+      toolName: "ExitPlanMode",
+    };
+    core.sendRequest("srv-1", "interaction/requestUserInput", params);
+    await waitFor(() => calls === 1);
+    // reannounce：同一业务 requestId、不同 wire id。
+    core.sendRequest("srv-2", "interaction/requestUserInput", params);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(calls, 1, "duplicate requestId must not invoke the requester twice");
+    release?.();
+    await waitFor(() => core.responses.some((r) => r.id === "srv-2"));
+    const first = core.responses.find((r) => r.id === "srv-1");
+    const second = core.responses.find((r) => r.id === "srv-2");
+    assert.deepEqual(first?.result, { action: "decline", reason: "Denied in TUI" });
+    assert.deepEqual(second?.result, { action: "decline", reason: "Denied in TUI" });
+    finishTurn(core);
+    await turn;
+  } finally {
+    release?.();
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("requestUserInput(ExitPlanMode) → 普通审批 allow → accept approve", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-interaction-"));
+  const { core, handle, runtime } = await startInteractionFixture(dir);
+  const captured: { request?: unknown } = {};
+  try {
+    const turn = handle.submitPrompt("hi", {
+      requestPermission: async (request) => {
+        captured.request = request;
+        return { decision: "allow", reason: "Approved in TUI", resolvedAt: new Date() };
+      },
+    });
+    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    core.sendRequest("srv-1", "interaction/requestUserInput", {
+      input: { plan: "do x" },
+      prompt: "Review this implementation plan.",
+      requestId: "req-p1",
+      schema: { interaction: "plan_approval", toolName: "ExitPlanMode" },
+      sessionId: SID,
+      toolName: "ExitPlanMode",
+    });
+    await waitFor(() => core.responses.some((r) => r.id === "srv-1"));
+    const request = captured.request as { approvalMode?: string; toolName: string };
+    assert.equal(request.toolName, "ExitPlanMode");
+    assert.equal(request.approvalMode, "user-once");
+    const response = core.responses.find((r) => r.id === "srv-1");
+    assert.deepEqual(response?.result, {
+      action: "accept",
+      content: { answer: "approve" },
+    });
+    finishTurn(core);
+    await turn;
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("requestPermission → 回 option.response 原文（无 resolvedAt）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-interaction-"));
+  const { core, handle, runtime } = await startInteractionFixture(dir);
+  const captured: { request?: unknown } = {};
+  try {
+    const turn = handle.submitPrompt("hi", {
+      requestPermission: async (request) => {
+        captured.request = request;
+        return { decision: "deny", reason: "Denied in TUI", resolvedAt: new Date() };
+      },
+    });
+    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    core.sendRequest("srv-1", "interaction/requestPermission", {
+      input: { command: "rm x" },
+      options: PERMISSION_OPTIONS,
+      reason: "Bash requires approval",
+      requestId: "req-1",
+      riskLevel: "high",
+      sessionId: SID,
+      toolCallId: "tc-1",
+      toolName: "Bash",
+    });
+    await waitFor(() => core.responses.some((r) => r.id === "srv-1"));
+    const request = captured.request as { toolName: string; approvalMode?: string };
+    assert.equal(request.toolName, "Bash");
+    assert.equal(request.approvalMode, undefined);
+    const response = core.responses.find((r) => r.id === "srv-1");
+    // deny option 的 response 原文（服务端 reason），不是 TUI 的 "Denied in TUI"。
+    assert.deepEqual(response?.result, PERMISSION_OPTIONS[2]!.response);
+    finishTurn(core);
+    await turn;
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("requestPermission user-once 选项 → approvalMode 还原为 user-once", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-interaction-"));
+  const { core, handle, runtime } = await startInteractionFixture(dir);
+  const captured: { request?: unknown } = {};
+  try {
+    const turn = handle.submitPrompt("hi", {
+      requestPermission: async (request) => {
+        captured.request = request;
+        return { decision: "allow", resolvedAt: new Date() };
+      },
+    });
+    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    core.sendRequest("srv-1", "interaction/requestPermission", {
+      input: {},
+      options: [PERMISSION_OPTIONS[0], PERMISSION_OPTIONS[2]],
+      reason: "approval",
+      requestId: "req-uo",
+      riskLevel: "medium",
+      sessionId: SID,
+      toolCallId: "tc-1",
+      toolName: "WebFetch",
+    });
+    await waitFor(() => core.responses.some((r) => r.id === "srv-1"));
+    const request = captured.request as { approvalMode?: string };
+    assert.equal(request.approvalMode, "user-once");
+    const response = core.responses.find((r) => r.id === "srv-1");
+    assert.deepEqual(response?.result, PERMISSION_OPTIONS[0]!.response);
+    finishTurn(core);
+    await turn;
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("permission_resolved 事件撤下悬空交互 → 请求侧收到 error 应答", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-interaction-"));
+  const { core, handle, runtime } = await startInteractionFixture(dir);
+  let aborted = false;
+  try {
+    const turn = handle.submitPrompt("hi", {
+      requestPermission: async (_request, options) => {
+        const signal = (options as { signal?: AbortSignal })?.signal;
+        return await new Promise((resolve, reject) => {
+          // 与真实 createTuiPermissionRequester 一致：signal 已 aborted 时立即
+          // 拒绝（resolved 事件可能与请求同帧到达，早于 invoke 执行）。
+          if (signal?.aborted) {
+            aborted = true;
+            reject(new Error("Permission request cancelled"));
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              reject(new Error("Permission request cancelled"));
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    core.sendRequest("srv-1", "interaction/requestPermission", {
+      input: {},
+      options: PERMISSION_OPTIONS,
+      reason: "approval",
+      requestId: "req-stale",
+      riskLevel: "low",
+      sessionId: SID,
+      toolCallId: "tc-1",
+      toolName: "Bash",
+    });
+    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    // 服务端先行 settle（自动应答/abort）→ resolved 事件必须撤下本端面板。
+    core.notify(
+      rawEvent({
+        payload: { decision: "deny", requestId: "req-stale" },
+        seq: 5,
+        type: "permission_resolved",
+      }),
+    );
+    await waitFor(() => aborted);
+    await waitFor(() => core.responses.some((r) => r.id === "srv-1"));
+    const response = core.responses.find((r) => r.id === "srv-1");
+    assert.ok(response?.error, "aborted interaction should answer with error");
+    finishTurn(core);
+    await turn;
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("无 handler（无在途回合）时 permission → deny / userInput → decline", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-interaction-"));
+  const { core, runtime } = await startInteractionFixture(dir);
+  try {
+    core.sendRequest("srv-1", "interaction/requestPermission", {
+      input: {},
+      options: PERMISSION_OPTIONS,
+      reason: "approval",
+      requestId: "req-nh",
+      riskLevel: "low",
+      sessionId: SID,
+      toolCallId: "tc-1",
+      toolName: "Bash",
+    });
+    core.sendRequest("srv-2", "interaction/requestUserInput", {
+      requestId: "req-nh2",
+      schema: { toolName: "AskUserQuestion" },
+      sessionId: SID,
+      toolName: "AskUserQuestion",
+    });
+    await waitFor(() => core.responses.length === 2);
+    const permission = core.responses.find((r) => r.id === "srv-1");
+    const userInput = core.responses.find((r) => r.id === "srv-2");
+    assert.equal(
+      (permission?.result as { decision?: string })?.decision,
+      "deny",
+    );
+    assert.equal(
+      (userInput?.result as { action?: string })?.action,
+      "decline",
+    );
   } finally {
     await runtime.close();
     await core.close();
