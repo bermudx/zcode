@@ -9,6 +9,7 @@ import {
   type ZCodeSkillsReferenceCatalogResult,
 } from "@zcode/shared";
 import type { TuiSkillSuggestion } from "@zcode/tui";
+import { toTuiSkillSuggestions } from "../skill-suggestions.js";
 import type {
   CommandCenterSkill,
   CommandCenterSkillListOutcome,
@@ -57,19 +58,9 @@ export const toCommandCenterSkillList = (
 });
 
 /**
- * `/skill <name>` 的可调用名是 qualifiedName（`plugin:skill`）优先于 name——
- * 与 `/skill` 列出的 `formatCommandCenterSkillName` 同一口径；同名去重保序。
+ * `/skill` 补全口径与 embedded 路径共用 toTuiSkillSuggestions（bundled 过滤 +
+ * qualifiedName 去重）；catalog 在协议层已排 bundled，这里是同语义防御。
  */
 export const toSkillSuggestions = (
   result: ZCodeSkillsReferenceCatalogResult,
-): TuiSkillSuggestion[] => {
-  const seen = new Set<string>();
-  const suggestions: TuiSkillSuggestion[] = [];
-  for (const entry of result.skills) {
-    const name = entry.qualifiedName ?? entry.name;
-    if (seen.has(name)) continue;
-    seen.add(name);
-    suggestions.push({ description: entry.description, name });
-  }
-  return suggestions;
-};
+): TuiSkillSuggestion[] => toTuiSkillSuggestions(result.skills);

@@ -3161,6 +3161,8 @@ export const zcodeSkillReferenceCatalogEntrySchema = z
     pluginName: nonEmptyString.optional(),
     // additive optional：瘦客户端 /skill 列表要还原 contracts SkillMetadata 的
     // 显示面（scope/source/qualifiedName/whenToUse）；老服务端不发，读侧退回折叠 scope。
+    // strict 解析反向（老客户端 × 新服务端）会因未知键拒包——部署口径是
+    // client/core 同版本配对，不承诺跨版本组合。
     nativeScope: z.enum(["project", "user", "system", "admin"]).optional(),
     source: z.enum(["agents", "zcode", "bundled", "plugin", "remote"]).optional(),
     qualifiedName: nonEmptyString.optional(),

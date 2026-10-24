@@ -11,6 +11,7 @@ import {
   toCommandCenterSkillList,
   toSkillSuggestions,
 } from "../src/attach/attach-skills.js";
+import { toTuiSkillSuggestions } from "../src/skill-suggestions.js";
 
 const entry = (
   overrides: Partial<ZCodeSkillReferenceCatalogEntry> = {},
@@ -103,6 +104,37 @@ test("toSkillSuggestions 用 qualifiedName 优先并按名去重保序", () => {
     { description: "desc", name: "code-review" },
     { description: "desc", name: "fmt:lint" },
   ]);
+});
+
+test("toSkillSuggestions 过滤 bundled（同口径防御；协议层已排）", () => {
+  const suggestions = toSkillSuggestions({
+    authority: "session",
+    skills: [
+      entry({ name: "code-review", source: "agents" }),
+      // bundled 技能走 /workflow，不出现在 /skill 补全。
+      entry({ name: "dynamic-workflows", source: "bundled" }),
+      entry({ name: "review", source: "zcode" }),
+    ],
+  });
+  assert.deepEqual(
+    suggestions.map((s) => s.name),
+    ["code-review", "review"],
+  );
+});
+
+test("toTuiSkillSuggestions：embedded 侧（SkillMetadata 形状）同样过滤 bundled + 去重", () => {
+  const suggestions = toTuiSkillSuggestions([
+    { description: "d1", name: "lint", qualifiedName: "fmt:lint", source: "plugin" },
+    { description: "d2", name: "dynamic-workflows", source: "bundled" },
+    { description: "d3", name: "lint", qualifiedName: "fmt:lint", source: "plugin" },
+    { description: "d4", name: "agent-notes", source: "agents" },
+  ]);
+  assert.deepEqual(suggestions, [
+    { description: "d1", name: "fmt:lint" },
+    { description: "d4", name: "agent-notes" },
+  ]);
+  // source 缺省（老服务端）不过滤。
+  assert.equal(toTuiSkillSuggestions([{ description: "d", name: "x" }]).length, 1);
 });
 
 test("listAttachSkillCatalog 发 skills/referenceCatalog 并校验回包形状", async () => {

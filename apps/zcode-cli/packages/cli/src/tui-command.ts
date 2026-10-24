@@ -10,6 +10,7 @@ import {
   listSkillsForTui,
   loadInitialTuiSessionMetadata,
 } from "./tui-command-data.js";
+import { toTuiSkillSuggestions } from "./skill-suggestions.js";
 import { createTuiSubmitPrompt } from "./tui-prompt-handler.js";
 import { loadTuiRuntime } from "./tui-runtime-loader.js";
 import { resolveTuiStartupLocale } from "./tui-startup-locale.js";
@@ -100,12 +101,7 @@ export const runTuiCommand = async (
             effortOptions: metadata.effortOptions,
             slashCommands: listSlashCommandSuggestions(customCommands, { workflowMode }),
             ...(skillOutcome
-              ? {
-                  skillSuggestions: skillOutcome.skills.map((skill) => ({
-                    description: skill.description,
-                    name: skill.qualifiedName ?? skill.name,
-                  })),
-                }
+              ? { skillSuggestions: toTuiSkillSuggestions(skillOutcome.skills) }
               : {}),
             workspaceGitBranch,
           };
