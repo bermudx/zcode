@@ -10,7 +10,7 @@ test("mount renders composer statusline into the terminal", async () => {
   const h = createHarness({ initialMode: "build", initialModel: "prov/model" });
   await h.flush();
   const out = h.output();
-  assert.match(out, /mode:build/);
+  assert.match(out, /\(prov\) model · build/);
   assert.match(out, /model/);
   await h.stop();
 });

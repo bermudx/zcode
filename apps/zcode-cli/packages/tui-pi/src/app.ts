@@ -46,7 +46,8 @@ import {
   workflowRunSeedFromSummary,
   type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
-import { ACTIVITY_IDLE_INDICATOR, ActivityLine, MetaLine } from "./footer.js";
+import { StatusFooter } from "./footer.js";
+import { PiBanner } from "./banner.js";
 import { Composer } from "./composer.js";
 import { PiDraftAttachments } from "./attachments.js";
 import { PiImagePaste } from "./image-paste.js";
@@ -61,7 +62,7 @@ import { keyEventFromInput } from "./keys.js";
 import { ApprovalPanel, QueuedInputsRow, SelectionPanel } from "./panels.js";
 import { MessageRow, piMarkdownTheme, reconcileTranscript } from "./rows.js";
 import { cycleCollaborationMode } from "./mode-switch.js";
-import { formatStatusLine } from "./status-line.js";
+import { formatCwdLabel } from "./status-line.js";
 import { AppStore } from "./store.js";
 import { SubagentDirectory } from "./subagents.js";
 import { UsageTotalsAccumulator } from "./usage-totals.js";
@@ -89,12 +90,12 @@ export class PiTuiApp {
   private readonly theme: PiTheme;
   private readonly onExit: (code: number) => void;
   private readonly store = new AppStore();
+  private readonly banner: PiBanner;
   private readonly transcript = new Container();
   private readonly interaction = new Container();
   private readonly composerBox = new Container();
-  private readonly statusBox = new Container();
-  private readonly activity: ActivityLine;
-  private readonly metaLine: MetaLine;
+  private readonly statusBox: StatusFooter;
+  private readonly cwdLabel: string;
   private readonly editor: Composer;
   private readonly rows: MessageRow[] = [];
   private readonly mdTheme;
@@ -121,7 +122,6 @@ export class PiTuiApp {
   private workflowCard: WorkflowCard;
   private infoOverlay: OverlayHandle | undefined;
   private readonly sidebarShortcut = createSidebarShortcutState();
-  private activityActive = false;
   private startupApplied = false;
   private readonly history: PiInputHistory;
   /** 子代理目录唯一 owner；组件只读 store。 */
@@ -174,12 +174,12 @@ export class PiTuiApp {
     store.set("modelOptions", [...(this.options.modelOptions ?? [])]);
     store.set("effortOptions", [...(this.options.effortOptions ?? [])]);
 
-    this.metaLine = new MetaLine("", 1, 0);
-    this.activity = new ActivityLine(this.tui, this.theme.accent, this.theme.muted, "");
-    // pi-tui 的 Loader 在构造时经 setIndicator→start() 就启动常驻 setInterval：
-    // footer 恒定挂载形态下立刻用空闲指示接管——帧数 ≤1 不启动定时器，
-    // 否则空转 tick 会阻止进程退出。
-    this.activity.setIndicator(ACTIVITY_IDLE_INDICATOR);
+    const env = deps.env ?? process.env;
+    this.cwdLabel = formatCwdLabel({
+      cwd: this.options.workspaceDirectory ?? process.cwd(),
+      home: env.HOME ?? env.USERPROFILE,
+    });
+    this.statusBox = new StatusFooter(this.tui, this.theme);
 
     this.editor = new Composer(this.tui, this.theme, {
       options: this.options,
@@ -212,9 +212,10 @@ export class PiTuiApp {
     this.editor.onChange = () => this.history.onEditorChange();
 
     this.composerBox.addChild(this.editor);
-    this.statusBox.addChild(this.activity);
-    this.statusBox.addChild(this.metaLine);
 
+    this.banner = new PiBanner(this.theme, this.options.version);
+    this.banner.setModels(store.state.modelOptions);
+    this.tui.addChild(this.banner);
     this.tui.addChild(this.transcript);
     this.workflowCard = new WorkflowCard(this.workflowMirror, this.theme);
     this.tui.addChild(this.workflowCard);
@@ -276,7 +277,10 @@ export class PiTuiApp {
       this.fallback.locale = startup.locale;
       this.copy = getZCodeCopy(startup.locale).tui;
     }
-    if (startup.modelOptions) store.set("modelOptions", [...startup.modelOptions]);
+    if (startup.modelOptions) {
+      store.set("modelOptions", [...startup.modelOptions]);
+      this.banner.setModels(store.state.modelOptions);
+    }
     if (startup.effortOptions) store.set("effortOptions", [...startup.effortOptions]);
     if (startup.slashCommands) this.options.slashCommands = startup.slashCommands;
     if (startup.skillSuggestions) this.options.skillSuggestions = startup.skillSuggestions;
@@ -761,22 +765,13 @@ export class PiTuiApp {
     }
   }
 
-  /**
-   * Footer 恒定两行：活动行（spinner + status）与 meta 行（mode/model/
-   * thought/用量簇）都常驻 statusBox，只换内容不换结构。活动判定与
-   * quitChoice.turnBusy 同口径（busy 或前台 activeTurnId），attach 会话的
-   * 远端 turn 也能转 spinner；指示切换只在 busy 沿变化时发生，空闲指示
-   * 帧数 ≤1，idle 下没有帧定时器空转。
-   */
+  /** Footer 两行的 owner 在 footer.ts；这里只把最新 state 递下去。 */
   private updateFooter(): void {
-    const s = this.store.state;
-    const active = s.busy || s.activeTurnId !== undefined;
-    if (active !== this.activityActive) {
-      this.activityActive = active;
-      this.activity.setIndicator(active ? undefined : ACTIVITY_IDLE_INDICATOR);
-    }
-    this.activity.setMessage(s.status || (active ? this.copy.input.activeStatusHint : ""));
-    this.metaLine.setText(this.theme.muted(formatStatusLine(s)));
+    this.statusBox.update({
+      cwdLabel: this.cwdLabel,
+      idleHint: this.copy.input.activeStatusHint,
+      state: this.store.state,
+    });
   }
 
   /* ---------- lifecycle ---------- */
@@ -786,7 +781,7 @@ export class PiTuiApp {
     this.unsubscribeSession?.();
     this.subagents.dispose();
     this.unsubscribeConnectionStatus?.();
-    this.activity.stop();
+    this.statusBox.stop();
     for (const approval of this.store.state.approvalQueue) {
       approval.cleanup();
       approval.reject(new Error("TUI closed"));

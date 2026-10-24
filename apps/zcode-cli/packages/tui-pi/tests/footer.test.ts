@@ -25,7 +25,7 @@ test("footer stays two rows across idle → busy → idle", async () => {
     assert.equal(rows.length, 2);
     assert.match(rows[0] ?? "", /Ready\./);
     assert.doesNotMatch(rows[0] ?? "", SPINNER);
-    assert.match(rows[1] ?? "", /mode:build/);
+    assert.match(rows[1] ?? "", /\(prov\) model · build/);
     assert.doesNotMatch(rows[1] ?? "", /Ready\./);
 
     h.store.set("busy", true);

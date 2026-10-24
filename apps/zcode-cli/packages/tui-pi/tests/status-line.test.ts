@@ -1,11 +1,20 @@
-// Status-line usage cluster: pi-mono footer parity for ↑/↓/R/CH/ctx%/win
-// segments, plus agents:N when running subagents exist. Covers the pure
-// formatter and the end-to-end event → UsageTotalsAccumulator → status line
-// path through applyEvent.
+// Footer meta 行：左区 cwd + 用量簇（↑in ↓out R… CH%），右区 ctx +
+// `(provider) model · thought · mode · agents:N`。覆盖纯 formatter 与
+// 事件 → UsageTotalsAccumulator → meta 行的端到端路径。
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatTokens, formatUsageCluster } from "../src/status-line.js";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+  formatContextSegment,
+  formatCwdLabel,
+  formatIdentityCluster,
+  formatMetaLine,
+  formatModelLabel,
+  formatTokens,
+  formatUsageCluster,
+} from "../src/status-line.js";
+import type { AppStore } from "../src/store.js";
 import { createHarness, sessionEvent } from "./harness.js";
 
 const totals = (inputTokens: number, outputTokens: number, cacheReadTokens: number) => ({
@@ -13,6 +22,9 @@ const totals = (inputTokens: number, outputTokens: number, cacheReadTokens: numb
   inputTokens,
   outputTokens,
 });
+
+const state = (over: Partial<AppStore["state"]>): AppStore["state"] =>
+  ({ contextUsage: {}, ...over }) as AppStore["state"];
 
 test("formatTokens matches pi-mono boundaries", () => {
   assert.equal(formatTokens(0), "0");
@@ -27,37 +39,105 @@ test("formatTokens matches pi-mono boundaries", () => {
 test("usage cluster mirrors pi footer segments", () => {
   const line = formatUsageCluster({
     usageTotals: totals(1_900_000, 43_000, 1_800_000),
-    contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
     cacheHitRate: 0.995,
   });
-  assert.equal(line, "↑1.9M ↓43k R1.8M CH99.5% 40.4%/255k");
+  assert.equal(line, "↑1.9M ↓43k R1.8M CH99.5%");
 });
 
 test("cache hit falls back to the session aggregate formula", () => {
-  const line = formatUsageCluster({
-    usageTotals: totals(1_000, 10, 995),
-    contextUsage: {},
-  });
-  assert.equal(line, "↑1.0k ↓10 R995 CH99.5%");
+  assert.equal(formatUsageCluster({ usageTotals: totals(1_000, 10, 995) }), "↑1.0k ↓10 R995 CH99.5%");
+  assert.equal(formatUsageCluster({}), undefined);
 });
 
-test("ctx degrades without a window; cluster hides until data exists", () => {
-  assert.equal(formatUsageCluster({ contextUsage: {} }), undefined);
+test("ctx segment degrades without a window and hides without data", () => {
+  assert.equal(formatContextSegment({}), undefined);
+  assert.equal(formatContextSegment({ contextUsed: 5_000 }), "ctx 5.0k");
   assert.equal(
-    formatUsageCluster({ contextUsage: { contextUsed: 5_000 } }),
-    "ctx 5.0k",
+    formatContextSegment({ contextUsed: 103_000, contextWindow: 255_000 }),
+    "40.4%/255k",
   );
+});
+
+test("model label splits provider/ into the pi form", () => {
+  assert.equal(formatModelLabel("prov/model"), "(prov) model");
+  assert.equal(formatModelLabel("a/b/c"), "(a/b) c");
+  assert.equal(formatModelLabel("GLM-5.3-Flash"), "GLM-5.3-Flash");
+  assert.equal(formatModelLabel(""), undefined);
+});
+
+test("identity cluster joins ctx + model · thought · mode", () => {
+  const line = formatIdentityCluster(
+    state({
+      contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
+      mode: "yolo",
+      model: "prov/model",
+      thoughtLevel: "max",
+    }),
+  );
+  assert.equal(line, "40.4%/255k  (prov) model · max · yolo");
 });
 
 test("agents segment appears only while running", () => {
-  assert.equal(
-    formatUsageCluster({ contextUsage: {}, runningSubagents: 0 }),
-    undefined,
+  const base = { contextUsage: {}, mode: "yolo", model: "m" };
+  assert.equal(formatIdentityCluster(state(base)), "m · yolo");
+  assert.match(
+    formatIdentityCluster(
+      state({
+        ...base,
+        subagents: { ended: { total: 0 }, running: [{}, {}] },
+      } as unknown as AppStore["state"]),
+    ) ?? "",
+    /agents:2/,
   );
+});
+
+test("cwd label folds the home prefix to ~", () => {
   assert.equal(
-    formatUsageCluster({ contextUsage: {}, runningSubagents: 2 }),
-    "agents:2",
+    formatCwdLabel({ cwd: "/home/daniel/build/piz", home: "/home/daniel" }),
+    "~/build/piz",
   );
+  assert.equal(formatCwdLabel({ cwd: "/home/daniel", home: "/home/daniel" }), "~");
+  assert.equal(formatCwdLabel({ cwd: "C:\\work\\piz", home: "C:\\work" }), "~/piz");
+  assert.equal(formatCwdLabel({ cwd: "/opt/piz", home: "/home/daniel" }), "/opt/piz");
+});
+
+test("meta line lays out left cwd + cluster and right identity", () => {
+  const s = state({
+    cacheHitRate: 0.995,
+    contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
+    mode: "yolo",
+    model: "prov/model",
+    thoughtLevel: "max",
+    usageTotals: totals(1_900_000, 43_000, 1_800_000),
+  });
+  const left = "~/piz  ↑1.9M ↓43k R1.8M CH99.5%";
+  const right = "40.4%/255k  (prov) model · max · yolo";
+  assert.equal(
+    formatMetaLine({ cwdLabel: "~/piz", state: s, width: 100 }),
+    `${left}${" ".repeat(100 - left.length - right.length)}${right}`,
+  );
+});
+
+test("meta line sheds cluster, then cwd, as the width shrinks", () => {
+  const s = state({
+    contextUsage: { contextWindow: 255_000, contextUsed: 103_000 },
+    mode: "yolo",
+    model: "prov/model",
+    usageTotals: totals(1_900_000, 43_000, 1_800_000),
+  });
+  const right = "40.4%/255k  (prov) model · yolo";
+  // 60 列放不下 cluster + right：cluster 先退场。
+  assert.equal(
+    formatMetaLine({ cwdLabel: "~/piz", state: s, width: 60 }),
+    `~/piz${" ".repeat(60 - 5 - right.length)}${right}`,
+  );
+  // 再窄：cwd 左省略但尾部保留（budget = 40-31-2 = 7 → "…" + 6 格尾段）。
+  const shrunk = formatMetaLine({ cwdLabel: "~/build/piz", state: s, width: 40 });
+  assert.equal(shrunk, `…ld/piz${" ".repeat(40 - 7 - right.length)}${right}`);
+  // 极窄：只剩右区且硬截断（truncateToWidth 的 "..." 标记带 ANSI，按可见宽度断言）。
+  const tiny = formatMetaLine({ cwdLabel: "~/build/piz", state: s, width: 20 });
+  assert.equal(visibleWidth(tiny), 20);
+  assert.match(tiny, /^40\.4%/);
 });
 
 test("model_complete accumulates per-request usage + latestHitRate", async () => {
@@ -83,7 +163,8 @@ test("model_complete accumulates per-request usage + latestHitRate", async () =>
     await h.flush();
     assert.equal(h.store.state.cacheHitRate, 0.995);
     // Cumulative across both requests — not the second request's numbers alone.
-    assert.match(h.output(), /↑1\.9M ↓43k R1\.8M CH99\.5% 40\.4%\/255k/);
+    // 用量簇在左区、ctx 仪表在右区，中间隔着对齐空白。
+    assert.match(h.output(), /↑1\.9M ↓43k R1\.8M CH99\.5% +40\.4%\/255k/);
   } finally {
     await h.stop();
   }

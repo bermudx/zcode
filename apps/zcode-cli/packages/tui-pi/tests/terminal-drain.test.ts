@@ -181,7 +181,8 @@ test("responding pty: 回复零回显、迟到回复被吞、TUI 渲染 status l
       // 真终端的应答有 ms 级延迟；50ms 后回复更贴近实测时序。
       setTimeout(sendReplies, 50);
     }
-    if (repliesSent && !sawStatus && output.includes("mode:")) {
+    // meta 行恒挂：默认 mode `yolo` 一渲染即出现在 pty 输出里。
+    if (repliesSent && !sawStatus && output.includes("yolo")) {
       sawStatus = true;
     }
   });

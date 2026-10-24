@@ -63,9 +63,16 @@ node_modules 解析。`@zcode/cli` bundle 把 `@zcode/tui-pi` 列为 external，
 pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 
 - `ProcessTerminal` + `TuiMainScreen`；stdin/stdout 非 TTY 时与现有前端同判退出 1。
-- 根 `Container` 纵向堆叠：transcript 容器 → 交互面板（审批 / AskUserQuestion /
-  TuiSelection，与 React 前端同形内联呈现）→ queued-inputs → composer(Editor) →
-  statusline。Esc 经全局输入监听关闭当前面板或触发双按中断。
+- 根 `Container` 纵向堆叠：启动横幅（`PiBanner`）→ transcript 容器 → 交互面板
+  （审批 / AskUserQuestion / TuiSelection，与 React 前端同形内联呈现）→
+  queued-inputs → composer(Editor) → statusline。Esc 经全局输入监听关闭当前
+  面板或触发双按中断。
+- 启动横幅（`tui-pi/src/banner.ts`）：PIZ 方块字 logo（与 React 前端
+  ZCODE idle logo 同一字族）+ `piz v{version}` + 两行按键提示 + `models:` 行，
+  右栏信息排布在 logo 右侧。`modelOptions` 经 startup 快照异步到达（ctor 注入或
+  `applyStartupOptions`），到达前该行留空、横幅高度不变。横幅作为普通子组件
+  挂在转写之前，随 scrollback 向上滚走；所有行经 `truncateToWidth` 截断，
+  窄终端不折行不抛错。纯展示层：不读会话/模型状态之外的源，无新配置面。
 - composer 用内置 `Editor`：`CombinedAutocompleteProvider` 提供 `/` 命令与 `@`
   文件路径补全；`/model`、`/effort`、`/mode`、`/skill` 经 `getArgumentCompletions`
   给参数补全（等价于现有的草稿建议面板）；编辑器自带 bracketed paste、历史导航、
@@ -99,17 +106,28 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - 每条 Message/Part 映射一个 `Component`：`Markdown`（agent 文本）、`Text`
   （user/system/timeline/thought）、自定义 `ToolRowComponent`（状态图标 + 名称 +
   详情 + 错误 + diff，`invalidate` + `requestRender` 驱动流式更新）。
-- Footer 恒定两行（statusBox 恒挂两个单行组件，高度不随 busy 变化，挂载/
-  卸载 spinner 不再把整屏内容顶起/落下）：
-  - 活动行（`ActivityLine`，`tui-pi/src/footer.ts`，Loader 单行形态）：
-    busy 或 `activeTurnId` 在场时动画 spinner + `status`（status 为空回退
-    `input.activeStatusHint`，"esc to interrupt"，与 React 前端同文案）；
-    空闲时 spinner 位留空格对齐、显示 `status` 或留白。`activeTurnId` 并入
-    活动判定与 `quitChoice.turnBusy` 同口径——attach 会话远端发起的
-    turn 也可见 spinner。
-  - meta 行（`MetaLine`，Text 单行形态）：`mode | model | thoughtLevel` 后
-    接一段空格分隔的用量簇（pi-mono 页脚形态）：`↑{input} ↓{output}
-    R{cacheRead} CH{hit}% {ctxPct}%/{ctxWindow} agents:{n}`。
+- user 行按 `tui-transcript-message-rows.md` 同一契约在 pi 前端的实现：
+  accent 色 `> ` 前缀 + `userBg`（`backgroundMessageUser` 记号）整行垫底 +
+  上下各一行背景填充，用户回合在转写里立块可辨；agent 行保持普通背景。
+- 终端 markdown 主题（`piMarkdownTheme` → `theme.markdown`）按 `markdown*`
+  记号组装，与 React 前端 `app-markdown-theme.ts` 映射一致：终端没有字号，
+  heading/strong 用 bold 属性表达层级，inline code 叠 `backgroundPanel` 底色；
+  `underline`/`strikethrough` 只叠加属性不带色——pi-tui 在 h1 与 link 内
+  嵌套调用 `underline()`，带 fg 会顶掉 heading/link 颜色。
+- Footer 恒定两行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
+  `Container`）唯一 own：高度不随 busy 变化，挂载/卸载 spinner 不再把整屏
+  内容顶起/落下；`update({state, status, cwdLabel})` 一行委托两行。
+  - 活动行（`ActivityLine`，Loader 单行形态）：busy 或 `activeTurnId` 在场
+    时动画 spinner + `status`（status 为空回退 `input.activeStatusHint`，
+    "esc to interrupt"，与 React 前端同文案）；空闲时 spinner 位留空格对齐、
+    显示 `status` 或留白。`activeTurnId` 并入活动判定与
+    `quitChoice.turnBusy` 同口径——attach 会话远端发起的 turn 也可见
+    spinner；指示切换只在 busy 沿变化时发生。
+  - meta 行（`MetaLine` + `status-line.ts` 纯格式化）：左右两区。
+    左区 `cwd  ↑{in} ↓{out} R{cacheRead} CH{hit}%`，右区
+    `{ctxPct}%/{ctxWindow}  (provider) model · thought · mode · agents:N`，
+    两区间距随宽度浮动（≥2 空格）。宽度收缩顺序：先丢用量簇 → cwd 左省略
+    （保尾部，`$HOME` 折叠为 `~`）→ 只剩右区 → 右区硬截断。
   - 两行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
     status 也不会把 footer 撑过两行。
   - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
@@ -129,7 +147,7 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     sidebar `cacheHitLabel` 同一公式），两者皆缺则不显示该段。
   - `ctx` 段为 `contextUsage.contextUsed / contextWindow`：窗口在时渲染
     `{pct}%/{compact(window)}`，仅有 contextUsed 时降级为 `ctx {compact}`。
-  - `agents:{n}` 在 running 子代理数 > 0 时追加（见下方目录段）。
+  - `agents:{n}` 在 running 子代理数 > 0 时追加到右区身份簇（见下方目录段）。
   - 不显示 `$`：契约不含模型定价来源，虚拟成本数字宁可缺省；plan 额度
     读数属独立的 provider-balance 方向，不在本段伪造。
   - 紧凑计数与 pi-mono `formatTokens` 等值：<1k 原值、<10k 一位小数 `k`、
