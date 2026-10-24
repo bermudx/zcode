@@ -142,6 +142,31 @@ test("stale snapshot is dropped when the main session changes", async () => {
   }
 });
 
+test("readSubagents rejection sets the error and the next event retries", async () => {
+  let calls = 0;
+  const h = createHarness({
+    getMainSessionId: () => "sess-test",
+    readSubagents: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("core offline");
+      return snapshot(1);
+    },
+  });
+  try {
+    await h.flush();
+    assert.equal(h.store.state.subagents, undefined);
+    assert.equal(h.store.state.subagentsError, "Error: core offline");
+    // 下一次目录事件重拉：成功后清掉错误并落地快照。
+    h.app.applyEvent(sessionEvent("subagent_spawned", { childSessionId: "c1" }));
+    await h.flush();
+    assert.equal(calls, 2);
+    assert.equal(h.store.state.subagents?.running.length, 1);
+    assert.equal(h.store.state.subagentsError, undefined);
+  } finally {
+    await h.stop();
+  }
+});
+
 test("missing readSubagents port stays silent", async () => {
   const h = createHarness({ getMainSessionId: () => "sess-test" });
   try {

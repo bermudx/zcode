@@ -202,6 +202,9 @@ export class PiTuiApp {
       setStatus: (status) => this.store.set("status", status),
     });
 
+    // 事件消费者先于订阅构造：同步回放型端口注册即推事件时 handleEvent 不能空转。
+    this.subagents = new SubagentDirectory(this.store, this.options);
+    this.usageTotals = new UsageTotalsAccumulator(this.store, this.options);
     this.unsubscribeSession = this.options.subscribeSessionEvents?.((event) =>
       this.applyEvent(event),
     );
@@ -219,8 +222,6 @@ export class PiTuiApp {
 
     this.store.onChange((key) => this.onStateChanged(key));
     this.tui.setFocus(this.editor);
-    this.subagents = new SubagentDirectory(this.store, this.options);
-    this.usageTotals = new UsageTotalsAccumulator(this.store, this.options);
     this.subagents.refresh();
     this.refreshPanels();
     this.updateStatusLine();
@@ -306,7 +307,7 @@ export class PiTuiApp {
 
   applyEvent = (event: SessionEvent): void => {
     this.store.observeSessionEvent?.(event);
-    applyMainSessionEvent(event, this.store.appliedEventIds, {
+    const applied = applyMainSessionEvent(event, this.store.appliedEventIds, {
       assistantMessageIdsByToolCallId: this.store.assistantMessageIdsByToolCallId,
       copy: this.copy,
       getMainSessionId: this.options.getMainSessionId,
@@ -331,8 +332,11 @@ export class PiTuiApp {
       toolNamesById: this.store.toolNamesById,
       workspaceDirectory: this.options.workspaceDirectory,
     });
-    // ↑↓R/CH 与目录刷新均由各 owner 消费同一事件（共享投影先行）。
-    this.usageTotals.handleEvent(event);
+    // 用量只在 applyMainSessionEvent 采纳（主会话且未去重命中）后折叠：
+    // 同一事件经 session sink 与 per-turn onEvent 双投递，applied 即恰好一次。
+    // 目录则必须看全部事件（子会话 turn_complete 是子代理结束的信号之一），
+    // 且 refresh 幂等，故不走 applied 门。
+    if (applied) this.usageTotals.handleEvent(event);
     this.subagents.handleEvent(event);
   };
 
@@ -378,10 +382,8 @@ export class PiTuiApp {
     store.set("liveModelText", "");
     // settle 回合不得回写 activeTurnId：socket 事件先清零，无条件回写会把已完成回合复活成 busy。
     if (result.turnId && store.state.activeTurnId === result.turnId) store.set("activeTurnId", undefined);
-    if (result.usage) {
-      store.set("usage", result.usage);
-      this.usageTotals.adopt(result.usage);
-    }
+    // result.usage 是回合口径（同 turn_complete），不进 session 累计器。
+    if (result.usage) store.set("usage", result.usage);
     if (result.projection) {
       store.setter("contextUsage")((current) => ({
         ...current,

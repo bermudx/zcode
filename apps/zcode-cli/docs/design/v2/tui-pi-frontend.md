@@ -95,11 +95,15 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   用量簇（pi-mono 页脚形态）：`↑{input} ↓{output} R{cacheRead} CH{hit}%
   {ctxPct}%/{ctxWindow} agents:{n}`。
   - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
-    维护的 session 累计：主会话 `ModelComplete` 的单请求 `ModelUsage`
-    逐次折入（`isMainSessionEvent` 门控），`turn_complete` /
-    `submitPrompt` 结果携带的权威 `ModelUsageSummary` 整段采信（替换
-    非累加，自愈漂移）。`state.usage` 在 turn 内被单请求口径覆盖，不能
-    直接显示为累计。
+    维护的 session 累计。契约没有 session 级权威用量源——`turn_complete`
+    / `submitPrompt` 结果的 `usage` 都是 `createModelUsageSummaryFromEvents`
+    (本回合事件) 的回合口径，采纳会把累计显示打回本回合数字——故只做
+    纯折叠：已 dedup 的主会话 `model_complete` 与 `model_request_failed`
+    单请求 `ModelUsage` 逐次累加（与权威口径同一事件集合）。只在
+    `applyMainSessionEvent` 采纳后折叠：同一事件经 session sink 与
+    per-turn onEvent 双投递，dedup 保证恰好一次。attach 中途接入只计
+    接入后流量；`resetSessionProjection` 清零。`state.usage` 在 turn 内
+    是单请求口径，不能直接显示为累计。
   - `R` 为累计 `cacheReadTokens`（与 pi-mono footer 同字段语义）。
   - `CH` 取 `ModelComplete.payload.cacheHit.latestHitRate`（最近一次请求的
     命中口径，即 pi 的 `latestCacheHitRate`；0–1 小数，渲染成一位小数百分比）。

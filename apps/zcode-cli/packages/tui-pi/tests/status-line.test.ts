@@ -89,10 +89,88 @@ test("model_complete accumulates per-request usage + latestHitRate", async () =>
   }
 });
 
-test("turn_complete authoritative summary replaces folded totals", async () => {
+test("usage accumulates across turns; per-turn summary is not adopted", async () => {
   const h = createHarness({ getMainSessionId: () => "sess-test" });
   try {
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "turn 1",
+        stopReason: "stop",
+        usage: { inputTokens: 1_000, outputTokens: 10 },
+      }),
+    );
+    // turn_complete 的 usage 是回合口径（createModelUsageSummaryFromEvents
+    // 只汇总本回合）——累计器不得采纳，否则 footer 打回本回合数字。
+    h.app.applyEvent(
+      sessionEvent("turn_complete", {
+        usage: {
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          inputTokens: 1_000,
+          modelRequestCount: 1,
+          outputTokens: 10,
+          reasoningTokens: 0,
+          source: "provider",
+          totalTokens: 1_010,
+          webFetchRequests: 0,
+          webSearchRequests: 0,
+        },
+      }),
+    );
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "turn 2",
+        stopReason: "stop",
+        usage: { inputTokens: 500, outputTokens: 5 },
+      }),
+    );
+    await h.flush();
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: 0,
+      inputTokens: 1_500,
+      outputTokens: 15,
+    });
     h.resetOutput();
+    h.app.applyEvent(sessionEvent("session_created", { contextWindow: 255_000 }));
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "turn 3",
+        stopReason: "stop",
+        usage: { inputTokens: 500, outputTokens: 5 },
+      }),
+    );
+    await h.flush();
+    assert.match(h.output(), /↑2\.0k ↓20 R0/);
+  } finally {
+    await h.stop();
+  }
+});
+
+test("the same event id folds exactly once across both delivery paths", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    const event = sessionEvent("model_complete", {
+      content: "chunk",
+      stopReason: "stop",
+      usage: { inputTokens: 1_000, outputTokens: 10 },
+    });
+    // 真实路径里同一事件由 session sink 与 per-turn onEvent 各投递一次。
+    h.app.applyEvent(event);
+    h.app.applyEvent({ ...event });
+    await h.flush();
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: 0,
+      inputTokens: 1_000,
+      outputTokens: 10,
+    });
+  } finally {
+    await h.stop();
+  }
+});
+
+test("failed model requests fold usage the same as completions", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
     h.app.applyEvent(
       sessionEvent("model_complete", {
         content: "chunk",
@@ -101,24 +179,49 @@ test("turn_complete authoritative summary replaces folded totals", async () => {
       }),
     );
     h.app.applyEvent(
-      sessionEvent("turn_complete", {
-        usage: {
-          cacheReadTokens: 1_800_000,
-          cacheWriteTokens: 0,
-          inputTokens: 1_900_000,
-          modelRequestCount: 2,
-          outputTokens: 43_000,
-          reasoningTokens: 0,
-          source: "provider",
-          totalTokens: 1_943_000,
-          webFetchRequests: 0,
-          webSearchRequests: 0,
-        },
+      sessionEvent("model_network_status", {
+        type: "model_request_failed",
+        usage: { inputTokens: 200, outputTokens: 0 },
+      }),
+    );
+    // 其他 network status 类型不计。
+    h.app.applyEvent(
+      sessionEvent("model_network_status", {
+        type: "model_request_started",
       }),
     );
     await h.flush();
-    // Authoritative summary wins over the in-turn fold (1.0k/10).
-    assert.match(h.output(), /↑1\.9M ↓43k R1\.8M/);
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: 0,
+      inputTokens: 1_200,
+      outputTokens: 10,
+    });
+  } finally {
+    await h.stop();
+  }
+});
+
+test("latestHitRate null leaves cacheHitRate untouched", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        cacheHit: { latestHitRate: 0.5 },
+        content: "a",
+        stopReason: "stop",
+        usage: { inputTokens: 100, outputTokens: 1 },
+      }),
+    );
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        cacheHit: { latestHitRate: null },
+        content: "b",
+        stopReason: "stop",
+        usage: { inputTokens: 50, outputTokens: 1 },
+      }),
+    );
+    await h.flush();
+    assert.equal(h.store.state.cacheHitRate, 0.5);
   } finally {
     await h.stop();
   }
@@ -168,8 +271,18 @@ test("child-session usage events never reach the main footer", async () => {
       ),
     );
     await h.flush();
+    // Store 级断言：子会话事件根本不进入累计（渲染帧是累积 buffer，
+    // 字符串断言分不清「未渲染」与「渲染后又消失」）。
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: 0,
+      inputTokens: 500,
+      outputTokens: 5,
+    });
+    h.resetOutput();
+    h.app.applyEvent(sessionEvent("session_created", { contextWindow: 255_000 }));
+    await h.flush();
     assert.match(h.output(), /↑500 ↓5 R0/);
-    assert.doesNotMatch(h.output(), /9\.9M|↑9M/);
+    assert.doesNotMatch(h.output(), /↑9\.0M|9\.9M/);
   } finally {
     await h.stop();
   }

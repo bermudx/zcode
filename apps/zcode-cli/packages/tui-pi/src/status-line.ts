@@ -59,7 +59,8 @@ export function formatUsageCluster(input: {
       (usageTotals.inputTokens > 0
         ? usageTotals.cacheReadTokens / usageTotals.inputTokens
         : undefined);
-    if (hit !== undefined && Number.isFinite(hit) && hit >= 0) {
+    // 命中率出界（<0 或 >1）属于 provider 数据异常：隐藏该段，不伪造 100%+。
+    if (hit !== undefined && Number.isFinite(hit) && hit >= 0 && hit <= 1) {
       parts.push(`CH${(hit * 100).toFixed(1)}%`);
     }
   }

@@ -14,7 +14,7 @@ export class SubagentDirectory {
 
   constructor(
     private readonly store: AppStore,
-    private readonly options: TuiOptions,
+    private readonly options: Pick<TuiOptions, "readSubagents" | "getMainSessionId">,
   ) {}
 
   /**
