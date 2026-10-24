@@ -10,7 +10,8 @@ import { test } from "node:test";
 
 // 冒烟测试：真实 PTY（util-linux `script`）下 boot 打包产物 dist/zcode-attach.cjs，
 // 由 ensureServer 经 ZCODE_SERVER_BIN 拉起真实 app-server core（dist/zcode.cjs），
-// 断言 pty 日志里出现 TUI status line（`mode:`），证明 thin 客户端可独立渲染。
+// 断言 pty 日志里出现 footer pwd 行（测试自建的 workspace 路径）与协作模式
+// 词元，证明 thin 客户端可独立渲染。
 // 依赖产物与 POSIX 工具，环境不满足时 t.skip：
 //   - linux only（`script -qefc` 为 util-linux 语法；macOS script(1) 参数不同 —— 残余风险已知）
 //   - 需先 `pnpm --filter @zcode/cli build`（产物不在源码仓库内）
@@ -107,12 +108,15 @@ test("zcode-attach.cjs boots under a pty, spawns core, renders TUI status line",
     while (Date.now() < deadline) {
       logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
       pid = await serverPid();
-      if (logText.includes("mode:") && pid !== undefined) break;
+      // footer pwd 行渲染 workspace 路径 = TUI 状态行已挂载。
+      if (logText.includes(workspace) && pid !== undefined) break;
       await delay(POLL_MS);
     }
 
     assert.ok(pid !== undefined, "core pid file should exist (server auto-spawned)");
-    assert.match(logText, /mode:\w+/, "pty log should contain the TUI status line");
+    assert.ok(logText.includes(workspace), "pty log should contain the footer pwd row");
+    // stats 行右区的协作模式词元（yolo/build/plan 默认集之一）。
+    assert.match(logText, /\b(build|yolo|plan)\b/, "pty log should contain the collaboration mode");
   } finally {
     terminate(child.pid);
     const cleanupPid = pid ?? (await serverPid());

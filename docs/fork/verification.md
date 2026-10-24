@@ -40,6 +40,25 @@ ELF binary and the spawn fails with a SyntaxError before any package runs.
 Point it at the real JS entry (`pnpm/bin/pnpm.cjs` under
 `~/.local/share/pnpm/.tools/pnpm/<ver>/`) as above — verified 2026-10-24,
 0 errors / 71 upstream warnings.
+2026-10-24 correction: pnpm **run** overrides `npm_execpath` for script
+children, so exporting it in front of `pnpm --dir apps/zcode-cli lint` does
+NOT reach run-cli-lint.mjs (re-verified: the child still sees the mise ELF
+shim). `pnpm exec` preserves it. Working invocation:
+
+```sh
+npm_execpath="$HOME/.local/share/pnpm/.tools/pnpm/10.33.2/node_modules/pnpm/bin/pnpm.cjs" \
+  mise exec -- node scripts/run-cli-lint.mjs
+```
+
+Interactive shells inside a piz/core-managed session can inherit
+`ZCODE_WORKSPACE_IDENTITY` (and `ZCODE_SERVER_BIN`/`ZCODE_ATTACH_CORE`).
+`runAttachCommand` derives the socket path hash from that identity, so
+attach tests that fake a core on a `resolveSocketPath`-derived path resolve
+a *different* socket inside `runAttachCommand`, fail the reuse probe, and
+spawn a real core ("app-server exited before accepting"). 2026-10-24: the
+whole attach suite requires `env -u ZCODE_WORKSPACE_IDENTITY`; it is an
+environment gap, not a regression (22/22 adapter + 48/48 attach set pass
+with it unset).
 
 Rebuild changed dependency packages before consumer typechecks when checks use
 dist declarations. Do not suppress missing-export errors; determine whether
@@ -151,3 +170,34 @@ Still NOT done (full acceptance gate above remains open): authenticated model
 turn, signing gate against the real provider request, allowance-eligibility
 evidence, both Ctrl-C delivery paths in a real terminal, client-count memory
 measurements, model switching/attachments/resume matrix.
+
+## 2026-10-24 — footer rework promotion (branch `patch/pi-footer-pwd-stats-rows`)
+
+tui-pi footer: constant three rows (activity + pwd/branch + two-zone stats
+row), ctx gauge moved beside the usage cluster, branch from
+`TuiStartupOptions.workspaceGitBranch`. `attach-binary.smoke.test.ts`
+assertions updated from the retired `mode:` pipe format to the pwd row +
+mode token. All passing unless stated:
+
+- tui-pi: 165/165 tests, typecheck, lint; `architecture:check --changed` clean.
+- CLI workspace typecheck (34 turbo tasks) and lint via the corrected direct
+  invocation above (0 errors / 71 upstream warnings / 13 accepted).
+- Focused sets with `env -u ZCODE_WORKSPACE_IDENTITY`: adapters signing
+  regression 9/9, bootstrap socket-listener pass, attach set 48/48,
+  shared attach contract 4/4.
+- `PATH="$PWD/node_modules/.bin:$PATH" mise exec -- pnpm --dir apps/zcode-cli
+  build` (25/25) + `--filter @zcode/cli build:attach`; pty smoke re-run
+  against the fresh bundle, pass.
+- `promote-piz.sh` atomic swap; installed `piz` booted under a pty in a
+  throwaway git workspace with isolated `ZCODE_DATA_BASE_DIR` (inherited
+  `ZCODE_WORKSPACE_IDENTITY`/`ZCODE_SERVER_BIN`/`ZCODE_ATTACH_CORE` unset):
+  banner + pwd row `/…/ws (main)` + stats row mode render; core exited with
+  the client.
+- First promotion attempt this cycle surfaced the stale pipe-format footer:
+  dist-runtime had been promoted from a dist built before the two-zone footer
+  commits — same freshness lesson as 2026-10-23, now also covered by the
+  smoke test's footer assertions.
+
+Still NOT done: the full acceptance gate above (model turn, signing against
+the real provider request, allowance evidence, Ctrl-C signal path, memory
+matrix) remains open and unchanged.
