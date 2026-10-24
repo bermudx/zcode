@@ -3159,6 +3159,12 @@ export const zcodeSkillReferenceCatalogEntrySchema = z
     scope: z.enum(["workspace", "user", "plugin"]),
     enabled: z.literal(true),
     pluginName: nonEmptyString.optional(),
+    // additive optional：瘦客户端 /skill 列表要还原 contracts SkillMetadata 的
+    // 显示面（scope/source/qualifiedName/whenToUse）；老服务端不发，读侧退回折叠 scope。
+    nativeScope: z.enum(["project", "user", "system", "admin"]).optional(),
+    source: z.enum(["agents", "zcode", "bundled", "plugin", "remote"]).optional(),
+    qualifiedName: nonEmptyString.optional(),
+    whenToUse: z.string().optional(),
   })
   .strict();
 export type ZCodeSkillReferenceCatalogEntry = z.infer<typeof zcodeSkillReferenceCatalogEntrySchema>;
@@ -3178,6 +3184,9 @@ export const zcodeSkillsReferenceCatalogResultSchema = z
   .object({
     authority: z.enum(["session", "workspace"]),
     skills: z.array(zcodeSkillReferenceCatalogEntrySchema),
+    // additive optional：去重前发现总数（SkillLoadOutcome.totalDiscovered），
+    // 供 /skill 列表与诊断文案对齐；老服务端不发时退回 skills.length。
+    totalDiscovered: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type ZCodeSkillsReferenceCatalogResult = z.infer<

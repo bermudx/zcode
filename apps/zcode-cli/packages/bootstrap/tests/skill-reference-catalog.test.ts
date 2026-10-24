@@ -59,8 +59,12 @@ describe("skills/referenceCatalog protocol", () => {
           path: "/workspace/.zcode/skills/frozen/SKILL.md",
           scope: "workspace",
           enabled: true,
+          // additive 元数据：瘦客户端 /skill 还原 contracts 显示面。
+          nativeScope: "project",
+          source: "zcode",
         },
       ],
+      totalDiscovered: 1,
     });
     expect(() => zcodeSkillsReferenceCatalogResultSchema.parse(result)).not.toThrow();
   });
@@ -97,12 +101,16 @@ describe("skills/referenceCatalog protocol", () => {
       );
 
       expect(result.authority).toBe("workspace");
+      // totalDiscovered 是过滤前发现数（含不上面板的 bundled），不小于列表长度。
+      expect(result.totalDiscovered).toBeGreaterThanOrEqual(result.skills.length);
       expect(result.skills).toContainEqual(
         expect.objectContaining({
           name: "manual-added",
           description: "Added outside the app.",
           scope: "workspace",
           enabled: true,
+          nativeScope: "project",
+          source: "zcode",
         }),
       );
       expect(() => zcodeSkillsReferenceCatalogResultSchema.parse(result)).not.toThrow();

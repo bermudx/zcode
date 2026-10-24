@@ -47,6 +47,7 @@ function toResult(
     skills: outcome.skills
       .filter((skill) => skill.source !== "bundled")
       .map(toReferenceCatalogEntry),
+    totalDiscovered: outcome.totalDiscovered,
   };
 }
 
@@ -62,5 +63,9 @@ function toReferenceCatalogEntry(skill: SkillMetadata): ZCodeSkillReferenceCatal
     scope,
     enabled: true,
     ...(skill.pluginName ? { pluginName: skill.pluginName } : {}),
+    nativeScope: skill.scope,
+    source: skill.source,
+    ...(skill.qualifiedName ? { qualifiedName: skill.qualifiedName } : {}),
+    ...(skill.whenToUse ? { whenToUse: skill.whenToUse } : {}),
   };
 }
