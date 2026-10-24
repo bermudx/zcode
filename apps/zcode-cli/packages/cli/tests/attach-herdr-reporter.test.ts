@@ -213,21 +213,73 @@ test("seq is strictly increasing even within the same millisecond", () => {
   }
 });
 
-test("exec failures are swallowed and routed to onError, never thrown", async () => {
+test("exec failures are swallowed and routed to onError once per report, never thrown", async () => {
   const failures: unknown[] = [];
-  let fail = true;
-  const exec: HerdrExec = () =>
-    fail ? Promise.reject(new Error("herdr gone")) : Promise.resolve();
+  const exec: HerdrExec = () => Promise.reject(new Error("herdr gone"));
   const reporter = createAttachHerdrReporter({
     env: HERDR_ENV,
     exec,
     onError: (error) => failures.push(error),
+    retry: { attempts: 2, backoffMs: [1] },
   })!;
   const session = fakeSession("s1");
   reporter.bind(session);
   session.emit(makeEvent(SessionEventType.TurnStarted));
-  await new Promise((resolve) => setImmediate(resolve));
+  await reporter.settled();
   assert.equal(failures.length, 2);
   assert.equal((failures[0] as Error).message, "herdr gone");
-  fail = false;
+});
+
+test("a failing report retries the identical argv and then lands", async () => {
+  const calls: CapturedCall[] = [];
+  let failuresLeft = 2;
+  const exec: HerdrExec = (bin, args) => {
+    calls.push({ bin, args: [...args] });
+    if (failuresLeft > 0) {
+      failuresLeft -= 1;
+      return Promise.reject(new Error("spawn timeout"));
+    }
+    return Promise.resolve();
+  };
+  const reporter = createAttachHerdrReporter({
+    env: HERDR_ENV,
+    exec,
+    retry: { attempts: 3, backoffMs: [1, 1] },
+  })!;
+  reporter.bind(fakeSession("s1"));
+  await reporter.settled();
+  assert.equal(calls.length, 3);
+  // 重试复用入队时的整份 argv（含 seq）：seq 只在入队时分配。
+  assert.deepEqual(calls[1]!.args, calls[0]!.args);
+  assert.deepEqual(calls[2]!.args, calls[0]!.args);
+  assert.equal(stateOf(calls[2]!), "idle");
+});
+
+test("heartbeat re-asserts the last state only after a session is bound", async () => {
+  const { exec, calls } = recordedExec();
+  const reporter = createAttachHerdrReporter({
+    env: HERDR_ENV,
+    exec,
+    retry: { heartbeatMs: 5 },
+  })!;
+  // 未绑定会话前不心跳：无 session ref 的 state 上报会清掉 pane 会话归属。
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls.length, 0);
+
+  const session = fakeSession("s1");
+  reporter.bind(session);
+  session.emit(makeEvent(SessionEventType.TurnStarted));
+  calls.length = 0;
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.ok(calls.length >= 1, "heartbeat should have re-asserted");
+  // 心跳重申的是最近一次状态，且照常携带 session ref。
+  const states = calls.map(stateOf);
+  assert.ok(states.every((state) => state === "working"));
+  const beat = calls[0]!;
+  assert.equal(beat.args[beat.args.indexOf("--agent-session-id") + 1], "s1");
+  const seqs = calls.map(seqOf);
+  for (let i = 1; i < seqs.length; i++) {
+    assert.ok(seqs[i]! > seqs[i - 1]!, `seq ${seqs[i]} not > ${seqs[i - 1]}`);
+  }
+  await reporter.stop();
 });

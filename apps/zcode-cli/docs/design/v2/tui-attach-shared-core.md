@@ -513,10 +513,26 @@ resume 命令指向 `zcode --resume`。
    - 复用 core：已存在的 core 保留 spawn 时的 env（含旧 HERDR_*
      或无标记），客户端不补写；行为由 herdr 侧冲突拒绝兜底。
 
-   上报本身 best-effort：`execFile` 参数数组（不经 shell）、2s 超
-   时、stdio 全丢、失败静默（不污染协议 stdout；`--verbose` 时写
-   stderr）。`--seq` 用进程内单调递增（epoch-ms × 1000 + 计数器），
-   重启/重绑不会回退。
+   上报本身 best-effort，但必须收敛：herdr 把自定义 source（`piz`）
+   当永不过期的状态权威，丢一条 `working` 会让整个回合错报
+   idle/done（2026-10-24 实测：队列续接回合的 TurnStarted 上报丢失，
+   herdr 错报 idle 约 9 分钟直到下一回合边界）。`execFile` 参数数组
+   （不经 shell）、2s 超时、stdio 全丢、不污染协议 stdout。可靠性
+   三件套：
+
+   - **同步首发 + 有界重试**：每条上报首次尝试同步发出（保持
+     bind/事件即发的契约），失败后按 250ms/1500ms 退避最多 3 次尝
+     试。重试晚到无碍乱序：`--seq` 在入队时分配（进程内单调递增，
+     epoch-ms × 1000 + 计数器，重启/重绑不回退），herdr 对同
+     source 非递增 seq 直接丢弃（`hook_report_is_newer`），旧状态
+     不会覆盖新状态，无需客户端跨上报排队。
+   - **心跳重申**：30s（unref）定时器重发最近一次状态——任意一条
+     上报彻底丢失（重试全败/服务端丢弃）后，陈旧状态最多存活到下
+     一跳；未绑定会话前不心跳（无 session ref 的上报会清 pane 会话
+     归属）。
+   - **常开诊断**：重试耗尽才回调 onError（每条失败上报一次，不再
+     逐尝试报）；attach 入口无条件接线，stderr 输出按 ≥60s 节流
+     （TUI 下偶发一行可接受，不再仅 `--verbose`）。
 
 ### 验收
 
@@ -531,3 +547,5 @@ resume 命令指向 `zcode --resume`。
   不进仓库代码路径。
 - 上报单测：env gate、事件→状态映射、绑定 resume argv、seq 单调、
   进程调用参数数组（含 `--agent-session-id`、尾部 `--` 分隔）。
+- 上报可靠性单测：单条失败重试后成功且重试复用同一 argv/seq、重试
+  耗尽只回调一次 onError、心跳仅在绑定后重申最近状态。

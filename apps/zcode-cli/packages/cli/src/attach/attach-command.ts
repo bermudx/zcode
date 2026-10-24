@@ -37,6 +37,22 @@ import {
 } from "./attach-tui-options.js";
 import { createAttachHerdrReporter } from "./herdr-reporter.js";
 
+/** herdr 上报诊断：常开但 ≥60s 节流一行 stderr。TUI 全屏模式下偶发
+ *  一行可接受，herdr 长时间不可用时也不至刷屏。 */
+const createHerdrDiagnosticWriter = (
+  stderr: { write(chunk: string): unknown },
+): ((error: unknown) => void) => {
+  let lastWrittenAt = 0;
+  return (error) => {
+    const now = Date.now();
+    if (now - lastWrittenAt < 60_000) return;
+    lastWrittenAt = now;
+    stderr.write(
+      `herdr report failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  };
+};
+
 /**
  * 解析 attach 入口的会话选择目标：
  *   - 无 resume 意图 → undefined（调用方走 session/create，开新会话）
@@ -175,16 +191,13 @@ export const runAttachCommand = async (
     });
     // herdr reporter：必须在 createAttachPromptHandler 注册首个句柄前挂好
     // onSessionBound，才能收到初始绑定（否则 pane 无 session/resume 元数据）。
+    // 诊断常开（reporter 重试耗尽才回调），stderr 按 ≥60s 节流——herdr 长
+    // 时间不可用时心跳级失败不至于刷屏 TUI；不再仅 --verbose。
     const herdrReporter =
       attachHerdrAgent === "piz"
         ? createAttachHerdrReporter({
             env,
-            onError: options.verbose
-              ? (error) =>
-                  ctx.stderr.write(
-                    `herdr report failed: ${error instanceof Error ? error.message : String(error)}\n`,
-                  )
-              : undefined,
+            onError: createHerdrDiagnosticWriter(ctx.stderr),
           })
         : undefined;
     if (herdrReporter) {
