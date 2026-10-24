@@ -27,11 +27,19 @@ mise exec -- pnpm typecheck
 mise exec -- pnpm lint
 mise exec -- pnpm architecture:check --changed
 mise exec -- pnpm --dir apps/zcode-cli typecheck
-mise exec -- pnpm --dir apps/zcode-cli lint
+npm_execpath="$(ls -d ~/.local/share/pnpm/.tools/pnpm/10.33.2/node_modules/pnpm/bin/pnpm.cjs)" \
+  mise exec -- pnpm --dir apps/zcode-cli lint
 mise exec -- pnpm --dir apps/zcode-cli --filter @zcode/tui-pi test
 mise exec -- pnpm --dir apps/zcode-cli --filter @zcode/adapters exec vitest run tests/client-request-signing.test.ts
 mise exec -- pnpm --dir apps/zcode-cli --filter @zcode/bootstrap exec vitest run tests/socket-listener.test.ts
 ```
+
+`pnpm --dir apps/zcode-cli lint` (run-cli-lint.mjs) spawns
+`node "$npm_execpath" exec oxlint`; under mise `npm_execpath` resolves to the
+ELF binary and the spawn fails with a SyntaxError before any package runs.
+Point it at the real JS entry (`pnpm/bin/pnpm.cjs` under
+`~/.local/share/pnpm/.tools/pnpm/<ver>/`) as above — verified 2026-10-24,
+0 errors / 71 upstream warnings.
 
 Rebuild changed dependency packages before consumer typechecks when checks use
 dist declarations. Do not suppress missing-export errors; determine whether
