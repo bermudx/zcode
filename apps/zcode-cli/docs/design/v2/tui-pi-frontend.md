@@ -91,10 +91,38 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - 每条 Message/Part 映射一个 `Component`：`Markdown`（agent 文本）、`Text`
   （user/system/timeline/thought）、自定义 `ToolRowComponent`（状态图标 + 名称 +
   详情 + 错误 + diff，`invalidate` + `requestRender` 驱动流式更新）。
-- 状态行：mode | model | thoughtLevel | status | ctx；`busy` 时 Composer 旁挂
-  `Loader`，busy 不锁输入（steer 语义经 `sendInput` `delivery:"auto"`）。
-  mode 显示协作模式（来自快照 `settings.mode.current`，plan 覆盖期间为
-  `plan`，见 tui-mode-switching.md 与 tui-attach-shared-core.md）。
+- 状态行：mode | model | thoughtLevel | busy? | status，随后一段空格分隔的
+  用量簇（pi-mono 页脚形态）：`↑{input} ↓{output} R{cacheRead} CH{hit}%
+  {ctxPct}%/{ctxWindow} agents:{n}`。
+  - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
+    维护的 session 累计：主会话 `ModelComplete` 的单请求 `ModelUsage`
+    逐次折入（`isMainSessionEvent` 门控），`turn_complete` /
+    `submitPrompt` 结果携带的权威 `ModelUsageSummary` 整段采信（替换
+    非累加，自愈漂移）。`state.usage` 在 turn 内被单请求口径覆盖，不能
+    直接显示为累计。
+  - `R` 为累计 `cacheReadTokens`（与 pi-mono footer 同字段语义）。
+  - `CH` 取 `ModelComplete.payload.cacheHit.latestHitRate`（最近一次请求的
+    命中口径，即 pi 的 `latestCacheHitRate`；0–1 小数，渲染成一位小数百分比）。
+    事件缺 `cacheHit` 时回退 session 累计口径 `cacheRead/input`（与 React
+    sidebar `cacheHitLabel` 同一公式），两者皆缺则不显示该段。
+  - `ctx` 段为 `contextUsage.contextUsed / contextWindow`：窗口在时渲染
+    `{pct}%/{compact(window)}`，仅有 contextUsed 时降级为 `ctx {compact}`。
+  - `agents:{n}` 在 running 子代理数 > 0 时追加（见下方目录段）。
+  - 不显示 `$`：契约不含模型定价来源，虚拟成本数字宁可缺省；plan 额度
+    读数属独立的 provider-balance 方向，不在本段伪造。
+  - 紧凑计数与 pi-mono `formatTokens` 等值：<1k 原值、<10k 一位小数 `k`、
+    <1M 整数 `k`、<10M 一位小数 `M`、否则整数 `M`。
+  `busy` 时 Composer 旁挂 `Loader`，busy 不锁输入（steer 语义经 `sendInput`
+  `delivery:"auto"`）。mode 显示协作模式（来自快照 `settings.mode.current`，
+  plan 覆盖期间为 `plan`，见 tui-mode-switching.md 与 tui-attach-shared-core.md）。
+- 子代理目录：`SubagentDirectory`（`tui-pi/src/subagents.ts`）把
+  `options.readSubagents` 的快照收敛进 `store.state.subagents`，是目录的唯一
+  owner——组件只读 store，不各自拉取副本。刷新触发与 React 端
+  `useSubagents` 同规约：`changesSubagentDirectory`（已剥离 subagent tool
+  mirror）+ `ToolCallResult` 仅主会话；并发去重用 dirty + in-flight 循环；
+  结果落地前用 epoch（reset/dispose 递增）与 `getMainSessionId` 父会话比对
+  双重守卫丢弃过期快照。会话投影重置（`resetSessionProjection`）时清空目录。
+  `readSubagents` 端口缺失（非 attach / 未接线）时整体静默缺省。
 - `submitPrompt` / `sendInput` 分支语义与 `app-submit.ts` 相同：空闲→
   `submitPrompt`；`busy`→`sendInput`，queued → 队列区（`TurnSteerQueued`/
   `Drained`/`Discarded` 同步），rejected → status 提示。本地 user row 乐观追加，
@@ -121,7 +149,9 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - 信息面板：Ctrl+X leader 复用 `resolveSidebarShortcut`（Ctrl+X → B 开/关），
   `SessionInfoPanel` 经 `tui.showOverlay` 右栏呈现：mode/model/thought、ctx、
   token 用量、最近事件、todos、修改文件、subagents（running/ended）、MCP
-  servers、最近网络请求；Esc 关闭。
+  servers、最近网络请求；Esc 关闭。subagents 段渲染 `store.state.subagents`
+  （`SubagentDirectory` 为唯一 owner），面板打开时主动触发 refresh 并经 store
+  变更通知获得活体更新；MCP servers 无事件源，仍为打开时一次性拉取。
 
 ## `!` 本地 shell 逃逸
 
