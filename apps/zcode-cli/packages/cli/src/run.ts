@@ -73,6 +73,8 @@ const SOCKET_STDIO_CONFLICT_ERROR = "--socket cannot be used with --stdio.";
 const SOCKET_PREPARE_STORAGE_ERROR = "--socket cannot be used with --prepare-storage.";
 const SHARED_CORE_SCOPE_ERROR =
   "--shared-core can only be used with tui (or the zcode attach alias).";
+const MODEL_SCOPE_ERROR =
+  "--model can only be used with tui --shared-core (or the zcode attach alias).";
 
 const pluginsCommandFlags = (
   values: ReturnType<typeof parseGlobalArgs>["values"],
@@ -541,6 +543,18 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
     ctx.stderr.write(`${SHARED_CORE_SCOPE_ERROR}\n`);
     return 1;
   }
+  // --model 仅 attach（tui --shared-core / zcode attach / zcode-attach）可用：
+  // monolith tui 与 headless prompt 没有启动期模型覆盖链路，静默忽略比报错更糟。
+  if (
+    parsed.values.model !== undefined &&
+    (typeof parsed.values.prompt === "string" ||
+      parsed.values.target !== undefined ||
+      parsed.values["shared-core"] !== true ||
+      commandName(parsed.positionals) !== "tui")
+  ) {
+    ctx.stderr.write(`${MODEL_SCOPE_ERROR}\n`);
+    return 1;
+  }
 
   if (parsed.values.help === true) {
     writeHelp(ctx.stdout, options.locale, options.detectedLocale);
@@ -735,6 +749,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
           version,
           tuiFrontend,
           resumeRequest,
+          parsed.values.model as string | undefined,
         );
       }
       return await runTuiCommand(

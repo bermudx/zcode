@@ -3,8 +3,7 @@
 // 插件机制，单独 bundle 把每客户端 RSS 压到探针目标内。
 // core 缺失时仍由 attach-command 经 PATH `zcode`（或 ZCODE_SERVER_BIN）拉起。
 import { runAttachCommand } from "./attach-command.js";
-import type { GlobalOptions } from "@zcode/shared-types";
-import type { CliResumeRequest } from "../cli-types.js";
+import { parseAttachEntryArgs } from "./attach-entry-args.js";
 
 declare const __CLI_VERSION__: string;
 
@@ -14,7 +13,7 @@ const usage = `zcode-attach — pi-tui thin client for a shared ZCode core
 
 Usage:
   zcode-attach [--locale <en-US|zh-CN|auto>] [--no-color] [--verbose]
-               [-c|--continue] [--resume <sessionId>]
+               [-c|--continue] [--resume <sessionId>] [--model <provider/model>]
                [--version] [-h|--help]
 
 Session selection (same semantics as the main CLI):
@@ -22,43 +21,21 @@ Session selection (same semantics as the main CLI):
   -c/--continue   resume the most recent session of this workspace
   --resume <id>   resume a specific session
 
+Model selection:
+  --model <provider/model>  start the session on this model; a bare model
+                            id works when it matches exactly one provider,
+                            and a $effort suffix is supported (same as /model)
+
 Environment:
   ZCODE_SERVER_BIN   core 二进制（缺省 PATH 里的 zcode），core 不存在时
                      由 ensureServer 用它 spawn --socket --no-plugins。
 `;
 
-const parseArgs = (argv: string[]): {
-  options: GlobalOptions;
-  action?: "help" | "version";
-  resume: CliResumeRequest;
-} => {
-  const options: GlobalOptions = { force: false, json: false, noColor: false, verbose: false };
-  const resume: CliResumeRequest = { continueSession: false };
-  let action: "help" | "version" | undefined;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--locale") {
-      options.locale = argv[++i] as GlobalOptions["locale"];
-    } else if (arg === "--no-color") {
-      options.noColor = true;
-    } else if (arg === "--verbose") {
-      options.verbose = true;
-    } else if (arg === "-c" || arg === "--continue") {
-      resume.continueSession = true;
-    } else if (arg === "--resume") {
-      resume.resumeSessionId = argv[++i];
-    } else if (arg === "--version" || arg === "-v") {
-      action = "version";
-    } else if (arg === "--help" || arg === "-h") {
-      action = "help";
-    }
-  }
-  return { action, options, resume };
-};
-
 const main = async (): Promise<number> => {
   process.title = ATTACH_PROCESS_NAME;
-  const { action, options, resume } = parseArgs(process.argv.slice(2));
+  const { action, initialModel, options, resume } = parseAttachEntryArgs(
+    process.argv.slice(2),
+  );
   if (action === "help") {
     process.stdout.write(usage);
     return 0;
@@ -79,6 +56,7 @@ const main = async (): Promise<number> => {
     __CLI_VERSION__,
     "pi",
     resume,
+    initialModel,
     "piz",
   );
 };

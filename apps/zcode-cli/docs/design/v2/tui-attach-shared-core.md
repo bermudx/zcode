@@ -261,6 +261,31 @@ resume 成功时 `restoredMessages` 作为 `initialResult` 交给
 `session/create`。同一 workspace 多个 pane 在 `-c` 下 attach 到
 同一会话，事件经 core fan-out 同步。
 
+### 启动模型选择（--model）
+
+`--model <ref>` 让会话在启动时即落在指定模型上，而不是进入 TUI 后
+再 Ctrl+P 轮换或 `/model` 挑选。作用域：仅 `tui --shared-core`（含
+`zcode attach` 别名）与瘦客户端 `zcode-attach`（piz）；monolith tui
+与 headless prompt 不接受该旗标（run.ts 作用域报错，同
+`--shared-core` 惯例）。
+
+- **应用点**：attach 客户端在 `session/create`/`session/resume` 返回
+  快照、`subscribe` 完成后、`runTui` 之前，调用既有
+  `AttachSessionHandle.setModel`（`session/setModel` mutation）。不新造
+  协议路径：`session/create` 虽有 `model` 参数，但 resume 无对应参数、
+  且客户端目录校验（未知模型报错并列出可用项）只能在拿到快照目录后
+  做——统一走 setModel 一条链路，Ctrl+P/`/model`/`--model` 共享校验
+  与状态合并语义。
+- **取值**：`provider/model` 完整 ref（支持 `$effort` 档位后缀，同
+  `/model` 参数）；bare modelId 在目录中唯一命中时自动补全 provider，
+  多命中或零命中时报错并列出可用完整 ref。模型校验复用
+  `resolveTuiModelSelection`（目录精确匹配 + 默认档位）。
+- **resume 语义**：`-c`/`--resume` 携带 `--model` 时对恢复的会话执行
+  同一 setModel——启动覆盖是每次调用一次性事实。
+- **失败**：校验失败在 TUI 接管屏幕前以 stderr 报错、退出码 1。
+- **不做**：不写客户端默认模型偏好（交互 `/model` 会记忆默认选型；
+  一次性旗标不改变持久偏好），不改协议 schema、不改服务端。
+
 ### 模型状态同步（mutation 快照 / state.updated）
 
 legacy `session/setModel`/`setThoughtLevel`/`setMode` 与订阅事件不同源：

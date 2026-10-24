@@ -9,6 +9,7 @@ import {
   resolveZCodeRuntimeEnv,
   zcodeProtocolMethods,
   zcodeSessionStateSnapshotSchema,
+  type ZCodeModelOption,
 } from "@zcode/shared";
 import type { GlobalOptions, RunContext } from "@zcode/shared-types";
 import type { TuiSubmitPromptResult } from "@zcode/tui";
@@ -89,6 +90,9 @@ export const runAttachCommand = async (
   version: string,
   tuiFrontend: CliTuiFrontend = "pi",
   resumeRequest?: CliResumeRequest,
+  // `--model <ref>`：会话物化后、TUI 接管前应用启动模型（create/resume
+  // 均适用）。校验复用 setModel 的目录链路，见 resolveInitialModelRef。
+  initialModel?: string,
   // "piz" 仅 zcode-attach 专用入口（attach-main）传：进程名/产品即 piz，
   // herdr reporter 报 --agent piz。monolith 入口进程是 zcode，不传。
   attachHerdrAgent?: "piz",
@@ -185,6 +189,24 @@ export const runAttachCommand = async (
         snapshot,
       });
       await handle.subscribe(undefined, false);
+      // --model：Ctrl+P//model 同一条 setModel 链路，仅在启动期执行一次；
+      // 失败必须在 TUI 接管屏幕前暴露（stderr + 退出码 1）。
+      if (initialModel !== undefined) {
+        if (initialModel.trim() === "") {
+          throw new Error("--model requires a non-empty value");
+        }
+        try {
+          await handle.setModel(
+            resolveInitialModelRef(
+              initialModel,
+              handle.snapshot.settings.model.available,
+            ),
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`--model: ${message}`);
+        }
+      }
       const promptHandler = createAttachPromptHandler({
         client,
         initialHandle: handle,
@@ -305,3 +327,37 @@ export const runAttachCommand = async (
     return error instanceof AttachProtocolVersionError ? 2 : 1;
   }
 };
+
+/** `--model` 取值归一：bare modelId 在目录唯一命中时补全 provider，
+ *  完整 ref（含 `$effort` 后缀）原样交给 setModel 的目录校验
+ *  （resolveTuiModelSelection）。零/多命中都抛可操作错误——启动旗标
+ *  被静默忽略比失败更糟。 */
+export function resolveInitialModelRef(
+  value: string,
+  available: readonly ZCodeModelOption[],
+): string {
+  const trimmed = value.trim();
+  if (trimmed.includes("/")) return trimmed;
+  const enabled = available.filter(
+    (option) => !option.disabledReason && option.ref.modelId === trimmed,
+  );
+  if (enabled.length === 1) {
+    return `${enabled[0].ref.providerId}/${enabled[0].ref.modelId}`;
+  }
+  const refs = available
+    .filter((option) => !option.disabledReason)
+    .map((option) => `${option.ref.providerId}/${option.ref.modelId}`);
+  if (enabled.length > 1) {
+    const candidates = enabled
+      .map((option) => `${option.ref.providerId}/${option.ref.modelId}`)
+      .join(", ");
+    throw new Error(
+      `"${trimmed}" matches multiple providers: ${candidates}. Use the full provider/model ref.`,
+    );
+  }
+  throw new Error(
+    `"${trimmed}" is not available. Available models: ${
+      refs.length > 0 ? refs.join(", ") : "(none)"
+    }. Use the full provider/model form for exact matching.`,
+  );
+}
