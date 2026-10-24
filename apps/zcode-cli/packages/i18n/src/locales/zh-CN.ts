@@ -47,6 +47,7 @@ export const zhCN: ZCodeCopy = {
   --force-mcs      对 Anthropic provider 强制启用 mid-conversation system 投影
   --locale <locale>  UI 语言：en-US、zh-CN 或 auto
   --mode <mode>    prompt 权限模式：build、edit、plan、yolo 或 guarded（--prompt 默认 yolo）
+  --model <provider/model>  tui --shared-core（attach）启动即选用该模型；model id 唯一时可省略 provider，支持 $effort 后缀
   --resume <sessionId>  按 sessionId 恢复持久化 session（sess_...）
   --target <text>  在 headless 模式运行或设置 session goal
   --target-replace 替换 --target 已存在的 goal

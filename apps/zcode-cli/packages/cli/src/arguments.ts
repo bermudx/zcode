@@ -72,6 +72,11 @@ export const parseGlobalArgs = (argv: string[]) =>
       mode: {
         type: "string",
       },
+      // tui --shared-core（attach/piz）专用：启动即切换会话模型；
+      // 解析与目录校验在 runAttachCommand 拿到快照目录后进行。
+      model: {
+        type: "string",
+      },
       verbose: {
         type: "boolean",
       },
