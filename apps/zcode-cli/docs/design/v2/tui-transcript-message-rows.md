@@ -29,6 +29,9 @@ while assistant output stays on the regular transcript surface.
 - The row background is a TUI-only projection detail. It must not change
   persisted session messages, ZCode app-server projection, model-visible history, or
   transcript export data.
+- The pi frontend (`@zcode/tui-pi`) applies the same contract: accent `>` prompt
+  glyph, `userBg` fill across the full row width, and one background-filled row
+  of padding above and below (`MessageRow` in `tui-pi/src/rows.ts`).
 
 ## Tests
 

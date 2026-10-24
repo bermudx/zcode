@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import type { Message } from "@zcode/tui/internals";
 import { MessageRow, piMarkdownTheme } from "../src/rows.js";
 import { formatShellTranscriptRow } from "../src/shell.js";
@@ -32,8 +32,23 @@ test("long pasted user lines wrap instead of overflowing", () => {
   const lines = render({ content: LONG_SENTENCE, role: "user" }, 211);
   assertFits(lines, 211);
   assert.ok(lines.length > 1, "long user text must wrap onto multiple rows");
-  assert.ok(lines[0]!.startsWith("> "), "first row keeps the composer prefix");
-  assert.ok(lines[1]!.startsWith("  "), "continuation rows keep the hanging indent");
+  // 用户块上下各一行 bg 填充：内容行从 index 1 起。
+  assert.ok(
+    stripTerminalSequences(lines[1]!).startsWith("> "),
+    "first content row keeps the composer prefix",
+  );
+  assert.ok(
+    stripTerminalSequences(lines[2]!).startsWith("  "),
+    "continuation rows keep the hanging indent",
+  );
+});
+
+test("user rows sit on the user message background", () => {
+  const lines = render({ content: "hi", role: "user" }, 20);
+  assert.equal(lines.length, 3);
+  assert.match(lines[0]!, /\x1b\[48/, "top padding row carries the bg");
+  assert.match(lines[1]!, /\x1b\[48/, "content row is padded onto the bg");
+  assert.ok(stripTerminalSequences(lines[1]!).startsWith("> hi"));
 });
 
 test("multi-line user paste keeps every line inside the width", () => {

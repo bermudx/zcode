@@ -330,7 +330,8 @@ test("user rows hide the inline block but keep the notice", () => {
     theme,
     piMarkdownTheme(theme),
   ).render(80);
-  assert.ok(lines[0]!.startsWith("> review this"));
+  // 用户块首行是 bg 填充，内容行从 index 1 起。
+  assert.ok(lines[1]!.startsWith("> review this"));
   assert.ok(lines.some((line) => line.includes("⤷ shell output: ls (exit 2)")));
   assert.ok(!lines.some((line) => line.includes("<shell-output")));
   assert.ok(!lines.some((line) => line.includes("boom")));

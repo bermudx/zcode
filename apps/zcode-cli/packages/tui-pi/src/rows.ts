@@ -22,7 +22,7 @@ import type { PiTheme, Style } from "./theme.js";
 // the sigil that marks them belongs to the producer.
 import { SHELL_ROW_PREFIX, collapseShellContextBlocks } from "./shell.js";
 
-const USER_PREFIX = "> ";
+const USER_PREFIX_GLYPH = ">";
 const TOOL_STATUS_GLYPHS = {
   completed: "✓",
   failed: "✗",
@@ -91,22 +91,8 @@ const renderShellRow = (content: string, theme: PiTheme, width: number): string[
   ];
 };
 
-export const piMarkdownTheme = (theme: PiTheme): MarkdownTheme => ({
-  bold: theme.bold,
-  code: theme.warning,
-  codeBlock: theme.text,
-  codeBlockBorder: theme.muted,
-  heading: theme.accent,
-  hr: theme.muted,
-  italic: theme.dim,
-  link: theme.accent,
-  linkUrl: theme.muted,
-  listBullet: theme.accent,
-  quote: theme.muted,
-  quoteBorder: theme.muted,
-  strikethrough: theme.dim,
-  underline: theme.accent,
-});
+/** 终端 markdown 主题：markdown* 记号在 createPiTheme 里组装，测试经此取用。 */
+export const piMarkdownTheme = (theme: PiTheme): MarkdownTheme => theme.markdown;
 
 const truncateLines = (lines: string[], max: number, style: Style): string[] => {
   if (lines.length <= max) return lines;
@@ -302,7 +288,7 @@ export class MessageRow implements Component {
       const collapsed = collapseShellContextBlocks(text);
       const lines = wrapPrefixed({
         continuation: "  ",
-        prefix: USER_PREFIX,
+        prefix: `${theme.accent(USER_PREFIX_GLYPH)} `,
         style: theme.text,
         text: collapsed.text,
         width,
@@ -316,7 +302,14 @@ export class MessageRow implements Component {
           width,
         }));
       }
-      return lines.length > 0 ? lines : [theme.accent(USER_PREFIX)];
+      if (lines.length === 0) lines.push(`${theme.accent(USER_PREFIX_GLYPH)} `);
+      // userBg 整行垫底 + 上下各一行 bg 填充：React 前端的
+      // backgroundMessageUser 行 + 纵向 padding 的同形处理
+      // （tui-transcript-message-rows.md），让用户回合在转写里立块可辨。
+      const bgPad = theme.userBg(" ".repeat(Math.max(0, width)));
+      const padded = (line: string): string =>
+        theme.userBg(`${line}${" ".repeat(Math.max(0, width - visibleWidth(line)))}`);
+      return [bgPad, ...lines.map(padded), bgPad];
     }
 
     if (message.role === "system" && message.content.startsWith(SHELL_ROW_PREFIX)) {
