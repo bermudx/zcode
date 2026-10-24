@@ -14,14 +14,12 @@ export function formatTokens(count: number): string {
   return `${Math.round(count / 1e6)}M`;
 }
 
-/** 整行组装：mode | model | thought | busy? | status | 用量簇。 */
+/** 整行组装：mode | model | thought | 用量簇。busy/status 由 footer 活动行承载。 */
 export function formatStatusLine(s: AppStore["state"]): string {
   const parts: string[] = [];
   if (s.mode) parts.push(`mode:${s.mode}`);
   if (s.model) parts.push(s.model.split("/").pop() ?? s.model);
   if (s.thoughtLevel) parts.push(`thought:${s.thoughtLevel}`);
-  if (s.busy) parts.push("busy");
-  if (s.status) parts.push(s.status);
   const cluster = formatUsageCluster({
     usageTotals: s.usageTotals,
     contextUsage: s.contextUsage,

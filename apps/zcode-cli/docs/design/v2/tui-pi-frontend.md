@@ -99,9 +99,19 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - 每条 Message/Part 映射一个 `Component`：`Markdown`（agent 文本）、`Text`
   （user/system/timeline/thought）、自定义 `ToolRowComponent`（状态图标 + 名称 +
   详情 + 错误 + diff，`invalidate` + `requestRender` 驱动流式更新）。
-- 状态行：mode | model | thoughtLevel | busy? | status，随后一段空格分隔的
-  用量簇（pi-mono 页脚形态）：`↑{input} ↓{output} R{cacheRead} CH{hit}%
-  {ctxPct}%/{ctxWindow} agents:{n}`。
+- Footer 恒定两行（statusBox 恒挂两个单行组件，高度不随 busy 变化，挂载/
+  卸载 spinner 不再把整屏内容顶起/落下）：
+  - 活动行（`ActivityLine`，`tui-pi/src/footer.ts`，Loader 单行形态）：
+    busy 或 `activeTurnId` 在场时动画 spinner + `status`（status 为空回退
+    `input.activeStatusHint`，"esc to interrupt"，与 React 前端同文案）；
+    空闲时 spinner 位留空格对齐、显示 `status` 或留白。`activeTurnId` 并入
+    活动判定与 `quitChoice.turnBusy` 同口径——attach 会话远端发起的
+    turn 也可见 spinner。
+  - meta 行（`MetaLine`，Text 单行形态）：`mode | model | thoughtLevel` 后
+    接一段空格分隔的用量簇（pi-mono 页脚形态）：`↑{input} ↓{output}
+    R{cacheRead} CH{hit}% {ctxPct}%/{ctxWindow} agents:{n}`。
+  - 两行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
+    status 也不会把 footer 撑过两行。
   - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
     维护的 session 累计。契约没有 session 级权威用量源——`turn_complete`
     / `submitPrompt` 结果的 `usage` 都是 `createModelUsageSummaryFromEvents`
@@ -124,7 +134,7 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     读数属独立的 provider-balance 方向，不在本段伪造。
   - 紧凑计数与 pi-mono `formatTokens` 等值：<1k 原值、<10k 一位小数 `k`、
     <1M 整数 `k`、<10M 一位小数 `M`、否则整数 `M`。
-  `busy` 时 Composer 旁挂 `Loader`，busy 不锁输入（steer 语义经 `sendInput`
+  `busy`/`activeTurnId` 时活动行 spinner 转动；busy 不锁输入（steer 语义经 `sendInput`
   `delivery:"auto"`）。mode 显示协作模式（来自快照 `settings.mode.current`，
   plan 覆盖期间为 `plan`，见 tui-mode-switching.md 与 tui-attach-shared-core.md）。
 - 子代理目录：`SubagentDirectory`（`tui-pi/src/subagents.ts`）把

@@ -4,8 +4,6 @@
 
 import {
   Container,
-  Loader,
-  Text,
   isKeyRelease,
   matchesKey,
   type OverlayHandle,
@@ -48,6 +46,7 @@ import {
   workflowRunSeedFromSummary,
   type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
+import { ACTIVITY_IDLE_INDICATOR, ActivityLine, MetaLine } from "./footer.js";
 import { Composer } from "./composer.js";
 import { PiDraftAttachments } from "./attachments.js";
 import { PiImagePaste } from "./image-paste.js";
@@ -94,8 +93,8 @@ export class PiTuiApp {
   private readonly interaction = new Container();
   private readonly composerBox = new Container();
   private readonly statusBox = new Container();
-  private readonly statusLine: Text;
-  private readonly loader: Loader;
+  private readonly activity: ActivityLine;
+  private readonly metaLine: MetaLine;
   private readonly editor: Composer;
   private readonly rows: MessageRow[] = [];
   private readonly mdTheme;
@@ -122,7 +121,7 @@ export class PiTuiApp {
   private workflowCard: WorkflowCard;
   private infoOverlay: OverlayHandle | undefined;
   private readonly sidebarShortcut = createSidebarShortcutState();
-  private loaderMounted = false;
+  private activityActive = false;
   private startupApplied = false;
   private readonly history: PiInputHistory;
   /** 子代理目录唯一 owner；组件只读 store。 */
@@ -175,12 +174,12 @@ export class PiTuiApp {
     store.set("modelOptions", [...(this.options.modelOptions ?? [])]);
     store.set("effortOptions", [...(this.options.effortOptions ?? [])]);
 
-    this.statusLine = new Text("", 1, 0);
-    this.loader = new Loader(this.tui, this.theme.accent, this.theme.muted, "");
-    // pi-tui 的 Loader 在构造时经 setIndicator→start() 就启动常驻 setInterval，
-    // 不挂载也会一直 tick 并阻止进程退出——先停掉，busy 挂载时由
-    // syncBusyIndicator 调 start() 重新启动。
-    this.loader.stop();
+    this.metaLine = new MetaLine("", 1, 0);
+    this.activity = new ActivityLine(this.tui, this.theme.accent, this.theme.muted, "");
+    // pi-tui 的 Loader 在构造时经 setIndicator→start() 就启动常驻 setInterval：
+    // footer 恒定挂载形态下立刻用空闲指示接管——帧数 ≤1 不启动定时器，
+    // 否则空转 tick 会阻止进程退出。
+    this.activity.setIndicator(ACTIVITY_IDLE_INDICATOR);
 
     this.editor = new Composer(this.tui, this.theme, {
       options: this.options,
@@ -213,7 +212,8 @@ export class PiTuiApp {
     this.editor.onChange = () => this.history.onEditorChange();
 
     this.composerBox.addChild(this.editor);
-    this.statusBox.addChild(this.statusLine);
+    this.statusBox.addChild(this.activity);
+    this.statusBox.addChild(this.metaLine);
 
     this.tui.addChild(this.transcript);
     this.workflowCard = new WorkflowCard(this.workflowMirror, this.theme);
@@ -249,7 +249,7 @@ export class PiTuiApp {
     this.tui.setFocus(this.editor);
     this.subagents.refresh();
     this.refreshPanels();
-    this.updateStatusLine();
+    this.updateFooter();
   }
 
   /* ---------- startup ---------- */
@@ -281,7 +281,7 @@ export class PiTuiApp {
     if (startup.slashCommands) this.options.slashCommands = startup.slashCommands;
     if (startup.skillSuggestions) this.options.skillSuggestions = startup.skillSuggestions;
     if (startup.slashCommands || startup.skillSuggestions) this.editor.refreshAutocomplete();
-    this.updateStatusLine();
+    this.updateFooter();
     void this.seedWorkflowRuns();
   }
 
@@ -492,10 +492,7 @@ export class PiTuiApp {
       draftAttachments,
       options: this.submitPipeline(),
       requestPermission: this.requestPermission,
-      setBusy: (v) => {
-        store.set("busy", v);
-        this.syncBusyIndicator();
-      },
+      setBusy: (v) => store.set("busy", v),
       setDraftAttachments: store.setter("draftAttachments"),
       setDraftValue: (v) => this.history.setDraftValue(v),
       setLastError: (m) => store.set("lastError", m),
@@ -715,7 +712,7 @@ export class PiTuiApp {
     if (key === "messages") this.syncTranscript();
     if (key === "approvalQueue" || key === "selection" || key === "queuedInputs")
       this.refreshPanels();
-    this.updateStatusLine();
+    this.updateFooter();
     this.tui.requestRender();
   }
 
@@ -764,20 +761,22 @@ export class PiTuiApp {
     }
   }
 
-  private syncBusyIndicator(): void {
-    if (this.store.state.busy && !this.loaderMounted) {
-      this.composerBox.addChild(this.loader);
-      this.loader.start();
-      this.loaderMounted = true;
-    } else if (!this.store.state.busy && this.loaderMounted) {
-      this.loader.stop();
-      this.composerBox.removeChild(this.loader);
-      this.loaderMounted = false;
+  /**
+   * Footer 恒定两行：活动行（spinner + status）与 meta 行（mode/model/
+   * thought/用量簇）都常驻 statusBox，只换内容不换结构。活动判定与
+   * quitChoice.turnBusy 同口径（busy 或前台 activeTurnId），attach 会话的
+   * 远端 turn 也能转 spinner；指示切换只在 busy 沿变化时发生，空闲指示
+   * 帧数 ≤1，idle 下没有帧定时器空转。
+   */
+  private updateFooter(): void {
+    const s = this.store.state;
+    const active = s.busy || s.activeTurnId !== undefined;
+    if (active !== this.activityActive) {
+      this.activityActive = active;
+      this.activity.setIndicator(active ? undefined : ACTIVITY_IDLE_INDICATOR);
     }
-  }
-
-  private updateStatusLine(): void {
-    this.statusLine.setText(` ${this.theme.muted(formatStatusLine(this.store.state))}`);
+    this.activity.setMessage(s.status || (active ? this.copy.input.activeStatusHint : ""));
+    this.metaLine.setText(this.theme.muted(formatStatusLine(s)));
   }
 
   /* ---------- lifecycle ---------- */
@@ -787,7 +786,7 @@ export class PiTuiApp {
     this.unsubscribeSession?.();
     this.subagents.dispose();
     this.unsubscribeConnectionStatus?.();
-    this.loader.stop();
+    this.activity.stop();
     for (const approval of this.store.state.approvalQueue) {
       approval.cleanup();
       approval.reject(new Error("TUI closed"));
