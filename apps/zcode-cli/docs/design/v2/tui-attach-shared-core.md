@@ -251,14 +251,27 @@ attach 入口的会话选择与主 CLI 同语义，不再默认 resume：
 | ------------------ | --------------------------------------------------- |
 | 默认（无旗标）     | `session/create` —— 开新会话                        |
 | `-c` / `--continue` | `session/list` 取本 workspace 最近会话 → `resume`  |
-| `--resume <id>`     | `session/resume` 指定会话                          |
+| `--resume <id>`     | 完整 id，或本 workspace 内唯一匹配的 id 前缀 → `session/resume` |
 
 之前无条件 resume 最近会话，piz 永远进旧对话、无法开新会话——
 与主 CLI（默认新会话、`-c` 才继续）相反。
 
 resume 成功时 `restoredMessages` 作为 `initialResult` 交给
-`runTui` 首帧渲染历史 transcript；list 为空或 resume 失败时退回
-`session/create`。同一 workspace 多个 pane 在 `-c` 下 attach 到
+`runTui` 首帧渲染历史 transcript。**显式 resume 意图不静默降级**
+（2026-10-24 修复：截断 id `--resume sess_99f180d5` 曾被
+`.catch(() => undefined)` 吞掉 not-found，无声开出空新会话）：
+
+- `--resume` 先对本 workspace `session/list` 做前缀解析：完整 id
+  原样通过；唯一前缀展开成完整 id；多候选报错并列出候选；无本地
+  匹配时原样透传（跨 workspace 完整 id 交给 `session/resume` 裁决）。
+  列表失败不阻断透传。
+- `session/resume` 失败（任何原因）直接抛错：stderr + exit 1，
+  不再回退 `session/create`。
+- `-c` 列表为空报 `No resumable session found for <path>`（与主
+  CLI 同语义）；`session/list` 本身失败也报错，不静默开新会话。
+- 无旗标默认路径不变：直接 `session/create`。
+
+同一 workspace 多个 pane 在 `-c` 下 attach 到
 同一会话，事件经 core fan-out 同步。
 
 ### 启动模型选择（--model）

@@ -40,12 +40,39 @@ import { createAttachHerdrReporter } from "./herdr-reporter.js";
 /**
  * 解析 attach 入口的会话选择目标：
  *   - 无 resume 意图 → undefined（调用方走 session/create，开新会话）
- *   - --resume <id>   → 该会话 id
+ *   - --resume <id>   → 完整 id；或本 workspace 内唯一匹配的 id 前缀
  *   - -c/--continue   → 本 workspace 最近一次会话
  *
  * “最近”按 updatedAt（退化 createdAt）显式取最大：server 的 session/list 返回
  * 顺序不保证（实测创建序/任意序混排），取末位会恢复到陈旧会话。
+ *
+ * 显式意图不静默降级：--resume 解析出多个候选、-c 列不出会话、或
+ * session/list 本身失败，都直接抛错（stderr + exit 1），不再无声开新会话
+ * ——操作者截断 id 恢复时曾因此进到空会话而毫无提示。
  */
+interface ListedResumeSession {
+  createdAt?: number;
+  sessionId?: string;
+  id?: string;
+  updatedAt?: number;
+}
+
+const toListedResumeSessions = (listed: unknown): ListedResumeSession[] => {
+  const wrapped = (listed ?? {}) as { sessions?: unknown };
+  return Array.isArray(wrapped.sessions) ? (wrapped.sessions as ListedResumeSession[]) : [];
+};
+
+const listedResumeSessionId = (session: ListedResumeSession): string | undefined =>
+  session.sessionId ?? session.id;
+
+const listWorkspaceSessionsForResume = async (
+  client: AttachClient,
+  workspace: { workspacePath: string; workspaceIdentity?: string; workspaceKey: string },
+): Promise<ListedResumeSession[]> => {
+  const listed = await client.request(zcodeProtocolMethods.sessionList, { workspace });
+  return toListedResumeSessions(listed);
+};
+
 export const resolveAttachResumeTarget = async ({
   client,
   continueSession,
@@ -57,26 +84,51 @@ export const resolveAttachResumeTarget = async ({
   resumeSessionId?: string;
   workspace: { workspacePath: string; workspaceIdentity?: string; workspaceKey: string };
 }): Promise<string | undefined> => {
-  if (resumeSessionId) return resumeSessionId;
-  if (!continueSession) return undefined;
-  const listed = await client
-    .request(zcodeProtocolMethods.sessionList, { workspace })
-    .catch(() => undefined);
-  const sessions = (
-    (listed ?? {}) as {
-      sessions?: Array<{
-        createdAt?: number;
-        sessionId?: string;
-        id?: string;
-        updatedAt?: number;
-      }>;
+  if (!continueSession && !resumeSessionId) return undefined;
+  if (resumeSessionId) {
+    // --resume 支持本 workspace 内唯一匹配的 id 前缀（截断 id 是真实使用形
+    // 态：sess_99f180d5 这样的短前缀曾被静默换成新会话）。列表失败不阻断：
+    // 原样透传，由 session/resume 的错误浮出真相（可能是跨 workspace 完整 id）。
+    const sessions = await listWorkspaceSessionsForResume(client, workspace).catch(
+      () => undefined,
+    );
+    if (sessions !== undefined) {
+      const ids = sessions
+        .map(listedResumeSessionId)
+        .filter((id): id is string => typeof id === "string");
+      if (ids.includes(resumeSessionId)) return resumeSessionId;
+      const prefixed = ids.filter((id) => id.startsWith(resumeSessionId));
+      if (prefixed.length === 1) return prefixed[0];
+      if (prefixed.length > 1) {
+        throw new Error(
+          `--resume "${resumeSessionId}" is ambiguous: matches ${prefixed.length} sessions (${prefixed
+            .slice(0, 5)
+            .join(", ")}${prefixed.length > 5 ? ", …" : ""}). Use a longer prefix or the full id.`,
+        );
+      }
     }
-  ).sessions;
-  const byRecency = [...(sessions ?? [])].sort(
+    return resumeSessionId;
+  }
+  // -c：显式继续意图。列表失败或空列表都报错，与主 CLI 的
+  // “No resumable session found” 同语义，不再静默开新会话。
+  const sessions = await listWorkspaceSessionsForResume(client, workspace).catch(
+    (error: unknown) => {
+      throw new Error(
+        `--continue could not list sessions for ${workspace.workspacePath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    },
+  );
+  const byRecency = [...sessions].sort(
     (a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0),
   );
   const last = byRecency[0];
-  return last?.sessionId ?? last?.id;
+  const lastId = last === undefined ? undefined : listedResumeSessionId(last);
+  if (lastId === undefined) {
+    throw new Error(`No resumable session found for ${workspace.workspacePath}`);
+  }
+  return lastId;
 };
 
 /**
@@ -156,13 +208,13 @@ export const runAttachCommand = async (
         resumeSessionId: resumeRequest?.resumeSessionId,
         workspace: workspaceRef,
       });
+      // 显式 resume 意图（-c/--resume）失败直接抛错退出（stderr + exit 1），
+      // 不再静默回退 session/create：截断 id / 已删会话曾无声变成空新会话。
       const resumedSnapshot = resumeTarget
-        ? await client
-            .request(zcodeProtocolMethods.sessionResume, {
-              sessionId: resumeTarget,
-              workspace: workspaceRef,
-            })
-            .catch(() => undefined)
+        ? await client.request(zcodeProtocolMethods.sessionResume, {
+            sessionId: resumeTarget,
+            workspace: workspaceRef,
+          })
         : undefined;
       // 握手：session/create 直接返回协议快照；版本断言先于任何会话状态依赖。
       const created =
