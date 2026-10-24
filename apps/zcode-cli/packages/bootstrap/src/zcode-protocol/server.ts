@@ -149,7 +149,6 @@ import {
   type ZCodeProtocolSessionRecord,
 } from "./server-types.js";
 import { createInMemorySessionEventStore } from "@zcode/contracts";
-import type { ZCodeApp } from "../app/types.js";
 
 export type { ZCodeProtocolAgentDependencies, ZCodeProtocolSessionRecord };
 
@@ -338,6 +337,7 @@ export class ZCodeProtocolAgentServer {
         this.requestClient(method, params, resultSchema, options),
       adoptDetachedSession: (sessionId) => this.adoptDetachedSession(sessionId),
       claimDetachedSession: (sessionId) => this.tryAdoptDetachedSession(sessionId),
+      claimedSessionRecords: new Map<string, ZCodeProtocolSessionRecord>(),
       sessions: new Map<string, ZCodeProtocolSessionRecord>(),
       // 交互应答登记表（broker 反向请求 × v4 resolveInteraction 命令的汇合点）。
       v4Interactions: new V4InteractionRegistry(
@@ -1148,6 +1148,23 @@ export class ZCodeProtocolAgentServer {
     if (!pending.active) return;
     pending.owner = this;
     if (!this.messageSink) {
+      // 与 markClientDetached 同一判据：只有 sessionId 指向已物化 record 的
+      // 请求才 park 等收养；automation/MCP 等无 sessionId 的或 session 已不在
+      // 册的请求级工作永远迁不走，park 只会挂满孤儿超时——快速失败。
+      if (
+        this.clientDetached &&
+        (!pending.sessionId || !this.context.sessions.has(pending.sessionId))
+      ) {
+        this.failPendingClientRequest(
+          pending,
+          this.clientDisconnectError ??
+            new ProtocolRequestError(
+              PROTOCOL_CLIENT_REQUEST_ERROR_CODES.noClientAttached,
+              `Client detached; request has no adoptable session: ${pending.method}`,
+            ),
+        );
+        return;
+      }
       this.parkedClientRequests.add(pending);
       // detached 期间新到的请求（活着的 turn 发起第二个审批）也要挂孤儿
       // 上界——markClientDetached 早已跑过，等不到下一次 arm。
@@ -1276,6 +1293,7 @@ export class ZCodeProtocolAgentServer {
     if (!record) return undefined;
     this.context.sessions.delete(sessionId);
     this.sessionOwnerRedirects.set(sessionId, newOwner);
+    this.context.claimedSessionRecords?.set(sessionId, record);
     this.migrateSessionClientRequests(sessionId, newOwner);
     this.runtimeResources.untrack(record.app);
     return record;
@@ -1327,9 +1345,18 @@ export class ZCodeProtocolAgentServer {
     sessionId: string,
     owner: ZCodeProtocolDetachedSessionOwner,
   ): boolean {
+    // 收养方已在 shutdown：不抢 record——claim 会把 record 从原 owner 摘除，
+    // 转进一个垂死 context 里无人收尾，app 也随 runtimeResources 停掉。
+    this.runtimeResources.assertServing();
     const record = owner.claimSessionRecord(sessionId, this);
     if (!record) return false;
-    this.runtimeResources.adopt(record.app);
+    this.runtimeResources.adopt(record.app, (error) =>
+      this.logger?.warn("Adopted session app failed to stop on a stopping server", {
+        error: error instanceof Error ? error.message : String(error),
+        event: "zcode_protocol.session.adopted_app_stop_failed",
+        sessionId,
+      }),
+    );
     record.ownerContext = this.context;
     this.context.sessions.set(sessionId, record);
     this.logger?.info("ZCode Protocol detached session adopted", {
@@ -1339,11 +1366,6 @@ export class ZCodeProtocolAgentServer {
     return true;
   }
 
-  /** ZCodeProtocolSessionMigrationTarget：收养的 app 登记进本 owner 的资源集。 */
-  adoptSessionApp(app: ZCodeApp): void {
-    this.runtimeResources.adopt(app);
-  }
-
   /** entrypoint reaper 的判据：detached 且无活 turn、无在途反向请求才可 shutdown。 */
   isReapable(): boolean {
     if (!this.clientDetached) return false;
@@ -1351,9 +1373,16 @@ export class ZCodeProtocolAgentServer {
       return false;
     }
     for (const record of this.context.sessions.values()) {
+      // busy 事实与 session-residency 同源：activeAbortController 只覆盖协议层
+      // 前台执行，registry background task、finalization、model-only turn 都
+      // 不挂在它上面（docs/session-idle-deactivation.md 同一条教训）——只查
+      // controller 会把还在干活的 detached session 在下一趟清扫杀掉。
       if (record.activeAbortController && !record.activeAbortController.signal.aborted) {
         return false;
       }
+      if ((record.residencyFinalizationCount ?? 0) > 0) return false;
+      if (record.app.runtime.getActiveForegroundExecutionId() !== undefined) return false;
+      if (record.app.runtime.hasResidencyBlockingWork()) return false;
     }
     return true;
   }
@@ -1361,5 +1390,11 @@ export class ZCodeProtocolAgentServer {
   /** entrypoint locateSessionOwner 的归属判定：record 是否常驻在本 server。 */
   hasResidentSession(sessionId: string): boolean {
     return this.context.sessions.has(sessionId);
+  }
+
+  /** 软 detach 判定：onTransportClosed 先标记、entry 迁池有排水窗口，两边都要算；
+   *  硬终止（clientTerminated）不可作为收养源——其 sessions 正在随 shutdown 销毁。 */
+  isDetached(): boolean {
+    return this.clientDetached && !this.clientTerminated;
   }
 }

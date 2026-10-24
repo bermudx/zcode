@@ -253,7 +253,11 @@ export async function requestMcpElicitation(
   options?: { signal?: AbortSignal },
 ): Promise<McpElicitationResult> {
   const sessionId = request.trace?.sessionId;
-  const record = sessionId ? context.sessions?.get(sessionId) : undefined;
+  // 收养后 record 已转出但仍存活：requestClient 会把 elicitation 沿 redirect 投到
+  // 新 owner 应答，拒绝会让 tool call 无端失败（合成事件只入本地投影，缺失可接受）。
+  const record = sessionId
+    ? (context.sessions?.get(sessionId) ?? context.claimedSessionRecords?.get(sessionId))
+    : undefined;
   if (!sessionId || !record) {
     // 没有正在执行的工具调用可归属（如 server 在空闲时主动提问）：拒绝而不是猜会话。
     return { action: "decline" };

@@ -376,10 +376,15 @@ export async function runZCodeProtocolAgent(
       }
     };
 
-    /** 进程级 session 归属索引：只检索 detached owner；活连接上的 session 不参与收养。 */
+    /** 进程级 session 归属索引：只检索 detached owner；活连接上的 session 不参与收养。
+     *  onTransportClosed 先 markClientDetached、entry 要等 waitForClose 排水才迁
+     *  detached 池——窗口内 owner 还挂在 attachedConnections，两边都得扫，
+     *  否则窗口内的 resume 会冷物化出第二个 runtime。 */
     const findDetachedSessionOwner = (sessionId: string) => {
-      for (const entry of detachedConnections) {
-        if (entry.server.hasResidentSession(sessionId)) return entry.server;
+      for (const entry of [...detachedConnections, ...attachedConnections]) {
+        if (entry.server.isDetached() && entry.server.hasResidentSession(sessionId)) {
+          return entry.server;
+        }
       }
       return undefined;
     };

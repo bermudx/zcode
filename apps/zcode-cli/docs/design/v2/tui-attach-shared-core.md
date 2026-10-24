@@ -321,8 +321,9 @@ owner，命中则原子转出（`claimSessionRecord`：摘出 sessions 表 → �
 请求自动续投并撤除计时器。
 
 **回收**：entrypoint 每 30s 扫 detached 池，只有同时满足 detached、无
-非 aborted 活跃 turn、无 pending/parked 反向请求的 server 才 shutdown
-（`isReapable`）；挂着实例的孤儿等收养或超时自行落地。
+pending/parked 反向请求、且无 session busy 事实（前台执行 / background
+task / finalization / model-only turn，与 resident pool 同一判据）的
+server 才 shutdown（`isReapable`）；挂着实例的孤儿等收养或超时自行落地。
 
 **退出 UX（busy 三选一）**：turn 在跑（含等交互）时，退出必须显式选边——
 
@@ -333,10 +334,14 @@ owner，命中则原子转出（`claimSessionRecord`：摘出 sessions 表 → �
 | Esc / 其他键 | 取消，回到 turn |
 
 空闲时 Ctrl-C 双击 / Ctrl-D 退出语义不变。armed 窗口
-`BUSY_QUIT_CHOICE_WINDOW_MS` = 4s；Ctrl-C 的 armed 判定放在
-`handleCtrlCIntent` 内，SIGINT 路径同样生效，双击 Ctrl-C 停 agent 的旧
-肌肉记忆保留。客户端侧 `AttachSessionHandle.stopActiveTurn` 把 `sessionStop`
+`BUSY_QUIT_CHOICE_WINDOW_MS` = 4s；三选一逻辑收敛在 tui-pi 的
+`BusyQuitChoice`（`quit-choice.ts`）：armed 键与 busy 退出键在面板/补全
+的键盘所有权之前处理（等审批时 Ctrl-C/Ctrl-D 不死键），SIGINT 路径与
+字节路径共用同一 armed 状态，双击 Ctrl-C 停 agent 的旧肌肉记忆保留。
+客户端侧 `AttachSessionHandle.stopActiveTurn` 把 `sessionStop`
 做成有 ack 的有界等待——socket 先关会让 fire-and-forget 的 stop 落不了线。
+opentui 前端无三选一 UI：busy 退出统一先 `session/stop` 再退，保持
+旧"退出即终止"语义而不是静默 detach。
 
 ### 审批与提问反向请求（interaction/*）
 

@@ -219,7 +219,14 @@ function buildBrowserRequestContext(
   // tab 归属，不是路由身份（docs/zcode-protocol-model-backed-control-requests.md 契约 4）：dwf 子代理用
   // 子会话自己的，core Agent 子代理用父会话的。没有登记就按原 id 找，找不到即拒。
   const parentSessionId = state.childSessionParents.get(input.sessionId);
-  const record = requireSession(context, parentSessionId ?? input.sessionId);
+  const ownerSessionId = parentSessionId ?? input.sessionId;
+  // 收养后本 context.sessions 已摘除 record，但它仍存活在新 owner——请求构造
+  // 只需 workspace 事实，先查 claimedSessionRecords，再走 requireSession 的
+  // 常规同步收养/-32009；requestClient 会按 redirect 把请求送到新 owner。
+  const record =
+    context.sessions.get(ownerSessionId) ??
+    context.claimedSessionRecords?.get(ownerSessionId) ??
+    requireSession(context, ownerSessionId);
   const workspaceIdentity = record.workspace.workspaceIdentity?.trim() || undefined;
   const remoteSessionId = record.workspace.remoteSessionId?.trim() || undefined;
   const workspacePath = record.workspace.workspacePath;

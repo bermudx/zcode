@@ -200,8 +200,6 @@ export interface ZCodeProtocolSessionMigrationTarget {
     resultSchema: ParamsSchema<T>,
     options?: ZCodeProtocolClientRequestOptions,
   ): Promise<T>;
-  /** 收养的 app 登记进本 owner 的资源集，shutdown 扫尾时不漏关。 */
-  adoptSessionApp(app: ZCodeApp): void;
   /** 按 pending.owner 归属清理 keys/parked 登记与计时器。 */
   discardPendingClientRequest(pending: ZCodeProtocolPendingClientRequest): void;
 }
@@ -255,6 +253,12 @@ export interface ZCodeProtocolAgentServerContext {
   // 协议请求则持有 operation lease，禁止异步 handler 与容量回收交错。
   sessionResidentPool?: SessionResidentPool;
   sessions: Map<string, ZCodeProtocolSessionRecord>;
+  /**
+   * 已转出（被收养）的 session record 只读回查：claimSessionRecord 摘除后
+   * record 对象仍存在于新 owner——browser/elicitation 等端口的反向请求构造
+   * 只需 workspace/trace 事实，不应因本地 sessions miss 而 -32009/decline。
+   */
+  claimedSessionRecords?: Map<string, ZCodeProtocolSessionRecord>;
   /**
    * 同步收养尝试：session 常驻在某 detached owner 时转出到本 context。
    * 旧 owner 上 deactivation in-flight 的会话直接放弃（requireSession 等同步路径

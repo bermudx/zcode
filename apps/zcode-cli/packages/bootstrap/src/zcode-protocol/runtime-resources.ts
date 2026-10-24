@@ -46,10 +46,11 @@ export class ProtocolRuntimeResources {
     this.apps.delete(app);
   }
 
-  adopt(app: ZCodeApp): void {
-    // 收养方已在 shutdown：app 不能无人认领，直接停掉（与 create 的 stopping 分支同语义）。
+  adopt(app: ZCodeApp, onError?: (error: unknown) => void): void {
+    // 收养方已在 shutdown：app 不能无人认领，直接停掉（与 create 的 stopping
+    // 分支同语义）。stopApp 的拒绝经 onError 上抛，不形成 unhandled rejection。
     if (this.stopping) {
-      void this.stopApp(app);
+      void this.stopApp(app).catch((error) => onError?.(error));
       return;
     }
     this.apps.add(app);
