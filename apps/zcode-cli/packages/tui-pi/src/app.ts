@@ -104,7 +104,8 @@ export class PiTuiApp {
   private readonly mdTheme;
   private copy: TuiCopy;
   private readonly requestPermission;
-  private readonly ctrlCGuard = createCtrlCIntentGuard();  private readonly escGuard = createDoublePressGuard();
+  private readonly ctrlCGuard = createCtrlCIntentGuard();
+  private readonly escGuard = createDoublePressGuard();
   private readonly removeInputListener: () => void;
   private unsubscribeSession: (() => void) | undefined;
   private unsubscribeConnectionStatus: (() => void) | undefined;
@@ -518,7 +519,8 @@ export class PiTuiApp {
    * Ctrl-C 意图：字节路径（raw 模式下的 0x03）与信号路径（SIGINT）共用同一条
    * guard 与同一份状态（见 ctrl-c-intent.ts）。
    */
-  handleCtrlCIntent(): void {    runCtrlCIntent({
+  handleCtrlCIntent(): void {
+    runCtrlCIntent({
       abortTurn: () => this.store.turnAbort.current?.abort(),
       clearDraft: () => this.history.setDraftValue(""),
       draft: this.editor.getText(),
