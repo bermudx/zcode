@@ -13,7 +13,6 @@ import {
 import type { CollaborationMode, SessionEvent } from "@zcode/contracts";
 import { getZCodeCopy, type TuiCopy } from "@zcode/i18n";
 import type {
-  DraftAttachment,
   SubmitValueOptions,
   TuiOptions,
   TuiPromptInput,
@@ -49,7 +48,8 @@ import {
   type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
 import { Composer } from "./composer.js";
-import { appendFileMentions } from "./mentions.js";
+import { PiDraftAttachments } from "./attachments.js";
+import { PiImagePaste } from "./image-paste.js";
 import { openModelPicker, rotateModel } from "./model-chords.js";
 import { createShellEscapeRunner, type ShellEscapeRunner } from "./shell-prompt.js";
 import { isShellCommand } from "./shell.js";
@@ -130,7 +130,13 @@ export class PiTuiApp {
   private readonly usageTotals: UsageTotalsAccumulator;
   /** `!cmd` 执行器：本地跑命令、打印结果、把输出缓到下一条 prompt。 */
   private readonly shellEscape: ShellEscapeRunner;
-  private attachmentSequence = 0;
+  /** ctrl+v / alt+v 剪贴板图片粘贴（占位符 + DraftAttachment，语义同 React 前端）。 */
+  private readonly imagePaste: PiImagePaste;
+  /** 附件占位符 id 命名空间与 @path 提及合并的唯一 owner。 */
+  private readonly drafts = new PiDraftAttachments({
+    draftAttachments: () => this.store.state.draftAttachments,
+    workspaceDirectory: () => this.options.workspaceDirectory,
+  });
   private submitPipelineCache: TuiOptions | undefined;
   private readonly fallback: {
     locale: NonNullable<TuiOptions["locale"]>;
@@ -181,6 +187,17 @@ export class PiTuiApp {
       efforts: () => this.store.state.effortOptions,
     });
     this.editor.onSubmit = (text) => this.handleEditorSubmit(text);
+    this.imagePaste = new PiImagePaste({
+      abortSignal: () => this.store.turnAbort.current?.signal,
+      allocateId: () => this.drafts.allocateId(),
+      busy: () => this.store.state.busy || Boolean(this.store.state.activeTurnId),
+      draftAttachments: () => this.store.state.draftAttachments,
+      editor: this.editor,
+      readClipboardImage: this.options.readClipboardImage,
+      setDraftAttachments: (attachments) => this.store.set("draftAttachments", attachments),
+      setStatus: (status) => this.store.set("status", status),
+      setStatusDetails: (details) => this.store.set("statusDetails", details),
+    });
     this.history = new PiInputHistory({
       copy: () => this.copy,
       draftAttachments: () => this.store.state.draftAttachments,
@@ -446,7 +463,7 @@ export class PiTuiApp {
     const text = value.trim();
     if (!text) return undefined;
     // `@path` → 协议 file attachment（core 自己读文件）；`!cmd` 的输出随下一条 prompt 进上下文。
-    const draftAttachments = this.draftAttachmentsFor(text);
+    const draftAttachments = this.drafts.forSubmit(text);
     const promptText = this.shellEscape.consume(text);
 
     if (store.state.busy || store.state.activeTurnId) {
@@ -492,18 +509,6 @@ export class PiTuiApp {
       turnRef: this.store.turnAbort,
     });
   };
-
-  /** `@path` tokens in the draft become file attachments the core reads. */
-  private draftAttachmentsFor(text: string): DraftAttachment[] {
-    // Slash commands are control messages; only real prompts carry attachments.
-    if (text.startsWith("/")) return this.store.state.draftAttachments;
-    return appendFileMentions({
-      allocateId: () => (this.attachmentSequence += 1),
-      existing: this.store.state.draftAttachments,
-      text,
-      workspaceDirectory: this.options.workspaceDirectory ?? process.cwd(),
-    });
-  }
 
   private handleEditorSubmit(text: string): void {
     const trimmed = text.trim();
@@ -589,6 +594,12 @@ export class PiTuiApp {
         () => store.set("status", "Copied last assistant reply."),
         () => store.set("status", "Could not copy last assistant reply."),
       );
+      return { consume: true };
+    }
+
+    // 剪贴板图片：ctrl+v 与 React 前端一致；Windows 终端常吃掉 ctrl+v，alt+v 兜底。
+    if (matchesKey(data, "ctrl+v") || matchesKey(data, "alt+v")) {
+      void this.imagePaste.paste();
       return { consume: true };
     }
 

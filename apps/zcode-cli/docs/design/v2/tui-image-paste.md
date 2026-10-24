@@ -59,6 +59,21 @@ Implemented behavior:
   persists file parts, and hydration restores persisted image file parts as
   structured user content blocks.
 
+Pi frontend (`--tui-frontend=pi`, including `piz` attach sessions): the same UX
+contract is implemented in `packages/tui-pi/src/image-paste.ts`. `ctrl+v` and
+the Windows-friendly `alt+v` fallback are handled in a global input listener
+before the focused editor; `PiImagePaste` serializes one clipboard read,
+registers the draft attachment, and inserts `[image #N]` via
+`insertTextAtCursor` (with a leading space at word position). Placeholder
+reconciliation runs on the editor `onChange` deferred to a microtask — pi's
+`Editor.submitValue()` clears text before invoking `onSubmit`, so a
+synchronous reconcile would delete draft attachments before the submit path
+captures them. Attachment ids share the `[image #N]` placeholder namespace
+through `PiDraftAttachments.allocateId()`, which skips ids already present in
+the draft; history restore re-derives ids from stored placeholders. Submission
+uses the same `toPromptInput` shape, and attach mode converts it to
+`{kind,mimeType,dataBase64}` in `toProtocolAttachments`.
+
 Current limitations:
 
 - Active-turn steering remains text-only. If draft image attachments exist while

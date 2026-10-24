@@ -67,13 +67,16 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   TuiSelection，与 React 前端同形内联呈现）→ queued-inputs → composer(Editor) →
   statusline。Esc 经全局输入监听关闭当前面板或触发双按中断。
 - composer 用内置 `Editor`：`CombinedAutocompleteProvider` 提供 `/` 命令与 `@`
-  文件路径补全；`/model`、`/effort`、`/mode` 经 `getArgumentCompletions` 给参数
-  补全（等价于现有的草稿建议面板）；编辑器自带 bracketed paste、历史导航、
-  kill-ring、撤销。
+  文件路径补全；`/model`、`/effort`、`/mode`、`/skill` 经 `getArgumentCompletions`
+  给参数补全（等价于现有的草稿建议面板）；编辑器自带 bracketed paste、历史导航、
+  kill-ring、撤销。`/skill` 的候选来自 startup 快照的 `skillSuggestions`
+  （`TuiSkillSuggestion[]`，attach 走 `skills/referenceCatalog` session 权威、
+  内嵌走 `listZCodeSkills` 现扫，命名均为 `qualifiedName ?? name` 同名去重）。
 - 全局键经 `tui.addInputListener` 拦截（先于焦点组件）：`Ctrl+C`（有草稿→清空；
   否则 2s 双击退出）、`Ctrl+D`（空草稿退出）、双 `Esc`（2s 内中断当前 turn）、
   `Ctrl+P`（轮换可用模型，silent 提交 `/model`）、`Ctrl+L`（直接弹出可过滤模型
-  选择面板，回车提交 `/model <ref>`）、`Ctrl+Y`（复制最后一条 agent 回复）、`Shift+Tab`（mode 轮换
+  选择面板，回车提交 `/model <ref>`）、`Ctrl+Y`（复制最后一条 agent 回复）、
+  `Ctrl+V`/`Alt+V`（剪贴板图片粘贴，见下节）、`Shift+Tab`（mode 轮换
   `plan→build→guarded→yolo`）、空草稿 `+`/`-`（展开/收起 workflow 卡）。
 - Editor 自带 history 导航与 `recallPreviousInput` 远端历史并存：草稿为空时
   Up/Down 先走 CLI 侧 `recallPreviousInput`（跨会话持久历史），与现有前端一致。
@@ -180,6 +183,27 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   的暴露面一致；stdin 置 ignore，120s 超时兜底。
 - 非 bash/zsh 的 SHELL 走原 `/bin/sh -c` 语义：不读 rc、无 alias。
 
+## 图片粘贴与草稿附件
+
+- `Ctrl+V`（macOS/Linux，与 React 前端一致）与 `Alt+V`（Windows 终端常把
+  `Ctrl+V` 留给文本粘贴的兜底）触发 `PiImagePaste`（`tui-pi/src/image-paste.ts`）：
+  走 `TuiOptions.readClipboardImage` 端口读系统剪贴板，busy/无端口/无图/
+  非支持 MIME 各自给出状态行，同一时刻串行化一次剪贴板读取。
+- 粘贴成功登记 `DraftAttachment` 并在光标处插入 `[image #N]` 占位符（词中
+  位置自动补前导空格）；占位符即唯一绑定——`onChange` reconcile 把已被编辑
+  删掉的占位符对应附件摘除，`toPromptInput` 只提交仍被文本引用的附件。
+  reconcile 延迟到 microtask：pi `Editor.submitValue()` 先清空文本再回调
+  `onSubmit`，同步 reconcile 会在提交捕获前误删草稿附件。
+- 附件 id 即占位符数字命名空间，由 `PiDraftAttachments`（`tui-pi/src/attachments.ts`）
+  统一分配并跳过当前草稿已占用的 id——history 恢复会把 `[image #N]` 还原成
+  同号附件，独立计数器会产生同名占位符让两张图被同一处文本引用。
+- `@path` 提及与图片附件共用 `DraftAttachment` 域，提交时 `appendFileMentions`
+  在工作区内把 `@path` 追加为 file 附件；slash 命令按控制消息处理，不占位
+  符引用的附件不会随 `/...` 下发。
+- 线上形状与 React 前端相同：`{text:"…[image #1]", attachments:[{type:"image",
+  path:"[image #1]", content:"data:…"}]}`；attach 端 `toProtocolAttachments`
+  转 `{kind,mimeType,dataBase64}`。history 条目恢复时占位符数字回填附件 id。
+
 ## 验收
 
 - `zcode tui --tui-frontend=pi` 启动 composer；提交 prompt 流式渲染 markdown +
@@ -189,4 +213,4 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - `node:test` 用例：投影（事件→Message[]）、提交分支、审批结果合成、
   选择/问题状态机、草稿命令解析、键位守卫；`VirtualTerminal` 冒烟渲染。
 - 已知裁剪（后续按需）：子代理转写下钻浏览、workflow 卡与工具卡详情页联动、
-  图片附件、i18n copy 全量接线；先以英文 status 文案起步，结构预留。
+  i18n copy 全量接线；先以英文 status 文案起步，结构预留。

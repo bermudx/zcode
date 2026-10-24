@@ -18,7 +18,7 @@ import type { Composer } from "./composer.js";
 export type PiInputHistoryDeps = {
   copy: () => TuiCopy;
   draftAttachments: () => DraftAttachment[];
-  editor: Pick<Composer, "getText" | "setText">;
+  editor: Pick<Composer, "getExpandedText" | "getText" | "setText">;
   recallPreviousInput: () => TuiOptions["recallPreviousInput"];
   setDraftAttachments: (attachments: DraftAttachment[]) => void;
   setStatus: (status: string) => void;
@@ -46,6 +46,21 @@ export class PiInputHistory {
   }
 
   onEditorChange(): void {
+    // 手动删掉占位符（@file、[image #N]）即解绑附件：提交只发仍被引用的，
+    // 否则已删除的 @提及/[image] 占位文本仍会带着附件进协议（与 React 端
+    // setInput reconcile 同语义）。按展开文本核对，粘贴大段的 marker 形态
+    // 也能命中占位符。
+    //
+    // 必须延迟到 microtask：pi Editor.submitValue() 先清文本再 onChange(""),
+    // 最后才回调 onSubmit——同步 reconcile 会在 submitValue 捕获附件前把
+    // draftAttachments 清空（图片提交变裸文本的实测 bug）。推迟一轮后提交
+    // 路径已同步读完草稿，此处再按最新文本收敛即可；普通编辑只是晚一拍生效。
+    queueMicrotask(() => {
+      const expanded = this.deps.editor.getExpandedText();
+      const current = this.deps.draftAttachments();
+      const kept = current.filter((a) => expanded.includes(a.placeholder));
+      if (kept.length !== current.length) this.deps.setDraftAttachments(kept);
+    });
     if (!this.suppressReset) this.reset();
   }
 
