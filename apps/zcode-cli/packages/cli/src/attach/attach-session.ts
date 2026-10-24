@@ -24,6 +24,7 @@ import type { CollaborationMode, TurnId } from "@zcode/contracts";
 import type { AttachClient } from "./attach-client.js";
 import { toProtocolAttachments } from "./attach-attachments.js";
 import { PendingInteractions } from "./attach-interactions.js";
+import { requestSessionStopBestEffort } from "./attach-session-stop.js";
 import { mergeCatalog, modelOptionKey, thoughtLevelKey } from "./attach-catalog.js";
 import type { CommandCenterApp } from "../command-center.js";
 import { resolveTuiModelSelection } from "../command-center/handlers/model.js";
@@ -778,6 +779,16 @@ export class AttachSessionHandle {
   /** 常驻 sink 续订（重连后）：用已见 sequenceNumber 补放缺口。 */
   async resubscribe(): Promise<void> {
     await this.subscribe(this.lastSeq, false);
+  }
+
+  /**
+   * "stop & quit" 路径的 server 端停止：turnAbort.abort() 只触发 fire-and-forget
+   * 的 sessionStop，socket 若先关停不掉。这里显式再发一次并等有界回执——
+   * sessionStop 幂等，重复无害；超时按尽力而为返回，退出不被阻塞
+   * （实现见 attach-session-stop.ts）。
+   */
+  async stopActiveTurn(): Promise<void> {
+    await requestSessionStopBestEffort(this.clientOf, this.sessionId);
   }
 }
 

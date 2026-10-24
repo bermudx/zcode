@@ -469,6 +469,8 @@ export function createAttachPromptHandler(
   submitPrompt.listModelOptions = async () =>
     current.snapshot.settings.model.available as never;
   submitPrompt.subscribeSessionEvents = (sink) => current.addSink(sink);
+  // "stop & quit"：对当前会话发 session/stop 并等有界回执；随 current 跟随 /new /resume。
+  submitPrompt.requestStopActiveTurn = () => current.stopActiveTurn();
   submitPrompt.close = async () => {
     await runtime.close();
   };

@@ -54,11 +54,8 @@ import { appendFileMentions } from "./mentions.js";
 import { openModelPicker, rotateModel } from "./model-chords.js";
 import { createShellEscapeRunner, type ShellEscapeRunner } from "./shell-prompt.js";
 import { isShellCommand } from "./shell.js";
-import {
-  createCtrlCIntentGuard,
-  resetCtrlCExitGuard,
-  runCtrlCIntent,
-} from "./ctrl-c-intent.js";
+import { createCtrlCIntentGuard, resetCtrlCExitGuard } from "./ctrl-c-intent.js";
+import { BusyQuitChoice } from "./quit-choice.js";
 import { SessionInfoPanel } from "./info-panel.js";
 import { PiInputHistory } from "./input-history.js";
 import { keyEventFromInput } from "./keys.js";
@@ -106,6 +103,16 @@ export class PiTuiApp {
   private readonly requestPermission;
   private readonly ctrlCGuard = createCtrlCIntentGuard();
   private readonly escGuard = createDoublePressGuard();
+  /** busy 退出三选一（detach / stop&quit / stay）+ Ctrl-C 双击语义，见 quit-choice.ts。 */
+  private readonly quitChoice = new BusyQuitChoice({
+    ctrlCGuard: this.ctrlCGuard,
+    turnBusy: () => this.store.state.busy || Boolean(this.store.state.activeTurnId),
+    abortTurn: () => this.store.turnAbort.current?.abort(),
+    clearDraft: () => this.history.setDraftValue(""),
+    setStatus: (status) => this.store.set("status", status),
+    exit: (code) => this.onExit(code),
+    requestStopActiveTurn: () => this.options.requestStopActiveTurn?.(),
+  });
   private readonly removeInputListener: () => void;
   private unsubscribeSession: (() => void) | undefined;
   private unsubscribeConnectionStatus: (() => void) | undefined;
@@ -517,17 +524,11 @@ export class PiTuiApp {
 
   /**
    * Ctrl-C 意图：字节路径（raw 模式下的 0x03）与信号路径（SIGINT）共用同一条
-   * guard 与同一份状态（见 ctrl-c-intent.ts）。
+   * guard 与同一份状态（见 ctrl-c-intent.ts）。busy 三选一/armed/双击语义全部
+   * 收敛在 BusyQuitChoice（quit-choice.ts）。
    */
   handleCtrlCIntent(): void {
-    runCtrlCIntent({
-      abortTurn: () => this.store.turnAbort.current?.abort(),
-      clearDraft: () => this.history.setDraftValue(""),
-      draft: this.editor.getText(),
-      exit: () => this.onExit(0),
-      guard: this.ctrlCGuard,
-      setStatus: (status) => this.store.set("status", status),
-    });
+    this.quitChoice.onCtrlC(this.editor.getText());
   }
 
   private dispatchChord(data: string): { consume?: boolean } | undefined {
@@ -538,6 +539,10 @@ export class PiTuiApp {
 
     // Autocomplete owns the keyboard while open.
     if (this.editor.isShowingAutocomplete()) return undefined;
+
+    // busy 退出三选一 armed 中：Ctrl-D 分离 / Esc 留下在这里消费；
+    // Ctrl-C 让位 handleCtrlCIntent；其余键静默取消 armed 后照常处理。
+    if (this.quitChoice.interceptArmedKey(data)) return { consume: true };
 
     // Ctrl+X leader for the session-info overlay (same chord as the React
     // frontend's sidebar): Ctrl+X arms, B toggles.
@@ -578,6 +583,8 @@ export class PiTuiApp {
           hasAttachments: store.state.draftAttachments.length > 0,
         })
       ) {
+        // busy 中 Ctrl-D 不直接退出：先 arm 三选一，armed 内 Ctrl-D 才 detach。
+        if (this.quitChoice.onCtrlD()) return { consume: true };
         this.store.turnAbort.current?.abort();
         this.onExit(0);
         return { consume: true };

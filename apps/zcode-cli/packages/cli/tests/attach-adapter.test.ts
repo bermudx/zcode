@@ -483,6 +483,28 @@ test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 session/
   }
 });
 
+test("stopActiveTurn 显式发 session/stop 并等回执；连接断开则尽力返回", async () => {
+  // "stop & quit" 路径：abortSignal 的 fire-and-forget sessionStop 之外再显式
+  // 发一次并等有界回执，保证退出前 stop 已落线。
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, () => ({}));
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    await handle.stopActiveTurn();
+    const stops = core.requests.filter((r) => r.method === "session/stop");
+    assert.equal(stops.length, 1);
+    assert.equal(stops[0]?.params.sessionId, SID);
+    // 连接已断开时 clientOf 抛错：尽力路径必须静默返回，不阻塞退出。
+    client.close();
+    await handle.stopActiveTurn();
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 test("sendInput '/model …' 经 commandCenter → session/setModel，不发 session/send", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");

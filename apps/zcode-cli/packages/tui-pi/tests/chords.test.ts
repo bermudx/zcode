@@ -5,6 +5,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  BUSY_QUIT_CHOICE_CANCELLED_STATUS,
+  BUSY_QUIT_CHOICE_PROMPT,
+} from "../src/quit-choice.js";
+import {
   CTRL_C_EXIT_PROMPT,
   ESCAPE_PAUSE_PROMPT,
   NO_ACTIVE_OUTPUT_STATUS,
@@ -105,6 +109,84 @@ test("double Esc while busy aborts the active turn", async () => {
   assert.equal(controller.signal.aborted, false);
   h.feed(ESC);
   assert.equal(controller.signal.aborted, true);
+  await h.stop();
+});
+
+test("busy Ctrl+C arms the quit choice; Ctrl+D detaches without aborting", async () => {
+  // attach 语义：客户端退出只断开连接，detached 的 turn 必须保持存活。
+  const h = createHarness();
+  const controller = new AbortController();
+  h.store.turnAbort.current = controller;
+  h.store.set("busy", true);
+  h.feed(CTRL_C);
+  assert.equal(h.store.state.status, BUSY_QUIT_CHOICE_PROMPT);
+  assert.equal(h.exitCode(), undefined);
+  assert.equal(controller.signal.aborted, false);
+  h.feed(CTRL_D);
+  assert.equal(h.exitCode(), 0);
+  assert.equal(controller.signal.aborted, false);
+  await h.stop();
+});
+
+test("busy Ctrl+C twice stops the agent via requestStopActiveTurn then exits", async () => {
+  // armed 内的 Ctrl-C = stop & quit：先等 server 端 session/stop 有界回执，
+  // 再收尾本地 abort 退出——与旧"双击 Ctrl-C 杀掉 agent"的肌肉记忆一致。
+  let stopCalls = 0;
+  const h = createHarness({
+    requestStopActiveTurn: async () => {
+      stopCalls += 1;
+    },
+  });
+  const controller = new AbortController();
+  h.store.turnAbort.current = controller;
+  h.store.set("busy", true);
+  h.feed(CTRL_C);
+  h.feed(CTRL_C);
+  await h.flush();
+  assert.equal(stopCalls, 1);
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(h.exitCode(), 0);
+  await h.stop();
+});
+
+test("busy quit choice Esc cancels back to the running turn", async () => {
+  const h = createHarness();
+  const controller = new AbortController();
+  h.store.turnAbort.current = controller;
+  h.store.set("busy", true);
+  h.feed(CTRL_C);
+  assert.equal(h.store.state.status, BUSY_QUIT_CHOICE_PROMPT);
+  h.feed(ESC);
+  assert.equal(h.store.state.status, BUSY_QUIT_CHOICE_CANCELLED_STATUS);
+  assert.equal(h.exitCode(), undefined);
+  assert.equal(controller.signal.aborted, false);
+  // 取消后的 Esc 恢复原有 busy pause 语义。
+  h.feed(ESC);
+  assert.equal(h.store.state.status, ESCAPE_PAUSE_PROMPT);
+  await h.stop();
+});
+
+test("busy Ctrl+D arms the quit choice; second Ctrl+D detaches", async () => {
+  const h = createHarness();
+  h.store.set("busy", true);
+  h.feed(CTRL_D);
+  assert.equal(h.store.state.status, BUSY_QUIT_CHOICE_PROMPT);
+  assert.equal(h.exitCode(), undefined);
+  h.feed(CTRL_D);
+  assert.equal(h.exitCode(), 0);
+  await h.stop();
+});
+
+test("busy stop & quit without requestStopActiveTurn falls back to a local abort", async () => {
+  const h = createHarness();
+  const controller = new AbortController();
+  h.store.turnAbort.current = controller;
+  h.store.set("busy", true);
+  h.feed(CTRL_C);
+  h.feed(CTRL_C);
+  await h.flush();
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(h.exitCode(), 0);
   await h.stop();
 });
 

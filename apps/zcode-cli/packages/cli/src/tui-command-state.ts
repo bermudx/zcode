@@ -27,6 +27,7 @@ export type TuiPromptHandler = TuiSubmitPrompt & {
   getMainSessionId?: TuiGetMainSessionId;
   listModelOptions?: () => Promise<readonly TuiModelOption[]>;
   recallPreviousInput?: TuiRecallPreviousInput;
+  requestStopActiveTurn?: () => Promise<void>;
   sendInput?: TuiSendInput;
   setMode?: TuiSetMode;
   subscribeSessionEvents?: TuiSubscribeSessionEvents;

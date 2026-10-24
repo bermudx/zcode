@@ -334,6 +334,12 @@ export type TuiOptions = {
   listModelOptions?: () => Promise<readonly TuiModelOption[]>;
   slashCommands?: readonly TuiSlashCommandSuggestion[];
   submitPrompt: TuiSubmitPrompt;
+  /**
+   * "stop & quit" 路径的 session/stop 上达：turn abort controller 是客户端本地
+   * 语义，attach 模式下停 server 端 turn 必须显式发 session/stop 并等它有界回执，
+   * 否则 socket 先关、stop 可能没落线。resolve 时机为 ack 或超时（尽力而为）。
+   */
+  requestStopActiveTurn?: () => Promise<void>;
   subscribeSessionEvents?: TuiSubscribeSessionEvents;
   /**
    * 瘦客户端 (tui-attach) 的连接状态：server 断开/重连时 pousse un libellé

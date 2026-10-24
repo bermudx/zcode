@@ -234,6 +234,7 @@ export const runAttachCommand = async (
         readSubagentTranscript: promptHandler.readSubagentTranscript,
         readSubagents: promptHandler.readSubagents,
         recallPreviousInput: promptHandler.recallPreviousInput,
+        requestStopActiveTurn: promptHandler.requestStopActiveTurn,
         sendInput: promptHandler.sendInput,
         setMode: promptHandler.setMode,
         stderr: ctx.stderr,
