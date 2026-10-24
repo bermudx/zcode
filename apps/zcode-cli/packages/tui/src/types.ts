@@ -298,6 +298,16 @@ export type TuiModeOption = {
   label: string;
 };
 
+/**
+ * `/skill <Tab>` 参数补全条目：name 是可被 Skill tool 直接调用的名字
+ * （qualifiedName 优先），description 仅作补全提示。目录由 CLI 组合层在
+ * startup 快照；session 内发现结果冻结，不随文件系统热更新。
+ */
+export type TuiSkillSuggestion = {
+  description: string;
+  name: string;
+};
+
 export type TuiOptions = {
   /** Called after the startup screen has painted; runtime ownership stays in CLI. */
   loadStartupOptions?: () => Promise<TuiStartupOptions>;
@@ -333,6 +343,7 @@ export type TuiOptions = {
   modelOptions?: readonly TuiModelOption[];
   listModelOptions?: () => Promise<readonly TuiModelOption[]>;
   slashCommands?: readonly TuiSlashCommandSuggestion[];
+  skillSuggestions?: readonly TuiSkillSuggestion[];
   submitPrompt: TuiSubmitPrompt;
   /**
    * "stop & quit" 路径的 session/stop 上达：turn abort controller 是客户端本地
@@ -362,5 +373,6 @@ export type TuiStartupOptions = Pick<
   | "modelOptions"
   | "effortOptions"
   | "slashCommands"
+  | "skillSuggestions"
   | "workspaceGitBranch"
 >;

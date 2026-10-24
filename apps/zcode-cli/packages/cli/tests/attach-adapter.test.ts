@@ -837,6 +837,139 @@ test("prompt 附件按 session/send 的协议形状下发（kind/localPath, kind
   }
 });
 
+// 裸 /skill 在 attach 下走 skills/referenceCatalog（session 权威快照）——
+// 修复前 deps.listSkills 未接线，恒回 "Skill listing is not available in this client."
+test("裸 /skill 经 skills/referenceCatalog 取会话快照并格式化为命令结果", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const catalog = {
+    authority: "session",
+    skills: [
+      {
+        description: "Reviews diffs for style and bugs.",
+        enabled: true,
+        id: "glm:workspace:/repo/.agents/skills/code-review",
+        name: "code-review",
+        nativeScope: "project",
+        path: "/repo/.agents/skills/code-review",
+        scope: "workspace",
+        source: "agents",
+        whenToUse: "When asked to review code.",
+      },
+      {
+        description: "Formats code.",
+        enabled: true,
+        id: "glm:plugin:/plugins/fmt/skills/lint",
+        name: "lint",
+        nativeScope: "project",
+        path: "/plugins/fmt/skills/lint",
+        pluginName: "fmt",
+        qualifiedName: "fmt:lint",
+        scope: "plugin",
+        source: "plugin",
+      },
+    ],
+    totalDiscovered: 3,
+  };
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "skills/referenceCatalog") return catalog;
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = await handler("/skill", {});
+    const request = core.requests.find((r) => r.method === "skills/referenceCatalog");
+    // session 权威：带 sessionId 时 server 用 runtime 冻结快照，不现扫磁盘。
+    assert.deepEqual(request?.params, {
+      sessionId: SID,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    assert.match(result.response ?? "", /Available skills \(2\)/);
+    assert.match(result.response ?? "", /code-review/);
+    // qualifiedName 优先于 name 作可调用名，原 name 作为 alias 附注。
+    assert.match(result.response ?? "", /fmt:lint/);
+    assert.match(result.response ?? "", /alias lint/);
+    assert.match(result.response ?? "", /Use \/skill <name> \[task\] to load one/);
+    assert.ok(
+      !core.requests.some((r) => r.method === "session/send"),
+      "bare /skill must not reach session/send",
+    );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("/skill <name> [task] 改写为 Skill tool 指令按普通 prompt 下发", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      const inputId = request.params.inputId as string;
+      queueMicrotask(() => {
+        notify(
+          rawEvent({
+            inputId,
+            payload: { inputId, response: "skill turn done", resultType: "completed" },
+            seq: 1,
+            turnId: "turn-skill",
+            type: "turn_complete",
+          }),
+        );
+      });
+      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = await handler("/skill fmt:lint fix my imports", {});
+    const send = core.requests.find((r) => r.method === "session/send");
+    assert.ok(send, "expected session/send");
+    const content = String(send.params.content);
+    assert.match(content, /skill named `fmt:lint`/);
+    assert.match(content, /Skill` tool with name `fmt:lint`/);
+    assert.match(content, /fix my imports/);
+    assert.equal(result.response, "skill turn done");
+    assert.ok(
+      !core.requests.some((r) => r.method === "skills/referenceCatalog"),
+      "/skill <name> must not consult the catalog",
+    );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 // ---- interaction/* 反向请求（2026-10-23 实测 bug：attach 下 AskUserQuestion 不可用）----
 // 修复前两处断点：interaction/requestUserInput 落 method not found；
 // interaction/requestPermission 把 PermissionBrokerResult（含 resolvedAt）原样回传，

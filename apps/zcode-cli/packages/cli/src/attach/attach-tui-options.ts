@@ -23,6 +23,7 @@ import type {
 } from "@zcode/tui";
 import { connectAttachClient, AttachProtocolError, type AttachClient } from "./attach-client.js";
 import { AttachSessionHandle, asCommandCenterApp } from "./attach-session.js";
+import { listAttachSkillCatalog, toCommandCenterSkillList } from "./attach-skills.js";
 import type { CommandCenterApp, CommandCenterDeps } from "../command-center.js";
 import { createCommandCenter, parseSlashCommand } from "../command-center.js";
 import type { TuiPromptHandler } from "../tui-command-state.js";
@@ -416,6 +417,16 @@ export function createAttachPromptHandler(
     getApp,
     getLocale: () => current.getLocale(),
     getMode: () => current.getMode() ?? "build",
+    // 裸 `/skill` 列举走 core 的 skills/referenceCatalog（session 权威快照），
+    // 不在瘦客户端本地重扫；`current` 跟随 /new /resume /fork 换会话。
+    listSkills: async () =>
+      toCommandCenterSkillList(
+        await listAttachSkillCatalog({
+          request,
+          sessionId: current.sessionId,
+          workspace: options.workspace,
+        }),
+      ),
     newApp,
     recordInputHistory: async (input) => {
       await current.recordInputHistory(input);

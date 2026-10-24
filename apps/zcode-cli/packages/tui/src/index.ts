@@ -27,6 +27,7 @@ export type {
   TuiSetModeResult,
   TuiSendInput,
   TuiSendInputResult,
+  TuiSkillSuggestion,
   TuiSlashCommandSuggestion,
   TuiSubmitPrompt,
   TuiSubmitPromptResult,

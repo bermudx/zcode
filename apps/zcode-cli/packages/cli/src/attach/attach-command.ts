@@ -27,6 +27,7 @@ import {
   AttachSessionHandle,
   projectAttachTranscriptMessages,
 } from "./attach-session.js";
+import { listAttachSkillCatalog, toSkillSuggestions } from "./attach-skills.js";
 import {
   AttachProtocolVersionError,
   AttachRuntime,
@@ -207,12 +208,18 @@ export const runAttachCommand = async (
             }
           : {}),
         loadStartupOptions: async () => {
-          const [customCommands, workspaceGitBranch] = await Promise.all([
+          const [customCommands, workspaceGitBranch, skillCatalog] = await Promise.all([
             (deps.listAttachCustomCommands?.(deps) ?? Promise.resolve(undefined)).catch(
               () => undefined,
             ),
             (deps.resolveWorkspaceGitBranch ?? resolveWorkspaceGitBranch)({
               workspaceDirectory,
+            }).catch(() => undefined),
+            // composer `/skill <Tab>` 补全用 session 权威快照；失败只丢补全不阻塞启动。
+            listAttachSkillCatalog({
+              request: (method, params) => runtime.currentClient().request(method, params),
+              sessionId: promptHandler.getMainSessionId?.(),
+              workspace: workspaceRef,
             }).catch(() => undefined),
           ]);
           return {
@@ -224,6 +231,9 @@ export const runAttachCommand = async (
             slashCommands: listSlashCommandSuggestions(customCommands, {
               workflowMode,
             }),
+            ...(skillCatalog
+              ? { skillSuggestions: toSkillSuggestions(skillCatalog) }
+              : {}),
             theme: "auto" as const,
             workspaceGitBranch,
           };

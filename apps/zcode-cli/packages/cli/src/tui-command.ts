@@ -5,7 +5,11 @@ import { createNodeClipboardImageReader } from "./clipboard-image.js";
 import { createNodeClipboardTextWriter } from "./clipboard-text.js";
 import { listSlashCommandSuggestions } from "./command-center.js";
 import { registerCliShutdownHandlers } from "./shutdown.js";
-import { listCustomCommandsForTui, loadInitialTuiSessionMetadata } from "./tui-command-data.js";
+import {
+  listCustomCommandsForTui,
+  listSkillsForTui,
+  loadInitialTuiSessionMetadata,
+} from "./tui-command-data.js";
 import { createTuiSubmitPrompt } from "./tui-prompt-handler.js";
 import { loadTuiRuntime } from "./tui-runtime-loader.js";
 import { resolveTuiStartupLocale } from "./tui-startup-locale.js";
@@ -75,13 +79,16 @@ export const runTuiCommand = async (
     try {
       return await runTui({
         loadStartupOptions: async () => {
-          const [metadata, customCommands, workspaceGitBranch] = await Promise.all([
-            loadInitialTuiSessionMetadata(promptHandler),
-            listCustomCommandsForTui(deps).catch(() => undefined),
-            (deps.resolveWorkspaceGitBranch ?? resolveWorkspaceGitBranch)({
-              workspaceDirectory,
-            }).catch(() => undefined),
-          ]);
+          const [metadata, customCommands, workspaceGitBranch, skillOutcome] =
+            await Promise.all([
+              loadInitialTuiSessionMetadata(promptHandler),
+              listCustomCommandsForTui(deps).catch(() => undefined),
+              (deps.resolveWorkspaceGitBranch ?? resolveWorkspaceGitBranch)({
+                workspaceDirectory,
+              }).catch(() => undefined),
+              // pi composer `/skill <Tab>` 补全；失败只丢补全不阻塞启动。
+              listSkillsForTui(deps).catch(() => undefined),
+            ]);
           return {
             initialMode: currentCliMode(modeState),
             initialModel: metadata.model,
@@ -92,6 +99,14 @@ export const runTuiCommand = async (
             modelOptions: metadata.modelOptions,
             effortOptions: metadata.effortOptions,
             slashCommands: listSlashCommandSuggestions(customCommands, { workflowMode }),
+            ...(skillOutcome
+              ? {
+                  skillSuggestions: skillOutcome.skills.map((skill) => ({
+                    description: skill.description,
+                    name: skill.qualifiedName ?? skill.name,
+                  })),
+                }
+              : {}),
             workspaceGitBranch,
           };
         },

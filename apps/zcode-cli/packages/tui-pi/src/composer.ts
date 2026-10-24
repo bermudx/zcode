@@ -15,6 +15,7 @@ import type {
   TuiEffortOption,
   TuiModelOption,
   TuiOptions,
+  TuiSkillSuggestion,
   TuiSlashCommandSuggestion,
 } from "@zcode/tui/internals";
 import { TUI_SWITCHABLE_MODES, modelOptionValue } from "@zcode/tui/internals";
@@ -50,13 +51,14 @@ export const toPiSlashCommands = (
   commands: SlashCommandSource,
   models: () => readonly TuiModelOption[],
   efforts: () => readonly TuiEffortOption[],
+  skills: () => readonly TuiSkillSuggestion[] = () => [],
 ): SlashCommand[] | undefined => {
   if (!commands || commands.length === 0) return undefined;
   return commands.map((command) => ({
     argumentHint: command.usage.replace(/^\/\S+\s*/, "").trim() || undefined,
     description: command.summary,
     name: command.name,
-    getArgumentCompletions: argumentCompletions(command.name, models, efforts),
+    getArgumentCompletions: argumentCompletions(command.name, models, efforts, skills),
   }));
 };
 
@@ -64,6 +66,7 @@ const argumentCompletions = (
   name: string,
   models: () => readonly TuiModelOption[],
   efforts: () => readonly TuiEffortOption[],
+  skills: () => readonly TuiSkillSuggestion[],
 ): SlashCommand["getArgumentCompletions"] => {
   if (name === "model") {
     return (prefix: string): AutocompleteItem[] =>
@@ -92,6 +95,16 @@ const argumentCompletions = (
       TUI_SWITCHABLE_MODES.filter((mode) => mode.startsWith(prefix.toLowerCase())).map(
         (mode) => ({ label: mode, value: mode }),
       );
+  }
+  if (name === "skill") {
+    return (prefix: string): AutocompleteItem[] =>
+      skills()
+        .filter((skill) => skill.name.toLowerCase().includes(prefix.toLowerCase()))
+        .map((skill) => ({
+          description: skill.description,
+          label: skill.name,
+          value: skill.name,
+        }));
   }
   return undefined;
 };
@@ -122,6 +135,7 @@ export class Composer extends Editor {
       this.deps.options.slashCommands,
       this.deps.models,
       this.deps.efforts,
+      () => this.deps.options.skillSuggestions ?? [],
     );
     const basePath = this.deps.options.workspaceDirectory ?? process.cwd();
     const fdPath = this.deps.fdPath === undefined ? resolveFdPath() : this.deps.fdPath;

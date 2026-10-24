@@ -260,10 +260,9 @@ export class PiTuiApp {
     }
     if (startup.modelOptions) store.set("modelOptions", [...startup.modelOptions]);
     if (startup.effortOptions) store.set("effortOptions", [...startup.effortOptions]);
-    if (startup.slashCommands) {
-      this.options.slashCommands = startup.slashCommands;
-      this.editor.refreshAutocomplete();
-    }
+    if (startup.slashCommands) this.options.slashCommands = startup.slashCommands;
+    if (startup.skillSuggestions) this.options.skillSuggestions = startup.skillSuggestions;
+    if (startup.slashCommands || startup.skillSuggestions) this.editor.refreshAutocomplete();
     this.updateStatusLine();
     void this.seedWorkflowRuns();
   }
