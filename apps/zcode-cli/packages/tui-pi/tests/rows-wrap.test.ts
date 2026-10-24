@@ -86,3 +86,31 @@ test("a one-cell-wide terminal does not produce negative widths", () => {
   const lines = render({ content: "abc", role: "user" }, 1);
   assertFits(lines, 1);
 });
+
+test("tool part markdown bodies (ExitPlanMode plan) render inside the width", () => {
+  const plan = `# Ship it\n\n${LONG_SENTENCE}\n\n- step one\n- step two`;
+  const lines = render(
+    {
+      content: "",
+      parts: [
+        {
+          detailLines: ["Bash: run tests"],
+          markdown: plan,
+          status: "pending",
+          title: "Ship it",
+          toolCallId: "call-exit",
+          toolName: "ExitPlanMode",
+          type: "tool",
+        },
+      ],
+      role: "agent",
+    },
+    60,
+  );
+
+  assertFits(lines, 60);
+  assert.ok(lines[0]!.includes("ExitPlanMode"), "tool header stays first");
+  assert.ok(lines.some((line) => line.includes("Ship it")), "plan heading renders");
+  assert.ok(lines.some((line) => line.includes("step one")), "plan list renders");
+  assert.ok(lines.some((line) => line.includes("Bash: run tests")), "allowed prompts render");
+});

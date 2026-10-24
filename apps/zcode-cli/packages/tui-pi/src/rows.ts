@@ -115,10 +115,12 @@ const truncateLines = (lines: string[], max: number, style: Style): string[] => 
 
 class ToolPartRow implements Component {
   private part: ToolTranscriptPart;
+  private markdown: Markdown | undefined;
 
   constructor(
     part: ToolTranscriptPart,
     private readonly theme: PiTheme,
+    private readonly markdownTheme: MarkdownTheme,
   ) {
     this.part = part;
   }
@@ -127,7 +129,9 @@ class ToolPartRow implements Component {
     this.part = part;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.markdown?.invalidate();
+  }
 
   render(width: number): string[] {
     const theme = this.theme;
@@ -143,6 +147,14 @@ class ToolPartRow implements Component {
 
     for (const detail of truncateLines(part.detailLines, MAX_TOOL_DETAIL_LINES, theme.muted)) {
       lines.push(`    ${theme.muted(truncateToWidth(detail, bodyWidth))}`);
+    }
+    // plan 等正文型工具内容走 Markdown 组件，paddingX 与 detail 行的 4 格缩进对齐。
+    if (part.markdown) {
+      this.markdown ??= new Markdown(part.markdown, 4, 0, this.markdownTheme);
+      this.markdown.setText(part.markdown);
+      lines.push(...this.markdown.render(width));
+    } else {
+      this.markdown = undefined;
     }
     if (part.output) {
       const outputLines = truncateLines(
@@ -217,7 +229,7 @@ class PartRow implements Component {
   ) {
     this.child =
       part.type === "tool"
-        ? new ToolPartRow(part, theme)
+        ? new ToolPartRow(part, theme, markdownTheme)
         : part.type === "thought"
           ? new ThoughtPartRow(part, theme)
           : part.format === "plain"

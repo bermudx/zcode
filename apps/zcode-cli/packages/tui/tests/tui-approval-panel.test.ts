@@ -95,6 +95,24 @@ test("discloses the full official Computer Use project grant and returns it unch
   assert.deepEqual(result.permissionUpdates, approval.request.suggestedPermissionUpdates);
 });
 
+test("ExitPlanMode approval offers Approve plan/Reject only and previews plan text", () => {
+  const approval = approvalPrompt({
+    allowedPrompts: [{ prompt: "run tests", tool: "Bash" }],
+    plan: "# Ship it\n\n- do the thing",
+  });
+  approval.request.toolName = "ExitPlanMode";
+
+  assert.deepEqual(decisionsForApproval(approval.request), ["allow_once", "deny"]);
+
+  const lines = collectTextNodes(ApprovalPanel({ approval, contentWidth: 80 }));
+  assert.ok(lines.some((line) => line.text.includes("Approve plan")));
+  assert.ok(lines.some((line) => line.text.includes("Reject")));
+  assert.ok(!lines.some((line) => line.text.includes("Always allow")));
+  // 预览回显 plan 正文开头而不是序列化的 {"plan": ...} JSON 噪声。
+  assert.ok(lines.some((line) => line.text.includes("# Ship it")));
+  assert.ok(!lines.some((line) => line.text.includes('{"plan"')));
+});
+
 function approvalPrompt(input: unknown): ApprovalPrompt {
   return {
     cleanup: () => undefined,

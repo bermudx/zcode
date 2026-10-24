@@ -61,6 +61,8 @@ export type ThoughtTranscriptPart = {
 export type ToolTranscriptPart = {
   detailLines: string[];
   error?: string;
+  /** 工具行内展示的富文本正文（如 ExitPlanMode 的 plan 卡片）；经 Markdown 渲染。 */
+  markdown?: string;
   output?: string;
   resultDisplay?: ToolResultDisplay;
   status: "pending" | "running" | "completed" | "failed";

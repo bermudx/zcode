@@ -111,6 +111,7 @@ function restoreTranscriptPart(
   return {
     detailLines: projection.detailLines,
     ...(part.error ? { error: part.error } : {}),
+    ...(projection.markdown !== undefined ? { markdown: projection.markdown } : {}),
     ...(part.output ? { output: part.output } : {}),
     ...(resultDisplay ? { resultDisplay } : {}),
     status: part.status,

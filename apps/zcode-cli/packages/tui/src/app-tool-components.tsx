@@ -1,5 +1,6 @@
 import React from "react";
 import type { ToolResultDisplayLine, ToolTranscriptPart } from "./app-model.js";
+import { MarkdownText } from "./app-markdown.js";
 import { ShikiDiffView, diffViewForWidth } from "./app-shiki-diff-view.js";
 import { palette } from "./app-model.js";
 import { truncateDisplay } from "./app-terminal-width.js";
@@ -45,6 +46,8 @@ export function ToolTranscriptPartView({
         `${TOOL_DETAIL_INDENT}${line}`,
       ),
     ),
+    // 正文型工具（ExitPlanMode 的 plan）按 Markdown 渲染，紧跟 detail 行之后。
+    ...(part.markdown ? [h(MarkdownText, { content: part.markdown, key: "markdown" })] : []),
     ...(part.resultDisplay
       ? [
           ...(part.resultDisplay.title

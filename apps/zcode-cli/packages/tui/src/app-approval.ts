@@ -1,4 +1,5 @@
 import type { PermissionBrokerRequest, PermissionBrokerResult } from "@zcode/contracts";
+import { EXIT_PLAN_MODE_TOOL_NAME } from "@zcode/contracts";
 import { OFFICIAL_CUA_PERMISSION_RULE_TOOL_NAME } from "@zcode/shared";
 import type { KeyEvent } from "@mbears/opentui-core";
 import type React from "react";
@@ -12,6 +13,9 @@ const COMMAND_INPUT_FIELD = "command";
 const DESCRIPTION_INPUT_FIELD = "description";
 
 export function decisionsForApproval(request: PermissionBrokerRequest): ApprovalDecision[] {
+  // ExitPlanMode 的"批准"只能作用于本次方案；persist 成项目规则会让后续
+  // 每次 plan 审批都被自动放行，语义上是危险的，所以永远单选。
+  if (request.toolName === EXIT_PLAN_MODE_TOOL_NAME) return ["allow_once", "deny"];
   return request.approvalMode === "user-once" ? ["allow_once", "deny"] : approvalDecisions;
 }
 
@@ -59,13 +63,15 @@ export function approvalDecisionLabel(
   decision: ApprovalDecision,
   request?: PermissionBrokerRequest,
 ): string {
-  if (decision === "allow_once") return "Allow once";
+  const isExitPlanMode = request?.toolName === EXIT_PLAN_MODE_TOOL_NAME;
+  // plan 审批与普通权限语义不同：allow_once 即批准方案并退出 plan mode。
+  if (decision === "allow_once") return isExitPlanMode ? "Approve plan" : "Allow once";
   if (decision === "allow_project") {
     return request && isOfficialCuaProjectApproval(request)
       ? "Always allow Computer Use in this project"
       : "Always allow in this project";
   }
-  return "Deny";
+  return isExitPlanMode ? "Reject" : "Deny";
 }
 
 export function isOfficialCuaProjectApproval(request: PermissionBrokerRequest): boolean {
@@ -84,6 +90,10 @@ export function approvalRequestDescription(request: PermissionBrokerRequest): st
 export function previewPermissionInput(input: unknown): string {
   const command = stringField(asRecord(input), COMMAND_INPUT_FIELD);
   if (command) return command;
+  // plan 正文已经在 transcript 的 ExitPlanMode 行内渲染，这里只回显开头作为上下文，
+  // 避免 JSON.stringify 出的 {"plan": ...} 噪声。
+  const plan = stringField(asRecord(input), "plan");
+  if (plan) return plan;
   if (typeof input === "string") return input;
   try {
     return JSON.stringify(input);

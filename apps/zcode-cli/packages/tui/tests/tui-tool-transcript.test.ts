@@ -8,6 +8,7 @@ import {
 } from "../src/app-tool-transcript.js";
 import { formatToolFilePath } from "../src/app-tool-path-display.js";
 import { ToolTranscriptPartView } from "../src/app-tool-components.js";
+import { MarkdownText } from "../src/app-markdown.js";
 
 test("formats Read paths relative to the workspace", () => {
   assert.equal(
@@ -124,6 +125,86 @@ test("renders the tool title and indented detail rows", () => {
   assert.equal(lines[1]?.text, "  command: npm test");
   assert.equal(lines[2]?.text, "  cwd: packages/tui");
 });
+
+test("ExitPlanMode projects the plan as markdown with a title and allowed prompts", () => {
+  const projection = buildToolTranscriptProjection(
+    "ExitPlanMode",
+    {
+      allowedPrompts: [
+        { prompt: "run tests", tool: "Bash" },
+        { tool: "Read" },
+      ],
+      plan: "# Refactor auth\n\n- step one\n- step two",
+    },
+    "/workspace/project",
+  );
+
+  assert.equal(projection.title, "Refactor auth");
+  assert.equal(projection.markdown, "# Refactor auth\n\n- step one\n- step two");
+  assert.deepEqual(projection.detailLines, ["Bash: run tests", "Read"]);
+});
+
+test("ExitPlanMode without a plan keeps the generic empty projection", () => {
+  const projection = buildToolTranscriptProjection("ExitPlanMode", {}, "/workspace/project");
+
+  assert.equal(projection.title, undefined);
+  assert.equal(projection.markdown, undefined);
+  assert.deepEqual(projection.detailLines, []);
+});
+
+test("scheduled ExitPlanMode tool part carries the plan into the transcript", () => {
+  const state = createToolProjectionState("/workspace/project");
+  state.apply(
+    sessionEvent(SessionEventType.ToolCallScheduled, {
+      input: {
+        plan: "## Plan\n\nDo the thing.\n",
+      },
+      toolCallId: "call-exit",
+      toolName: "ExitPlanMode",
+    }),
+  );
+
+  const part = onlyToolPart(state.messages);
+  assert.equal(part.title, "Plan");
+  assert.equal(part.markdown, "## Plan\n\nDo the thing.\n");
+});
+
+test("renders a tool part markdown body via the MarkdownText element", () => {
+  const part: ToolTranscriptPart = {
+    detailLines: [],
+    markdown: "# Plan\n\nbody",
+    status: "pending",
+    title: "Plan",
+    toolCallId: "call-exit",
+    toolName: "ExitPlanMode",
+    type: "tool",
+  };
+
+  const markdownElements = collectMarkdownElements(ToolTranscriptPartView({ part }));
+  assert.equal(markdownElements.length, 1);
+  assert.equal(markdownElements[0]?.content, "# Plan\n\nbody");
+});
+
+function collectMarkdownElements(node: unknown): Array<Record<string, unknown>> {
+  const found: Array<Record<string, unknown>> = [];
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child);
+      return;
+    }
+    if (typeof value !== "object" || value === null || !("props" in value)) return;
+    const element = value as {
+      props?: { children?: unknown; content?: unknown };
+      type?: unknown;
+    };
+    if (element.type === MarkdownText) {
+      found.push(element.props ?? {});
+    }
+    visit(element.props?.children);
+  };
+  visit(node);
+  return found;
+}
 
 function createToolProjectionState(workspaceDirectory: string): {
   apply: (event: SessionEvent) => void;

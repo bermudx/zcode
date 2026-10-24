@@ -92,7 +92,7 @@ runtime 实现负责保存 `prePlanMode`、更新 `config.mode`、写入 `Sessio
 ## UI / ZCode app-server
 
 - permission request 仍复用现有 `PermissionRequested` / `PermissionResolved` 协议。
-- `ExitPlanMode` 的 `plan` 留在 tool input / result payload 中，现有 plan mode tool panel 可解析展示。
+- `ExitPlanMode` 的 `plan` 留在 tool input / result payload 中，客户端 tool panel 解析展示：desktop 走 plan card + side pane；TUI（React 与 pi）把 `input.plan` 投影为 `ToolTranscriptPart.markdown` 行内渲染，审批面板显示 "Approve plan"/"Reject"（plan 批准永远单选，不落项目规则）。
 - desktop continuous 和 web remote replayable 都只消费 session event / snapshot；relay 与 main 不保存 plan mode 业务状态。
 
 ## 测试

@@ -320,7 +320,11 @@ abortSignal 传下去。
   "Approve" 选项、不满足 min(2)，走普通审批面板（allow=approve）。
   wizard 的 modify 结果只回 `content.answers/annotations`——服务端
   normalize 只取这两键，多带不会泄漏但也不该带。MCP elicitation 等
-  未知 kind 如实 decline，不冒充用户输入。
+  未知 kind 如实 decline，不冒充用户输入。plan 正文不进审批 params，
+  走 `ToolCallScheduled` 的 `input.plan` → transcript 行内 markdown
+  （`ToolTranscriptPart.markdown`，live 与 resume 回放共用同一投影）；
+  审批面板只回显 plan 开头做上下文，决定项为 Approve plan / Reject。
+
 - **去重**：服务端恢复链路在等待应答期间按同一业务 requestId 周期
   reannounce；`PendingInteractions.serve` 复用首个 promise，重发不
   重开面板。首个应答送达后短留 2s grace，迟到的重发拿同一份应答。

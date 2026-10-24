@@ -22,6 +22,8 @@ type ToolTranscriptHandlers = {
 
 type ToolTranscriptInputProjection = {
   detailLines: string[];
+  /** ExitPlanMode 等工具的正文文档；挂到 part.markdown 由行内 Markdown 渲染。 */
+  markdown?: string;
   title?: string;
 };
 
@@ -42,6 +44,7 @@ export function applyToolTranscriptEvent(
     const projection = buildToolTranscriptProjection(toolName, input, handlers.workspaceDirectory);
     const part: ToolTranscriptPart = {
       detailLines: projection.detailLines,
+      ...(projection.markdown !== undefined ? { markdown: projection.markdown } : {}),
       status: "pending",
       title: projection.title,
       toolCallId,
@@ -133,6 +136,7 @@ export function buildToolTranscriptProjection(
     return {
       detailLines: compactLines([fieldLine(record, "name"), fieldLine(record, "args")]),
     };
+  if (normalized === "exitplanmode") return exitPlanModeDetails(record);
 
   return { detailLines: genericInputDetails(record) };
 }
@@ -324,6 +328,36 @@ function agentDetails(record: Record<string, unknown>): string[] {
     booleanField(record, "run_in_background") ? "background: true" : undefined,
     previewLine(record, "prompt"),
   ]);
+}
+
+const PLAN_HEADING_PATTERN = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/;
+
+// plan 是待审批正文（spec：plan 留在 tool input 由客户端解析展示）——generic
+// details 会把它压成一行 JSON，这里提升为行内 markdown 文档；title 取首个
+// markdown 标题，allowedPrompts 保留为实现期需要的 Bash 权限提示。
+function exitPlanModeDetails(record: Record<string, unknown>): ToolTranscriptInputProjection {
+  const plan = stringField(record, "plan");
+  const allowedPrompts = (Array.isArray(record.allowedPrompts) ? record.allowedPrompts : [])
+    .map(asRecord)
+    .map((item) =>
+      [stringField(item, "tool"), stringField(item, "prompt")]
+        .filter((part): part is string => Boolean(part))
+        .join(": "),
+    )
+    .filter((line) => line.length > 0);
+  return {
+    detailLines: allowedPrompts,
+    ...(plan ? { markdown: plan, title: planTitle(plan) } : {}),
+  };
+}
+
+function planTitle(plan: string): string | undefined {
+  for (const line of plan.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    return PLAN_HEADING_PATTERN.exec(trimmed)?.[1]?.trim() ?? trimmed;
+  }
+  return undefined;
 }
 
 function genericInputDetails(record: Record<string, unknown>): string[] {
