@@ -135,15 +135,11 @@ just commits, when budgeting syncs.
 
 ## Builds and installation
 
-Current installed commands **still use the old trees**:
-
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | rapid-cloud worktree's `zcode-attach.cjs`, with core pinned to that worktree's `zcode.cjs` |
-| `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the c6130f43 pair (commands + `--model`), promoted 2026-10-24 after the verification matrix — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
-This new checkout contains source only: dependencies and bundles have not been
-installed or built. Existing builds/wrappers and live cores were not changed.
 The external `zcode-allowance-update` script manages the parked standalone tree;
 **do not use it to update piz**.
 

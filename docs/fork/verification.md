@@ -222,3 +222,48 @@ matrix) remains open and unchanged.
   main checkout during the /commands build — deliberate isolation
   avoidance, noted in report ~/goblin/state/delegations/7).
 - Merged to main: ff (fast-forward), model-flag via --no-ff 810629b3.
+
+## 2026-10-24 — promotion of the c6130f43 pair (commands + model flag)
+
+Full battery re-run in the main checkout before promote, all green unless
+stated:
+
+- Root typecheck; CLI workspace typecheck (34/34 turbo tasks); root lint
+  (0 errors, 96 warnings — upstream noise); CLI lint via the direct
+  `run-cli-lint.mjs` invocation (0 errors / 71 warnings / 13 accepted);
+  `architecture:check --changed` clean.
+- CLI suite = package `test` script + explicit `attach-resume-target` and
+  `attach-model-option` files, `env -u ZCODE_WORKSPACE_IDENTITY`:
+  607/610 pass, 3 fails exactly the known pre-existing set (build.test.mjs
+  clientOnly deep-equal + 2 SEA asset tests; delegation 8's verifier
+  confirmed identical on baseline 3c32875b). One extra flake observed once
+  under full-suite load (`tui-subagents.test.ts` file-level timeout,
+  10/10 pass isolated and on suite re-run) — load flakiness, not a
+  regression.
+- tui-pi 165/165; adapters client-request-signing 9/9; bootstrap
+  socket-listener 4/4; shared attach contract (root vitest) 4/4.
+- Fresh dist pair: `PATH="$PWD/node_modules/.bin:$PATH" … build` (25/25,
+  mostly cached) + `build:attach`; bundle grep confirms both new symbols
+  (`commands/referenceCatalog`, `resolveInitialModelRef`) before promote.
+- `promote-piz.sh` atomic swap to dist-runtime.
+- Installed-pair smoke (real `piz` wrapper, util-linux `script` pty):
+  - scratch workspace, isolated `ZCODE_DATA_BASE_DIR`: banner `piz v0.17.0`,
+    footer pwd row + `yolo` mode token, `/` panel lists the user's global
+    commands `good-prompt` and `review` (filtered via `/good`, `/rev`).
+  - scratch workspace, default data dir (unset): `piz --model GLM-5.3`
+    boots with banner `models: GLM-5.3, GLM-5.3-Flash, GLM-5.3-FlashX`
+    (real account catalog) and exits cleanly on double Ctrl-C. One scratch
+    session record in the operator's store is the only side effect
+    (same class as the 10-24 model-flag live check).
+  - Environment lesson: `ZCODE_DATA_BASE_DIR` is a HOME-like base — the
+    core appends `.zcode/v2` (provider config, sockets). Setting it to
+    `~/.zcode` yields `~/.zcode/.zcode/v2` (nothing there → catalog
+    `(none)`, `--model` fails listing zero models). Unset = `homedir()`
+    is the supported way to reach the real `~/.zcode/v2`.
+  - Scratch cores killed by pid file under their own data dir; verified by
+    `/proc/<pid>/cwd` + socket `.sock.info` `workspaceIdentity` matching
+    only scratch paths. Operator's live cores/clients untouched.
+
+Still NOT done: the full acceptance gate above (model turn, signing against
+the real provider request, allowance evidence, Ctrl-C signal path, memory
+matrix) remains open and unchanged.
