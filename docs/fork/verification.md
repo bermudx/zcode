@@ -129,7 +129,12 @@ Actually run here, all passing unless stated:
   `zcode-attach.cjs boots under a pty, spawns core, renders TUI status line`
   against the freshly built binaries.
 - Wrapper `~/.local/bin/piz` repointed to `~/build/piz/apps/zcode-cli/packages/cli/dist`
-  (matched pair, core pin + `ZCODE_SERVER_BIN` override kept).
+  (matched pair, core pin + `ZCODE_SERVER_BIN` override kept). Later moved to
+  `packages/cli/dist-runtime/` + `scripts/promote-piz.sh` so dev rebuilds can
+  no longer leak into the installed client: `dist-runtime/` is written only by
+  the promote step (atomic dir swap), and `import("@zcode/tui-pi")` /
+  `import("@zcode/tui")` resolve to frozen snapshots in
+  `dist-runtime/node_modules/@zcode/` instead of the live workspace symlinks.
 - End-to-end boot: `piz` under a pty (throwaway cwd, isolated
   `ZCODE_DATA_BASE_DIR`), rendered live TUI until killed by timeout; no
   MODULE_NOT_FOUND; spawned core exited cleanly with the client.

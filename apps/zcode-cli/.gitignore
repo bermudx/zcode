@@ -24,3 +24,7 @@ vendor
 
 # Lowering 的人工可审查契约快照不是 tsc 产物，干净 checkout 也必须可运行测试。
 !packages/dynamic-workflow/tests/lowering/expected/*.js
+
+# piz frozen runtime (promote-piz.sh output)
+dist-runtime/
+.dist-runtime.*/

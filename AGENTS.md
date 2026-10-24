@@ -14,9 +14,13 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   allowance eligibility from code presence alone.
 - Preserve unrelated dirty work and existing history. New carried-change commit
   subjects use `fork:`. Work on `patch/<topic>` or `sync/<date>-<sha>` branches.
-- Installed commands: since 2026-10-23 `piz` runs the matched client/core
-  pair built in THIS checkout (`apps/zcode-cli/packages/cli/dist`); it does
-  not auto-update — rebuild dist after source changes (see
+- Installed commands: since 2026-10-23 `piz` runs a matched client/core
+  pair built in THIS checkout; it does not auto-update. The wrapper execs
+  `apps/zcode-cli/packages/cli/dist-runtime/`, a frozen dir written only by
+  `apps/zcode-cli/scripts/promote-piz.sh` — run it after the verification
+  matrix passes, never as part of a dev build. Dev builds write
+  `packages/*/dist/` and cannot leak into `piz`; frontend externals resolve
+  to snapshots inside `dist-runtime/node_modules` (see
   `docs/fork/verification.md`). `zcode` on PATH still points to the old
   allowance tree. Do not change wrappers, restart live cores, push,
   publish or remove old branches/worktrees as incidental cleanup.
