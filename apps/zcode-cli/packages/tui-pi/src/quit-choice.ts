@@ -8,6 +8,7 @@
 import { matchesKey } from "@earendil-works/pi-tui";
 import {
   shouldClearPromptDraftOnCtrlC,
+  shouldExitOnCtrlD,
   type CtrlCExitGuard,
 } from "@zcode/tui/internals";
 import { resetCtrlCExitGuard, runCtrlCIntent } from "./ctrl-c-intent.js";
@@ -109,6 +110,18 @@ export class BusyQuitChoice {
   /** busy（含等交互）或 armed 时 Ctrl-C 属于退出决策而非面板/补全键。 */
   private shouldHandleCtrlC(): boolean {
     return this.armed() || this.deps.turnBusy();
+  }
+
+  /**
+   * Ctrl-D 全段决策（idle 与 busy 共用）：草稿非空不介入（返回 false 让编辑器
+   * 删字符）；空草稿时 armed/busy 走 onCtrlD，否则 abort+exit。
+   */
+  handleCtrlD(input: { draftValue: string; hasAttachments: boolean }): boolean {
+    if (!shouldExitOnCtrlD(input)) return false;
+    if (this.onCtrlD()) return true;
+    this.deps.abortTurn();
+    this.deps.exit(0);
+    return true;
   }
 
   /** Ctrl-D：armed 窗口内 = 分离退出；busy = arm 三选一。返回 true 表示已消费。 */

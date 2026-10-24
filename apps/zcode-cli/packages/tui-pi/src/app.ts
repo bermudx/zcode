@@ -42,7 +42,6 @@ import {
   resetDoublePressGuard,
   resolveSidebarShortcut,
   seedWorkflowMirror,
-  shouldExitOnCtrlD,
   submitDuringActiveTurn,
   submitIdleTurn,
   validContextUsage,
@@ -522,11 +521,7 @@ export class PiTuiApp {
 
   /* ---------- chords ---------- */
 
-  /**
-   * Ctrl-C 意图：字节路径（raw 模式下的 0x03）与信号路径（SIGINT）共用同一条
-   * guard 与同一份状态（见 ctrl-c-intent.ts）。busy 三选一/armed/双击语义全部
-   * 收敛在 BusyQuitChoice（quit-choice.ts）。
-   */
+  /** Ctrl-C 意图（字节/SIGINT 共用同一 guard 与状态）：判定收敛在 BusyQuitChoice。 */
   handleCtrlCIntent(): void {
     this.quitChoice.onCtrlC(this.editor.getText());
   }
@@ -534,7 +529,6 @@ export class PiTuiApp {
   private dispatchChord(data: string): { consume?: boolean } | undefined {
     const store = this.store;
 
-    // 退出键先行：busy 三选一不能被面板/补全的键盘所有权挡住（SIGINT 一致性见 quit-choice.ts）。
     if (this.quitChoice.handleEarlyQuitKey(data, this.editor.getText())) return { consume: true };
 
     // Panels own the keyboard while visible.
@@ -548,14 +542,10 @@ export class PiTuiApp {
     const shortcutKey = keyEventFromInput(data);
     if (shortcutKey) {
       const intent = resolveSidebarShortcut(this.sidebarShortcut, shortcutKey, Date.now());
-      if (intent === "arm") {
-        store.set("status", SIDEBAR_LEADER_HINT);
-        return { consume: true };
-      }
-      if (intent === "toggle") {
-        this.toggleInfoPanel();
-        return { consume: true };
-      }
+      if (intent === "arm") store.set("status", SIDEBAR_LEADER_HINT);
+      if (intent === "toggle") this.toggleInfoPanel();
+      // "pass"/toggle-files/toggle-apis must not consume: pass-through keys reach the editor.
+      if (intent === "arm" || intent === "toggle") return { consume: true };
     }
 
     if (matchesKey(data, "ctrl+c")) {
@@ -575,20 +565,14 @@ export class PiTuiApp {
       return { consume: true };
     }
 
-    if (matchesKey(data, "ctrl+d")) {
-      if (
-        shouldExitOnCtrlD({
-          draftValue: this.editor.getText(),
-          hasAttachments: store.state.draftAttachments.length > 0,
-        })
-      ) {
-        // busy 中 Ctrl-D 不直接退出：先 arm 三选一，armed 内 Ctrl-D 才 detach。
-        if (this.quitChoice.onCtrlD()) return { consume: true };
-        this.store.turnAbort.current?.abort();
-        this.onExit(0);
-        return { consume: true };
-      }
-      return undefined; // non-empty draft: let editor delete char forward
+    if (
+      matchesKey(data, "ctrl+d") &&
+      this.quitChoice.handleCtrlD({
+        draftValue: this.editor.getText(),
+        hasAttachments: store.state.draftAttachments.length > 0,
+      })
+    ) {
+      return { consume: true };
     }
 
     if (matchesKey(data, "ctrl+y")) {
