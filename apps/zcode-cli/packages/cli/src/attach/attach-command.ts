@@ -28,6 +28,7 @@ import {
   projectAttachTranscriptMessages,
 } from "./attach-session.js";
 import { listAttachSkillCatalog, toSkillSuggestions } from "./attach-skills.js";
+import { listAttachCommandCatalog, toCommandCenterCustomCommandList } from "./attach-commands.js";
 import {
   AttachProtocolVersionError,
   AttachRuntime,
@@ -229,10 +230,15 @@ export const runAttachCommand = async (
             }
           : {}),
         loadStartupOptions: async () => {
-          const [customCommands, workspaceGitBranch, skillCatalog] = await Promise.all([
-            (deps.listAttachCustomCommands?.(deps) ?? Promise.resolve(undefined)).catch(
-              () => undefined,
-            ),
+          // 自定义命令目录与技能目录同源：core 现扫（commands/referenceCatalog），
+          // 瘦客户端不本地重扫（bundle 无 bootstrap，双扫只会漂移）；失败只丢
+          // 面板条目不阻塞启动。展开不走这里 —— 未知 /name 原文转发，core 的
+          // input facade 负责（含 !`cmd` 动态展开，客户端侧展开器不支持）。
+          const [customCommandCatalog, workspaceGitBranch, skillCatalog] = await Promise.all([
+            listAttachCommandCatalog({
+              request: (method, params) => runtime.currentClient().request(method, params),
+              workspace: workspaceRef,
+            }).catch(() => undefined),
             (deps.resolveWorkspaceGitBranch ?? resolveWorkspaceGitBranch)({
               workspaceDirectory,
             }).catch(() => undefined),
@@ -249,9 +255,14 @@ export const runAttachCommand = async (
             initialThoughtLevel: handle.getThoughtLevel(),
             locale: startupLocale,
             modelOptions: handle.snapshot.settings.model.available as never,
-            slashCommands: listSlashCommandSuggestions(customCommands, {
-              workflowMode,
-            }),
+            slashCommands: listSlashCommandSuggestions(
+              customCommandCatalog
+                ? toCommandCenterCustomCommandList(customCommandCatalog)
+                : undefined,
+              {
+                workflowMode,
+              },
+            ),
             ...(skillCatalog
               ? { skillSuggestions: toSkillSuggestions(skillCatalog) }
               : {}),

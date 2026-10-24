@@ -212,6 +212,27 @@ core 的 `session/send` 同一时间只接纳一个 prompt（并发时拒绝
 `sessionSetThoughtLevel`，返回 `{kind:"command_result"}`；
 不会作为普通 prompt 发给模型。
 
+### 自定义命令（/commands，2026-10-24）
+
+用户级（`~/.zcode/commands`）与 workspace 级（`<cwd>/.zcode/commands`）
+markdown 命令在 attach 模式分两段：**目录走协议，展开留 core**。
+
+- **目录**：新协议方法 `commands/referenceCatalog`（workspace 权威、
+  每次调用现扫，照 `skills/referenceCatalog` 的 draft 先例；无 session
+  权威 —— 自定义命令没有会话冻结状态，core 的 input facade 每次 send
+  现扫展开）。瘦客户端 `/` 面板 suggestions（`loadStartupOptions`）与
+  commandCenter `/help` 列表都从它取数，不本地重扫（瘦客户端 bundle 无
+  bootstrap；`listAttachCustomCommands` 本地扫描注入点已删除）。保留名
+  剔除（facade 拒绝保留名，列出即谎话），`disableNonInteractive` 透传。
+- **展开**：未知 `/name args` 照 P005 原文经 `session/send` 转发，由 core
+  的 input facade（`customCommandPromptResolver` →
+  `resolveZCodeCustomCommandPrompt`，create-app.ts 传 `workingDirectory`）
+  展开并把原文记为 `displayInput`。这是 monolith headless 的同款路径，
+  且能力更强：facade 经 `executionPort` 支持 `!\`cmd\`` 动态 shell 展开，
+  客户端侧展开器（`expandCliCustomCommandPrompt`）对同语法直接拒绝 ——
+  刻意不接 `loadCustomCommand`。决策记录：
+  [docs/fork/attach-custom-commands-design.md](../../../../../docs/fork/attach-custom-commands-design.md)。
+
 ### core 死亡与重连恢复
 
 socket close → 状态行 "reconnecting" + transcript 内 `session_notice`

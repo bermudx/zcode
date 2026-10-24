@@ -24,6 +24,7 @@ import type {
 import { connectAttachClient, AttachProtocolError, type AttachClient } from "./attach-client.js";
 import { AttachSessionHandle, asCommandCenterApp } from "./attach-session.js";
 import { listAttachSkillCatalog, toCommandCenterSkillList } from "./attach-skills.js";
+import { listAttachCommandCatalog, toCommandCenterCustomCommandList } from "./attach-commands.js";
 import type { CommandCenterApp, CommandCenterDeps } from "../command-center.js";
 import { createCommandCenter, parseSlashCommand } from "../command-center.js";
 import type { TuiPromptHandler } from "../tui-command-state.js";
@@ -435,6 +436,16 @@ export function createAttachPromptHandler(
         await listAttachSkillCatalog({
           request,
           sessionId: current.sessionId,
+          workspace: options.workspace,
+        }),
+      ),
+    // `/help` 列举自定义命令走 core 的 commands/referenceCatalog（workspace 现扫）。
+    // 刻意不接 loadCustomCommand：展开留在 core 的 input facade —— 客户端侧展开
+    // 会砍掉 !`cmd` 动态语法，且需要第二份命令事实。未知 /name 照 P005 原文转发。
+    listCustomCommands: async () =>
+      toCommandCenterCustomCommandList(
+        await listAttachCommandCatalog({
+          request,
           workspace: options.workspace,
         }),
       ),

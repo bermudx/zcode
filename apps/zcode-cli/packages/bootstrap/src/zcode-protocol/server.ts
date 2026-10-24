@@ -83,6 +83,7 @@ import {
   getPluginReferenceCatalog,
   resolveSuggestedPluginReference,
 } from "./plugin-reference-catalog.js";
+import { getCommandReferenceCatalog } from "./command-reference-catalog.js";
 import { getSkillReferenceCatalog } from "./skill-reference-catalog.js";
 import {
   deleteSavedWorkflowOp,
@@ -879,6 +880,8 @@ export class ZCodeProtocolAgentServer {
         return await listPluginUiSurfaces(this.context, request.params);
       case zcodeProtocolMethods.skillsReferenceCatalog:
         return await getSkillReferenceCatalog(this.context, request.params);
+      case zcodeProtocolMethods.commandsReferenceCatalog:
+        return await getCommandReferenceCatalog(this.context, request.params);
       case zcodeProtocolMethods.workflowsList:
         return await listSavedWorkflowsOp(this.context, request.params);
       case zcodeProtocolMethods.workflowsGet:

@@ -783,6 +783,7 @@ modules:
       - packages/shared/src/app-server-attach
       - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/socket-listener.ts
       - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/runtime-resources.ts
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/command-reference-catalog.ts
       - apps/zcode-cli/packages/cli/src/app-server-spawn.ts
       - apps/zcode-cli/packages/cli/src/protocol-lifecycle.ts
       - apps/zcode-cli/packages/cli/src/attach

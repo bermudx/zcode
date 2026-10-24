@@ -46,7 +46,6 @@ import type { PluginsCommandOverrides } from "./plugins-command.js";
 import type { CliShutdownProcess } from "./shutdown.js";
 import type { resolveWorkspaceGitBranch } from "./tui-workspace-git.js";
 import type { resolveTuiStartupLocale } from "./tui-startup-locale.js";
-import type { listCustomCommandsForTui } from "./tui-command-data.js";
 import type { createWorkspacePathSuggestionProvider } from "./tui-workspace-paths.js";
 
 export type BootstrapModule = typeof import("@zcode/bootstrap");
@@ -113,8 +112,8 @@ export interface RunDependencies extends PluginsCommandOverrides {
   resolveWorkspaceGitBranch?: typeof resolveWorkspaceGitBranch;
   // attach 瘦客户端专用注入点：zcode-attach.cjs 不带 adapters/bootstrap，
   // 这三个重实现由 monolith 侧 run.ts 传入；瘦入口用本地降级实现。
+  // （自定义命令已改走 commands/referenceCatalog 协议目录，不再本地扫描注入。）
   createAttachPathSuggestions?: typeof createWorkspacePathSuggestionProvider;
-  listAttachCustomCommands?: typeof listCustomCommandsForTui;
   resolveAttachStartupLocale?: typeof resolveTuiStartupLocale;
   logoutZCodeCli?: (options?: LogoutZCodeCliOptions) => ReturnType<typeof logoutZCodeCli>;
   runZCodeProtocolAgent?: (options?: RunZCodeProtocolAgentOptions) => Promise<void>;

@@ -1385,3 +1385,171 @@ test("无 handler（无在途回合）时 permission → deny / userInput → de
     await rm(dir, { force: true, recursive: true });
   }
 });
+
+// ── 自定义命令（commands/referenceCatalog）──
+// 契约：目录经协议取（瘦客户端不本地重扫），展开留在 core 的 input facade ——
+// 未知 `/name args` 必须原文转发 session/send（客户端侧展开会砍 !`cmd` 动态语法）。
+
+const commandCatalog = {
+  commands: [
+    {
+      description: "Review Guidelines",
+      name: "review",
+      path: "/home/user/.zcode/commands/review.md",
+      scope: "user",
+      source: "zcode",
+    },
+  ],
+  totalDiscovered: 1,
+};
+
+test("/help 列出自定义命令（commands/referenceCatalog 目录）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "commands/referenceCatalog") return commandCatalog;
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = (await handler("/help", {})) as { response?: string };
+    assert.match(result.response ?? "", /Custom commands:/);
+    assert.match(result.response ?? "", /\/review: Review Guidelines/);
+    // 目录请求携带 workspace ref，方法名与 shared 协议表一致。
+    const catalogCalls = core.requests.filter(
+      (r) => r.method === "commands/referenceCatalog",
+    );
+    assert.equal(catalogCalls.length, 1);
+    assert.deepEqual(catalogCalls[0]?.params?.workspace, {
+      workspaceKey: "/tmp/ws",
+      workspacePath: "/tmp/ws",
+    });
+    assert.ok(
+      !core.requests.some((r) => r.method === "session/send"),
+      "help must not reach session/send",
+    );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("/review 参数原文转发 session/send（展开在 core 的 input facade，不在客户端）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "commands/referenceCatalog") return commandCatalog;
+    if (request.method === "session/send") {
+      const inputId = request.params.inputId as string;
+      const content = request.params.content as string;
+      queueMicrotask(() => {
+        notify(rawEvent({ inputId, payload: { inputId }, seq: 1, turnId: "t", type: "turn_started" }));
+        notify(rawEvent({ payload: { response: "ok", resultType: "completed" }, seq: 2, turnId: "t", type: "turn_complete" }));
+      });
+      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    await handler("/review apps/cli/src/main.ts", {});
+    const sends = core.requests.filter((r) => r.method === "session/send");
+    assert.equal(sends.length, 1, "expected exactly one session/send");
+    // 逐字转发：客户端不做任何展开/改写 —— core 的 facade 负责并记 displayInput。
+    assert.equal(sends[0]?.params.content, "/review apps/cli/src/main.ts");
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("loadStartupOptions 的 slashCommands 含协议目录里的自定义命令", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-startup-"));
+  const workspace = join(dir, "workspace");
+  const { resolveSocketPath } = await import("../src/app-server-spawn.js");
+  const socketPath = resolveSocketPath(
+    { workspacePath: workspace },
+    { env: { ZCODE_DATA_BASE_DIR: dir } },
+  );
+  const { mkdir } = await import("node:fs/promises");
+  const { dirname } = await import("node:path");
+  await mkdir(dirname(socketPath), { recursive: true });
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/create") return makeSnapshot();
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "commands/referenceCatalog") {
+      return {
+        commands: [
+          {
+            argumentHint: "<prompt>",
+            description: "Rephrase a prompt into an effective form",
+            name: "good-prompt",
+            path: "/home/user/.zcode/commands/good-prompt.md",
+            scope: "user",
+            source: "zcode",
+          },
+        ],
+        totalDiscovered: 1,
+      };
+    }
+    return {};
+  });
+  const { runAttachCommand } = await import("../src/attach/attach-command.js");
+  let captured: { slashCommands?: Array<{ usage?: string }> } = {};
+  const deps = {
+    cwd: () => workspace,
+    env: { ...process.env, ZCODE_DATA_BASE_DIR: dir },
+    // git 分支解析在临时目录失败 → .catch 吞掉，不阻塞启动数据。
+    resolveWorkspaceGitBranch: async () => undefined,
+    runTui: async (options: { loadStartupOptions?: () => Promise<unknown> }) => {
+      captured = (await options.loadStartupOptions?.()) as typeof captured;
+      return 0;
+    },
+  } as never;
+  try {
+    const exitCode = await runAttachCommand(
+      { argv: [], stderr: process.stderr, stdin: process.stdin, stdout: process.stdout } as never,
+      {} as never,
+      deps,
+      "0.0.0-test",
+    );
+    assert.equal(exitCode, 0);
+    const usages = (captured.slashCommands ?? []).map((s) => s.usage);
+    assert.ok(usages.includes("/good-prompt <prompt>"), `got: ${usages.join(", ")}`);
+    assert.ok(
+      core.requests.some((r) => r.method === "commands/referenceCatalog"),
+      "expected catalog request",
+    );
+  } finally {
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});

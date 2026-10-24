@@ -3195,6 +3195,54 @@ export type ZCodeSkillsReferenceCatalogResult = z.infer<
   typeof zcodeSkillsReferenceCatalogResultSchema
 >;
 
+// ── 自定义命令目录（瘦客户端 / 面板与 /help 的只读投影）──
+// 与 skills/referenceCatalog 的差异：无 session 权威 —— 自定义命令没有会话冻结
+// 状态（core 的 input facade 每次 send 现扫展开，见 custom-command-prompt.ts），
+// 所以只有 workspace 权威、每次调用现扫。展开本身不经过该目录：瘦客户端把
+// `/name args` 原文 session/send，core 侧 facade 负责（含 !`cmd` 动态展开）。
+export const zcodeCommandReferenceCatalogEntrySchema = z
+  .object({
+    name: nonEmptyString,
+    description: z.string(),
+    // 与 contracts CustomCommandScope/CustomCommandSource 枚举逐字对齐。
+    scope: z.enum(["project", "user", "system", "admin"]),
+    source: z.enum(["agents", "zcode", "plugin"]),
+    path: nonEmptyString,
+    argumentHint: nonEmptyString.optional(),
+    model: nonEmptyString.optional(),
+    allowedTools: z.array(nonEmptyString).optional(),
+    skills: z.array(nonEmptyString).optional(),
+    rootPath: nonEmptyString.optional(),
+    frontmatterKeys: z.array(nonEmptyString).optional(),
+    // interactive-only 标记透传（frontmatter disable-noninteractive）：协议目录
+    // 不过滤 —— 消费方按自身交互性决定；attach TUI 是交互式客户端，应显示。
+    disableNonInteractive: z.boolean().optional(),
+  })
+  .strict();
+export type ZCodeCommandReferenceCatalogEntry = z.infer<
+  typeof zcodeCommandReferenceCatalogEntrySchema
+>;
+
+export const zcodeCommandsReferenceCatalogParamsSchema = z
+  .object({
+    workspace: zcodeWorkspaceRefSchema,
+  })
+  .strict();
+export type ZCodeCommandsReferenceCatalogParams = z.infer<
+  typeof zcodeCommandsReferenceCatalogParamsSchema
+>;
+export const zcodeCommandsReferenceCatalogResultSchema = z
+  .object({
+    commands: z.array(zcodeCommandReferenceCatalogEntrySchema),
+    // 去重前发现总数（CustomCommandLoadOutcome.totalDiscovered），诊断口径与
+    // skills 目录对齐；缺省时读侧退回 commands.length。
+    totalDiscovered: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export type ZCodeCommandsReferenceCatalogResult = z.infer<
+  typeof zcodeCommandsReferenceCatalogResultSchema
+>;
+
 // ── 已保存工作流的 GUI 中枢──
 // workspace 级、无会话的五个方法，照 skills/referenceCatalog 的先例：每次调用现扫
 // `<cwd>/.zcode/workflows/`（挂载时快照会漏掉手改的文件）。形状与 @zcode/contracts 的
@@ -4254,6 +4302,7 @@ export const zcodeProtocolMethods = {
   pluginsListUiSurfaces: "plugins/listUiSurfaces",
   pluginsReferenceCatalogWithCategory: "plugins/referenceCatalogWithCategory",
   skillsReferenceCatalog: "skills/referenceCatalog",
+  commandsReferenceCatalog: "commands/referenceCatalog",
   // 已保存工作流的 GUI 中枢：workspace 级、无会话。
   workflowsList: "workflows/list",
   workflowsGet: "workflows/get",

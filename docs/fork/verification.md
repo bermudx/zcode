@@ -34,6 +34,12 @@ mise exec -- pnpm --dir apps/zcode-cli --filter @zcode/adapters exec vitest run 
 mise exec -- pnpm --dir apps/zcode-cli --filter @zcode/bootstrap exec vitest run tests/socket-listener.test.ts
 ```
 
+2026-10-24 note: `pnpm --dir apps/zcode-cli typecheck` failed here with
+`turbo: command not found` (apps/zcode-cli/node_modules/.bin has no turbo;
+the hoisted root bin is not prepended in this shell). Working form:
+`cd apps/zcode-cli && mise exec -- ../../node_modules/.bin/turbo run typecheck`
+(34/34 packages). Same class of PATH gap as the lint workaround below.
+
 `pnpm --dir apps/zcode-cli lint` (run-cli-lint.mjs) spawns
 `node "$npm_execpath" exec oxlint`; under mise `npm_execpath` resolves to the
 ELF binary and the spawn fails with a SyntaxError before any package runs.
