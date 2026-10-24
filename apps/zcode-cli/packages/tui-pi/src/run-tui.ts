@@ -15,6 +15,7 @@ import {
 import type { TerminalColors } from "@earendil-works/pi-tui";
 import type { UiThemeMode } from "@zcode/contracts";
 import { PiTuiApp } from "./app.js";
+import { killTrackedShellChildren } from "./shell.js";
 import {
   queryTerminalColorsAtStartup,
   STARTUP_QUERY_TIMEOUT_MS,
@@ -78,6 +79,19 @@ export async function runPiTui(options: TuiOptions): Promise<number> {
   // Ctrl-C 递送为信号时就会首按即死，与字节路径的“再按一次退出”不一致。
   const onSigint = () => app.handleCtrlCIntent();
   process.on("SIGINT", onSigint);
+
+  // detached `!` children survive client death otherwise (pi-mono reaps them
+  // on SIGTERM/SIGHUP/crash). `exit` covers clean shutdown; signal handlers
+  // kill children then re-raise so the default termination still applies.
+  process.on("exit", killTrackedShellChildren);
+  const reapThenReraise = (signal: NodeJS.Signals): void => {
+    process.once(signal, () => {
+      killTrackedShellChildren();
+      process.kill(process.pid, signal);
+    });
+  };
+  reapThenReraise("SIGTERM");
+  if (process.platform !== "win32") reapThenReraise("SIGHUP");
 
   tui.start();
 

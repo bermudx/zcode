@@ -92,9 +92,9 @@ export const createHarness = (options: Partial<TuiOptions> = {}): Harness => {
   } as TuiOptions;
 
   const app = new PiTuiApp({
-    // `!` harness 测试钉死 /bin/sh：交接管线语义与具体 shell 无关，真实
-    // `zsh -ic`（z4h 初始化）会超过 flush 的等待窗口且依赖本机 rc。
-    env: { ...process.env, SHELL: "/bin/sh" },
+    // `!` 解析与 pi-mono 一致走 /bin/bash -c（不看 $SHELL）；注入最小 env
+    // 只为隔离本机变量，bash -c 本身无 rc、时序与 /bin/sh 相当。
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
     onExit: (code) => {
       exitCode = code;
     },

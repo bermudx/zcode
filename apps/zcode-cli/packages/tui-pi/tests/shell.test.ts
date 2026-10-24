@@ -1,9 +1,11 @@
-// `!command` escape: runs in the client workspace, prints into the transcript,
-// and rides along with the next prompt (the core owns history, so there is no
-// protocol verb to append a local message).
+// `!command`/`!!command` escape: runs in the client workspace, prints into the
+// transcript, and `!` output rides along with the next prompt (the core owns
+// history, so there is no protocol verb to append a local message). Execution
+// semantics mirror pi-mono: deterministic `bash -c` (never $SHELL, no rc),
+// detached spawn, process-tree kill, idle-pipe-grace wait.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -23,10 +25,13 @@ import { ENTER, createHarness } from "./harness.js";
 const promptText = (input: TuiPromptInput): string =>
   typeof input === "string" ? input : input.text;
 
-test("only `!cmd` is a shell escape, `!` alone is text", () => {
+test("only `!cmd`/`!!cmd` are shell escapes, bare prefixes are text", () => {
   assert.equal(isShellCommand("!ls"), true);
+  assert.equal(isShellCommand("!!ls"), true);
   assert.equal(isShellCommand("  ! git status"), true);
   assert.equal(isShellCommand("!"), false);
+  assert.equal(isShellCommand("!!"), false);
+  assert.equal(isShellCommand("!  "), false);
   assert.equal(isShellCommand("hello !world"), false);
 });
 
@@ -46,84 +51,136 @@ test("runShellCommand captures stdout and the exit code", async () => {
   }
 });
 
-test("resolveEscapeShell picks the user's bash/zsh with +m -ic, else /bin/sh", () => {
-  const exists = () => true;
+test("resolveEscapeShell follows the pi-mono bash chain, never $SHELL", () => {
+  // Unix: /bin/bash wins even when $SHELL points elsewhere.
   assert.deepEqual(
-    resolveEscapeShell("ls", { env: { SHELL: "/usr/bin/zsh" }, exists }),
-    { args: ["+m", "-ic", "ls"], file: "/usr/bin/zsh", interactive: true },
+    resolveEscapeShell({ env: { SHELL: "/usr/bin/zsh" }, exists: () => true }),
+    { args: ["-c"], commandTransport: "argv", file: "/bin/bash" },
   );
+  // /bin/bash missing → `which bash` hit; $SHELL still ignored.
   assert.deepEqual(
-    resolveEscapeShell("ls", { env: { SHELL: "/opt/homebrew/bin/bash" }, exists }),
-    { args: ["+m", "-ic", "ls"], file: "/opt/homebrew/bin/bash", interactive: true },
+    resolveEscapeShell({
+      env: { SHELL: "/usr/bin/zsh" },
+      exists: (path) => path !== "/bin/bash",
+      which: () => "/usr/local/bin/bash",
+    }),
+    { args: ["-c"], commandTransport: "argv", file: "/usr/local/bin/bash" },
   );
-  // 非 bash/zsh 的 SHELL 与缺失/不可执行一律回退 /bin/sh（不读 rc）。
-  for (const shell of ["/usr/bin/fish", "/usr/bin/nu", "/bin/zsh", ""]) {
-    const spec = resolveEscapeShell("ls", {
-      env: shell ? { SHELL: shell } : {},
-      exists: (path) => path !== "/bin/zsh",
-    });
-    assert.equal(spec.file, "/bin/sh", shell);
-    assert.equal(spec.interactive, false);
-    assert.deepEqual(spec.args, ["-c", "ls"]);
-  }
-  const win = resolveEscapeShell("dir", {
-    env: { ComSpec: "C:\\Windows\\cmd.exe" },
-    platform: "win32",
-  });
-  assert.deepEqual(win.args, ["/d", "/s", "/c", "dir"]);
-  assert.equal(win.interactive, false);
+  // No bash anywhere → bare `sh` (PATH-resolved, like pi-mono).
+  assert.deepEqual(
+    resolveEscapeShell({ exists: () => false, which: () => null }),
+    { args: ["-c"], commandTransport: "argv", file: "sh" },
+  );
 });
 
-// `!` 必须读到用户 rc：alias/函数只在交互 shell 里定义。
-// 用临时 HOME + 种子 rc 证明 `-ic` 让 alias 生效，且启动噪声不进输出。
-const interactiveShellCases = [
-  { rcFile: ".bashrc", shell: "/bin/bash" },
-  { rcFile: ".zshrc", shell: "/usr/bin/zsh" },
-] as const;
+test("resolveEscapeShell on Windows prefers Git Bash, then `where bash.exe`", () => {
+  const env = { ProgramFiles: "C:\\Program Files" };
+  const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";
+  assert.deepEqual(
+    resolveEscapeShell({ env, exists: () => true, platform: "win32" }),
+    { args: ["-c"], commandTransport: "argv", file: gitBash },
+  );
+  // Git Bash absent → bash.exe on PATH. A legacy WSL path gets `-s` + stdin
+  // transport (argv -c quoting is broken there).
+  const wsl = "C:\\Windows\\System32\\bash.exe";
+  assert.deepEqual(
+    resolveEscapeShell({
+      env,
+      exists: () => false,
+      platform: "win32",
+      which: () => wsl,
+    }),
+    { args: ["-s"], commandTransport: "stdin", file: wsl },
+  );
+  // No bash at all → pi-mono throws with install instructions.
+  assert.throws(
+    () =>
+      resolveEscapeShell({ env, exists: () => false, platform: "win32", which: () => null }),
+    /No bash shell found/,
+  );
+});
 
-for (const { rcFile, shell } of interactiveShellCases) {
-  test(`\`!cmd\` sees ${rcFile} aliases via ${shell} -ic`, async (t) => {
-    if (!existsSync(shell)) {
-      t.skip(`${shell} not installed`);
-      return;
-    }
-    const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-rc-"));
-    const home = mkdtempSync(join(tmpdir(), "zcode-shell-home-"));
-    try {
-      writeFileSync(join(home, rcFile), "alias zz_piz_probe='echo rc-alias-ok'\n");
-      const env = { ...process.env, HOME: home, SHELL: shell };
-      const run = await runShellCommand({ command: "zz_piz_probe", cwd, env });
-      assert.equal(run.exitCode, 0, run.output);
-      assert.ok(run.output.includes("rc-alias-ok"), run.output);
-      assert.ok(!run.output.includes("job control"), run.output);
-      assert.ok(!run.output.includes("terminal process group"), run.output);
-    } finally {
-      rmSync(cwd, { force: true, recursive: true });
-      rmSync(home, { force: true, recursive: true });
-    }
-  });
-}
-
-test("`!cmd` keeps real stderr while stripping shell startup noise", async (t) => {
-  const shell = ["/bin/bash", "/usr/bin/zsh"].find((path) => existsSync(path));
-  if (!shell) {
-    t.skip("no bash/zsh installed");
+test("`!cmd` inherits exported env but not rc aliases", async (t) => {
+  // pi-mono `bash -c` semantics: no rc, so aliases never apply — but exported
+  // environment (PATH additions, vars) still does because the child inherits it.
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
     return;
   }
-  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-err-"));
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-env-"));
   const home = mkdtempSync(join(tmpdir(), "zcode-shell-home-"));
   try {
-    const env = { ...process.env, HOME: home, SHELL: shell };
-    const run = await runShellCommand({
-      command: "echo real-stderr >&2",
-      cwd,
-      env,
-    });
-    assert.ok(run.output.includes("real-stderr"), run.output);
-    assert.ok(!run.output.includes("job control"), run.output);
+    writeFileSync(join(home, ".bashrc"), "alias zz_piz_probe='echo rc-alias-ok'\n");
+    const env = { ...process.env, HOME: home, ZZ_PIZ_VAR: "env-inherited" };
+    const alias = await runShellCommand({ command: "zz_piz_probe", cwd, env });
+    assert.notEqual(alias.exitCode, 0, alias.output);
+    assert.ok(!alias.output.includes("rc-alias-ok"), alias.output);
+    const inherited = await runShellCommand({ command: "echo $ZZ_PIZ_VAR", cwd, env });
+    assert.equal(inherited.exitCode, 0);
+    assert.equal(inherited.output, "env-inherited\n");
   } finally {
     rmSync(cwd, { force: true, recursive: true });
     rmSync(home, { force: true, recursive: true });
+  }
+});
+
+test("`!cmd` resolves commands added to PATH by the user's profile", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-path-"));
+  const bindir = mkdtempSync(join(tmpdir(), "zcode-shell-bin-"));
+  try {
+    const tool = join(bindir, "zz-piz-tool");
+    writeFileSync(tool, "#!/bin/sh\necho path-tool-ok\n");
+    chmodSync(tool, 0o755);
+    const env = { ...process.env, PATH: `${bindir}:${process.env.PATH}` };
+    const run = await runShellCommand({ command: "zz-piz-tool", cwd, env });
+    assert.equal(run.exitCode, 0, run.output);
+    assert.ok(run.output.includes("path-tool-ok"), run.output);
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+    rmSync(bindir, { force: true, recursive: true });
+  }
+});
+
+test("`!cmd` resolves when a detached grandchild keeps the output pipe open", async (t) => {
+  // pi#5303: the child exits while a backgrounded descendant still holds
+  // stdout — waiting on `close` hangs; exit + idle-pipe grace must not.
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-grandchild-"));
+  try {
+    const startedAt = Date.now();
+    const run = await runShellCommand({ command: "sleep 3 & echo done", cwd });
+    assert.equal(run.exitCode, 0, run.output);
+    assert.ok(run.output.includes("done"), run.output);
+    assert.ok(Date.now() - startedAt < 3_000, "must not wait for the grandchild");
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("`!cmd` abort kills the detached process group", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-abort-"));
+  try {
+    const controller = new AbortController();
+    const promise = runShellCommand({ command: "sleep 60", cwd, signal: controller.signal });
+    setTimeout(() => controller.abort(), 50);
+    const startedAt = Date.now();
+    const run = await promise;
+    // SIGKILL → 128+9 per the shell convention, not a clean exit.
+    assert.equal(run.exitCode, 137);
+    assert.ok(Date.now() - startedAt < 5_000);
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
   }
 });
 
@@ -185,6 +242,37 @@ test("`!cmd` runs locally, prints a row, and feeds the next prompt", async () =>
     // Consumed exactly once.
     await h.app.submitValue("and again?");
     assert.ok(!promptText(prompts[1]!).includes("<shell-output"));
+  } finally {
+    await h.stop();
+    rmSync(workspace, { force: true, recursive: true });
+  }
+});
+
+test("`!!cmd` prints a row but keeps output out of the next prompt", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "zcode-shell-excluded-"));
+  const prompts: TuiPromptInput[] = [];
+  const h = createHarness({
+    submitPrompt: async (input) => {
+      prompts.push(input);
+      return { response: "ok" };
+    },
+    workspaceDirectory: workspace,
+  });
+  try {
+    h.feed("!!echo local-only");
+    h.feed(ENTER);
+    await h.flush();
+    const shellRow = h.store.state.messages.find(
+      (message) => message.role === "system" && message.content.startsWith("!!echo"),
+    );
+    assert.ok(shellRow, "excluded run must still print a transcript row");
+    assert.ok(shellRow.content.includes("local-only"));
+
+    await h.app.submitValue("prompt after excluded run");
+    assert.equal(prompts.length, 1);
+    const sent = promptText(prompts[0]!);
+    assert.ok(!sent.includes("<shell-output"), sent);
+    assert.ok(!sent.includes("local-only"), sent);
   } finally {
     await h.stop();
     rmSync(workspace, { force: true, recursive: true });
