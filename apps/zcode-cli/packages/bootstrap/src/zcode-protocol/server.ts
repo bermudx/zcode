@@ -143,14 +143,24 @@ import {
   type ZCodeProtocolClientRequestOptions,
   type ZCodeProtocolAgentDependencies,
   type ZCodeProtocolAgentServerContext,
+  type ZCodeProtocolDetachedSessionOwner,
+  type ZCodeProtocolPendingClientRequest,
+  type ZCodeProtocolSessionMigrationTarget,
   type ZCodeProtocolSessionRecord,
 } from "./server-types.js";
 import { createInMemorySessionEventStore } from "@zcode/contracts";
+import type { ZCodeApp } from "../app/types.js";
 
 export type { ZCodeProtocolAgentDependencies, ZCodeProtocolSessionRecord };
 
 import { closeMcpUiInstance, openMcpUiInstance, validateMcpUiInstance } from "./mcp-ui/index.js";
 const MAX_CLIENT_REQUEST_REANNOUNCE_INTERVAL_MS = 10_000;
+/**
+ * owner 客户端断线后反向请求（交互/提问）的挂起上限：超时就按 timedOut 拒绝，
+ * 让孤儿会话上的 tool 等待如实失败，而不是永久挂住一轮 turn。
+ * 客户端重连收养（session/resume → claimDetachedSession）会撤掉该计时器。
+ */
+const DETACHED_CLIENT_REQUEST_TIMEOUT_MS = 10 * 60_000;
 
 type ZCodeProtocolOutboundMessage = ZCodeProtocolNotification | ZCodeProtocolRequest;
 
@@ -220,16 +230,11 @@ export interface ZCodeProtocolPostResponseBatch {
   commit(): boolean;
 }
 
-interface PendingClientRequest<T> {
-  method: string;
-  reject: (error: Error) => void;
-  resolve: (value: T) => void;
-  resultSchema: ParamsSchema<T>;
-  requestKeys: Set<string>;
-  signal?: AbortSignal;
-  timeout?: ReturnType<typeof setTimeout>;
-  reannounceTimer?: ReturnType<typeof setTimeout>;
-  abortHandler?: () => void;
+/** 从反向请求 params 提取 sessionId（interaction/* 等会话作用域方法都在 params 顶层携带）。 */
+function clientRequestSessionId(params: unknown): string | undefined {
+  if (!params || typeof params !== "object") return undefined;
+  const sessionId = (params as { sessionId?: unknown }).sessionId;
+  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
 }
 
 export class ZCodeProtocolAgentServer {
@@ -265,10 +270,33 @@ export class ZCodeProtocolAgentServer {
   }
 
   private messageSink?: (message: ZCodeProtocolOutboundMessage) => void;
-  private clientDisconnectError?: Error;
+  /** 传输已断开但 server 未被 shutdown：sessions 继续跑、反向请求 park 等收养。 */
+  private clientDetached = false;
+  /**
+   * 硬终止边界（disconnectClient/shutdown 已跑过）：clientDetached 由软/硬两条
+   * 路径共享，dispatchClientRequest 单靠它无法区分"park 等收养"与"本 server
+   * 正在销毁、应答永远无处可回"——后者必须直接失败，不能 park。
+   */
+  private clientTerminated = false;
+  /**
+   * 硬终止时的原始断开错误：requestClient 在 clientTerminated 后必须抛它
+   * （→ -32603），而不是 noClientAttached——后者会命中 runtime preferences
+   * 的兼容 fallback，让 request-scoped 物化在销毁中的 server 上继续。
+   */
+  private clientDisconnectError: Error | undefined;
   private readonly context: ZCodeProtocolAgentServerContext;
   private readonly logger;
-  private readonly pendingClientRequests = new Map<string, PendingClientRequest<unknown>>();
+  private readonly pendingClientRequests = new Map<
+    string,
+    ZCodeProtocolPendingClientRequest<unknown>
+  >();
+  /** 无 sink 时挂起的反向请求；sink 恢复（或会话被收养迁移）时逐个投递。 */
+  private readonly parkedClientRequests = new Set<ZCodeProtocolPendingClientRequest<unknown>>();
+  /** sessionId → 新 owner server：record 被收养后，迟到的反向请求沿此重定向。 */
+  private readonly sessionOwnerRedirects = new Map<
+    string,
+    ZCodeProtocolSessionMigrationTarget
+  >();
   private readonly pluginOperationControllers = new Map<string, AbortController>();
   private readonly workspaceGenerateTextControllers = new Map<string, AbortController>();
   /**
@@ -308,6 +336,8 @@ export class ZCodeProtocolAgentServer {
       notify: (notification) => this.messageSink?.(notification),
       requestClient: (method, params, resultSchema, options) =>
         this.requestClient(method, params, resultSchema, options),
+      adoptDetachedSession: (sessionId) => this.adoptDetachedSession(sessionId),
+      claimDetachedSession: (sessionId) => this.tryAdoptDetachedSession(sessionId),
       sessions: new Map<string, ZCodeProtocolSessionRecord>(),
       // 交互应答登记表（broker 反向请求 × v4 resolveInteraction 命令的汇合点）。
       v4Interactions: new V4InteractionRegistry(
@@ -390,16 +420,65 @@ export class ZCodeProtocolAgentServer {
 
   setNotificationSink(sink: (message: ZCodeProtocolOutboundMessage) => void): void {
     this.runtimeResources.assertServing();
-    this.clientDisconnectError = undefined;
+    this.clientDetached = false;
     this.messageSink = sink;
+    // sink 恢复：flush 断线窗口内 park 的反向请求（detached 计时器在 deliver 内撤除）。
+    for (const pending of [...this.parkedClientRequests]) {
+      this.deliverPendingClientRequest(pending);
+    }
   }
 
+  /**
+   * 传输断开（客户端退出/崩溃）≠ 进程终止：sessions 与 pending 反向请求继续存活，
+   * 等 session/resume 被新连接收养；generateText/plugin op 这类应答只回
+   * 本连接的请求级工作则随消费者取消。detached server 由 entrypoint 的 reaper
+   * 在全部空闲后 shutdown 回收。
+   */
+  markClientDetached(error: Error): void {
+    this.networkCapture.setCaptureId(null);
+    this.clientDetached = true;
+    this.messageSink = undefined;
+    for (const controller of this.workspaceGenerateTextControllers.values()) {
+      controller.abort(error);
+    }
+    this.workspaceGenerateTextControllers.clear();
+    for (const controller of this.pluginOperationControllers.values()) {
+      controller.abort(error);
+    }
+    this.pluginOperationControllers.clear();
+    const pendings = new Set<ZCodeProtocolPendingClientRequest<unknown>>([
+      ...this.pendingClientRequests.values(),
+      ...this.parkedClientRequests,
+    ]);
+    for (const pending of pendings) {
+      // 只有 sessionId 指向已物化 record（可被收养）的请求才 park 等迁移；
+      // 物化中途的 session/create 等 runtime preferences、以及非会话级请求
+      // 都是只回本连接的请求级工作——应答无处可回，park 只会挂到孤儿超时。
+      if (!pending.sessionId || !this.context.sessions.has(pending.sessionId)) {
+        this.failPendingClientRequest(pending, error);
+        continue;
+      }
+      this.armDetachedRequestTimeout(pending);
+    }
+  }
+
+  /**
+   * 进程级终止边界（server.shutdown / 旧 owner 语义）：拒绝全部反向请求、
+   * 取消前台执行。传输断开走 markClientDetached，不到这里。
+   */
   disconnectClient(error: Error): void {
     this.networkCapture.setCaptureId(null);
+    this.clientDetached = true;
+    this.clientTerminated = true;
     this.clientDisconnectError = error;
+    this.messageSink = undefined;
     // 连接关闭后反向请求已不可能收到响应，必须先结束 pending，
     // 否则正在物化 Session 的 handler 会阻塞 connection 的关闭流程。
-    const pendingRequests = new Set(this.pendingClientRequests.values());
+    const pendingRequests = new Set<ZCodeProtocolPendingClientRequest<unknown>>([
+      ...this.pendingClientRequests.values(),
+      ...this.parkedClientRequests,
+    ]);
+    this.parkedClientRequests.clear();
     for (const pending of pendingRequests) {
       this.cleanupClientRequest(pending);
       pending.reject(error);
@@ -940,16 +1019,48 @@ export class ZCodeProtocolAgentServer {
     return { error: { code, data, message }, id };
   }
 
-  private requestClient<T>(
+  /**
+   * 反向请求入口（context.requestClient 也走这里）：session 被收养后，旧 owner
+   * broker 闭包里的迟到请求按 params.sessionId 沿 sessionOwnerRedirects 重定向；
+   * owner 链可多级（A→B→C）跟随。
+   */
+  requestClient<T>(
     method: ZCodeProtocolMethod,
     params: unknown,
     resultSchema: ParamsSchema<T>,
     options?: ZCodeProtocolClientRequestOptions,
   ): Promise<T> {
-    if (this.clientDisconnectError) {
-      throw this.clientDisconnectError;
+    const sessionId = clientRequestSessionId(params);
+    const target = sessionId ? this.sessionOwnerRedirects.get(sessionId) : undefined;
+    if (target && target !== this) {
+      return target.requestClient(method, params, resultSchema, options);
     }
-    if (!this.messageSink) {
+    return this.dispatchClientRequest(method, params, sessionId, resultSchema, options);
+  }
+
+  private dispatchClientRequest<T>(
+    method: ZCodeProtocolMethod,
+    params: unknown,
+    sessionId: string | undefined,
+    resultSchema: ParamsSchema<T>,
+    options?: ZCodeProtocolClientRequestOptions,
+  ): Promise<T> {
+    this.runtimeResources.assertServing();
+    // 硬终止边界（disconnectClient/shutdown 已跑）：抛原始断开错误——
+    // request-scoped 工作随消费者终止，不能 park 等收养，也不能命中
+    // noClientAttached 的兼容 fallback 继续物化。
+    if (this.clientTerminated) {
+      throw (
+        this.clientDisconnectError ??
+        new ProtocolRequestError(
+          PROTOCOL_CLIENT_REQUEST_ERROR_CODES.noClientAttached,
+          `No ZCode Protocol client is attached for ${method}`,
+        )
+      );
+    }
+    if (!this.messageSink && !this.clientDetached) {
+      // 从未接过 client 的 server 无从应答交互（stdio/headless 消费面）；
+      // 保持快速失败，不把无消费者的请求静默挂起。
       throw new ProtocolRequestError(
         PROTOCOL_CLIENT_REQUEST_ERROR_CODES.noClientAttached,
         `No ZCode Protocol client is attached for ${method}`,
@@ -957,22 +1068,23 @@ export class ZCodeProtocolAgentServer {
     }
 
     return new Promise<T>((resolve, reject) => {
-      let active = true;
-      const pending: PendingClientRequest<T> = {
+      const pending: ZCodeProtocolPendingClientRequest<T> = {
+        active: true,
+        detachedTimeoutMs: options?.detachedTimeoutMs,
         method,
+        owner: this,
+        params,
         reject,
+        requestKeys: new Set(),
         resolve,
         resultSchema,
-        requestKeys: new Set(),
+        sessionId,
         signal: options?.signal,
-      };
-      const cleanup = () => {
-        active = false;
-        this.cleanupClientRequest(pending);
+        trace: options?.trace,
       };
       pending.abortHandler = () => {
-        cleanup();
-        reject(
+        this.failPendingClientRequest(
+          pending as ZCodeProtocolPendingClientRequest<unknown>,
           new ProtocolRequestError(
             PROTOCOL_CLIENT_REQUEST_ERROR_CODES.cancelled,
             `Client request cancelled: ${method}`,
@@ -985,8 +1097,8 @@ export class ZCodeProtocolAgentServer {
       }
       if (options?.timeoutMs !== undefined) {
         pending.timeout = setTimeout(() => {
-          cleanup();
-          reject(
+          this.failPendingClientRequest(
+            pending as ZCodeProtocolPendingClientRequest<unknown>,
             new ProtocolRequestError(
               PROTOCOL_CLIENT_REQUEST_ERROR_CODES.timedOut,
               `Client request timed out: ${method}`,
@@ -998,22 +1110,9 @@ export class ZCodeProtocolAgentServer {
         }, options.timeoutMs);
       }
       options?.signal?.addEventListener("abort", pending.abortHandler, { once: true });
-      const sendClientRequest = () => {
-        if (!active) {
-          return;
-        }
-        const id = `server-${this.nextClientRequestId++}`;
-        const key = String(id);
-        pending.requestKeys.add(key);
-        this.pendingClientRequests.set(key, pending as PendingClientRequest<unknown>);
-        this.messageSink?.({
-          id,
-          method,
-          params,
-          ...(options?.trace ? { trace: options.trace } : {}),
-        });
-      };
-      sendClientRequest();
+      this.deliverPendingClientRequest(
+        pending as ZCodeProtocolPendingClientRequest<unknown>,
+      );
       const reannounceIntervalMs =
         options?.reannounceIntervalMs !== undefined &&
         Number.isFinite(options.reannounceIntervalMs) &&
@@ -1024,10 +1123,14 @@ export class ZCodeProtocolAgentServer {
         let nextReannounceIntervalMs = reannounceIntervalMs;
         const scheduleReannounce = () => {
           pending.reannounceTimer = setTimeout(() => {
-            if (!active) {
+            if (!pending.active) {
               return;
             }
-            sendClientRequest();
+            // reannounce 走 pending.owner：parked/detached 时 no-op 转 park，
+            // 收养迁移或 sink 恢复后的下一轮自然补投。
+            pending.owner.deliverPendingClientRequest(
+              pending as ZCodeProtocolPendingClientRequest<unknown>,
+            );
             nextReannounceIntervalMs = Math.min(
               nextReannounceIntervalMs * 2,
               MAX_CLIENT_REQUEST_REANNOUNCE_INTERVAL_MS,
@@ -1040,12 +1143,70 @@ export class ZCodeProtocolAgentServer {
     });
   }
 
+  /** ZCodeProtocolSessionMigrationTarget：在当前 sink 上投递 pending；无 sink 转 parked。 */
+  deliverPendingClientRequest(pending: ZCodeProtocolPendingClientRequest<unknown>): void {
+    if (!pending.active) return;
+    pending.owner = this;
+    if (!this.messageSink) {
+      this.parkedClientRequests.add(pending);
+      // detached 期间新到的请求（活着的 turn 发起第二个审批）也要挂孤儿
+      // 上界——markClientDetached 早已跑过，等不到下一次 arm。
+      if (this.clientDetached) this.armDetachedRequestTimeout(pending);
+      return;
+    }
+    this.parkedClientRequests.delete(pending);
+    if (pending.detachedTimer) {
+      clearTimeout(pending.detachedTimer);
+      pending.detachedTimer = undefined;
+    }
+    const id = `server-${this.nextClientRequestId++}`;
+    const key = String(id);
+    pending.requestKeys.add(key);
+    this.pendingClientRequests.set(key, pending);
+    this.messageSink({
+      id,
+      method: pending.method,
+      params: pending.params,
+      ...(pending.trace ? { trace: pending.trace } : {}),
+    });
+  }
+
+  /** detached 期间的挂起上界：到期按 timedOut 拒绝，孤儿交互不永久挂住 turn。 */
+  private armDetachedRequestTimeout(pending: ZCodeProtocolPendingClientRequest<unknown>): void {
+    if (!pending.active || pending.detachedTimer) return;
+    const timeoutMs = pending.detachedTimeoutMs ?? DETACHED_CLIENT_REQUEST_TIMEOUT_MS;
+    pending.detachedTimer = setTimeout(() => {
+      pending.detachedTimer = undefined;
+      this.failPendingClientRequest(
+        pending,
+        new ProtocolRequestError(
+          PROTOCOL_CLIENT_REQUEST_ERROR_CODES.timedOut,
+          `Client request orphaned past detached timeout: ${pending.method}`,
+          { detachedTimeoutMs: timeoutMs },
+        ),
+      );
+    }, timeoutMs);
+    // 孤儿计时器只兜底不兜底命——进程退出走 shutdown 的统一拒绝路径。
+    pending.detachedTimer.unref?.();
+  }
+
+  private failPendingClientRequest(
+    pending: ZCodeProtocolPendingClientRequest<unknown>,
+    error: Error,
+  ): void {
+    if (!pending.active) return;
+    pending.active = false;
+    pending.owner.discardPendingClientRequest(pending);
+    pending.reject(error);
+  }
+
   private resolveClientRequest(id: ZCodeProtocolRequestId, result: unknown): void {
     const key = String(id);
     const pending = this.pendingClientRequests.get(key);
     if (!pending) {
       return;
     }
+    pending.active = false;
     this.cleanupClientRequest(pending);
     try {
       pending.resolve(pending.resultSchema.parse(result));
@@ -1062,16 +1223,25 @@ export class ZCodeProtocolAgentServer {
     if (!pending) {
       return;
     }
+    pending.active = false;
     this.cleanupClientRequest(pending);
     pending.reject(error);
   }
 
-  private cleanupClientRequest<T>(pending: PendingClientRequest<T>): void {
+  /** ZCodeProtocolSessionMigrationTarget：按 pending 所在 owner 清理登记与计时器。 */
+  discardPendingClientRequest(pending: ZCodeProtocolPendingClientRequest<unknown>): void {
+    this.cleanupClientRequest(pending);
+  }
+
+  private cleanupClientRequest(pending: ZCodeProtocolPendingClientRequest<unknown>): void {
     if (pending.timeout) {
       clearTimeout(pending.timeout);
     }
     if (pending.reannounceTimer) {
       clearTimeout(pending.reannounceTimer);
+    }
+    if (pending.detachedTimer) {
+      clearTimeout(pending.detachedTimer);
     }
     if (pending.abortHandler) {
       pending.signal?.removeEventListener("abort", pending.abortHandler);
@@ -1080,5 +1250,116 @@ export class ZCodeProtocolAgentServer {
       this.pendingClientRequests.delete(requestKey);
     }
     pending.requestKeys.clear();
+    this.parkedClientRequests.delete(pending);
+  }
+
+  /* ---------- session 收养（detached owner → 本 server） ---------- */
+
+  /** ZCodeProtocolDetachedSessionOwner：等 resident pool 的 in-flight 去激活收尾。 */
+  awaitSessionDeactivation(sessionId: string): Promise<void> {
+    return this.context.sessionResidentPool?.waitForDeactivation(sessionId) ?? Promise.resolve();
+  }
+
+  /**
+   * ZCodeProtocolDetachedSessionOwner：原子转出 record——摘除 sessions、登记
+   * redirect、迁移该 session 的 pending 反向请求、释放 app 资源登记。
+   * deactivation in-flight 时拒绝（异步收养方先 awaitSessionDeactivation）。
+   */
+  claimSessionRecord(
+    sessionId: string,
+    newOwner: ZCodeProtocolSessionMigrationTarget,
+  ): ZCodeProtocolSessionRecord | undefined {
+    if (this.context.sessionResidentPool?.isDeactivationInFlight(sessionId)) {
+      return undefined;
+    }
+    const record = this.context.sessions.get(sessionId);
+    if (!record) return undefined;
+    this.context.sessions.delete(sessionId);
+    this.sessionOwnerRedirects.set(sessionId, newOwner);
+    this.migrateSessionClientRequests(sessionId, newOwner);
+    this.runtimeResources.untrack(record.app);
+    return record;
+  }
+
+  /** 该 session 的全部在途反向请求迁到收养方；旧 wire id 一并作废。 */
+  private migrateSessionClientRequests(
+    sessionId: string,
+    target: ZCodeProtocolSessionMigrationTarget,
+  ): void {
+    const migrated = new Set<ZCodeProtocolPendingClientRequest<unknown>>();
+    for (const pending of this.pendingClientRequests.values()) {
+      if (pending.sessionId === sessionId) migrated.add(pending);
+    }
+    for (const pending of this.parkedClientRequests) {
+      if (pending.sessionId === sessionId) migrated.add(pending);
+    }
+    for (const pending of migrated) {
+      if (!pending.active) continue;
+      for (const requestKey of pending.requestKeys) {
+        this.pendingClientRequests.delete(requestKey);
+      }
+      pending.requestKeys.clear();
+      this.parkedClientRequests.delete(pending);
+      if (pending.detachedTimer) {
+        clearTimeout(pending.detachedTimer);
+        pending.detachedTimer = undefined;
+      }
+      target.deliverPendingClientRequest(pending);
+    }
+  }
+
+  /** context.adoptDetachedSession：先等旧 owner 去激活收尾再转出（resume 等异步入口）。 */
+  private async adoptDetachedSession(sessionId: string): Promise<boolean> {
+    const owner = this.context.deps.locateSessionOwner?.(sessionId);
+    if (!owner || owner === (this as ZCodeProtocolDetachedSessionOwner)) return false;
+    await owner.awaitSessionDeactivation(sessionId);
+    return this.finishDetachedSessionAdoption(sessionId, owner);
+  }
+
+  /** context.claimDetachedSession：同步收养；deactivation in-flight 直接放弃。 */
+  private tryAdoptDetachedSession(sessionId: string): boolean {
+    const owner = this.context.deps.locateSessionOwner?.(sessionId);
+    if (!owner || owner === (this as ZCodeProtocolDetachedSessionOwner)) return false;
+    return this.finishDetachedSessionAdoption(sessionId, owner);
+  }
+
+  private finishDetachedSessionAdoption(
+    sessionId: string,
+    owner: ZCodeProtocolDetachedSessionOwner,
+  ): boolean {
+    const record = owner.claimSessionRecord(sessionId, this);
+    if (!record) return false;
+    this.runtimeResources.adopt(record.app);
+    record.ownerContext = this.context;
+    this.context.sessions.set(sessionId, record);
+    this.logger?.info("ZCode Protocol detached session adopted", {
+      event: "zcode_protocol.session.adopted",
+      sessionId,
+    });
+    return true;
+  }
+
+  /** ZCodeProtocolSessionMigrationTarget：收养的 app 登记进本 owner 的资源集。 */
+  adoptSessionApp(app: ZCodeApp): void {
+    this.runtimeResources.adopt(app);
+  }
+
+  /** entrypoint reaper 的判据：detached 且无活 turn、无在途反向请求才可 shutdown。 */
+  isReapable(): boolean {
+    if (!this.clientDetached) return false;
+    if (this.pendingClientRequests.size > 0 || this.parkedClientRequests.size > 0) {
+      return false;
+    }
+    for (const record of this.context.sessions.values()) {
+      if (record.activeAbortController && !record.activeAbortController.signal.aborted) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** entrypoint locateSessionOwner 的归属判定：record 是否常驻在本 server。 */
+  hasResidentSession(sessionId: string): boolean {
+    return this.context.sessions.has(sessionId);
   }
 }

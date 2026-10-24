@@ -66,6 +66,12 @@ export interface ZCodeProtocolAgentDependencies {
   /** 把 Host 账号状态形成的第三层 Config Overlay 同步给进程 Registry。 */
   syncAccountProviderConfig?: (snapshot: AccountProviderConfigSnapshot) => Promise<boolean>;
   /**
+   * 进程级 session 归属索引：定位仍常驻在某 detached（断线）连接 server 上的
+   * session record，供 session/resume / requireSession 收养。attached 中的
+   * owner 不返回——活的 owner 连接保持对会话的排他权。
+   */
+  locateSessionOwner?(sessionId: string): ZCodeProtocolDetachedSessionOwner | undefined;
+  /**
    * 进程级凭据鉴权端口（standalone 账号面自带）。
    * 存在时优先于按 workspace 回环 Host 的默认端口；socket core 没有能应答
    * interactionRequestProviderRuntimeHeaders 的 Host，必须由它签名模型请求。
@@ -91,6 +97,13 @@ export interface ZCodeProtocolToolInputTransmissionState {
 
 export interface ZCodeProtocolSessionRecord {
   app: ZCodeApp;
+  /**
+   * 会话的当前协议 owner context：物化时指向创建方 context；客户端断线后由
+   * 新连接收养（session/resume / requireSession 路径）时改挂新 owner。
+   * onSessionEvent 等事件扇出必须经它取 context，不能用物化闭包里的旧 context，
+   * 否则收养后事件仍落在死连接上。
+   */
+  ownerContext?: ZCodeProtocolAgentServerContext;
   subagentRuntimeConfigEnabled?: boolean;
   memoryEnabled: boolean;
   nativeSearchEnhancementsEnabled: boolean;
@@ -140,6 +153,74 @@ export interface ZCodeProtocolClientRequestOptions {
   timeoutMs?: number;
   trace?: ZCodeProtocolTrace;
   reannounceIntervalMs?: number;
+  /**
+   * owner 客户端已断开、无 sink 可投递时的挂起上限；超时按 timedOut 拒绝，
+   * 让孤儿会话上的交互请求最终如实失败，而不是永久挂住一次 turn。
+   * 缺省用 server 的 DETACHED_CLIENT_REQUEST_TIMEOUT_MS。
+   */
+  detachedTimeoutMs?: number;
+}
+
+/**
+ * server → client 反向请求的在途条目。owner 可变：会话被新连接收养时，
+ * 该 session 的 pending 请求整体迁移到新 server，由新 sink 续发。
+ */
+export interface ZCodeProtocolPendingClientRequest<T = unknown> {
+  active: boolean;
+  method: string;
+  owner: ZCodeProtocolSessionMigrationTarget;
+  params: unknown;
+  reject: (error: Error) => void;
+  resolve: (value: T) => void;
+  resultSchema: ParamsSchema<T>;
+  requestKeys: Set<string>;
+  /** 收养迁移时的会话过滤键；非会话请求恒为 undefined，只随 owner 存活/超时。 */
+  sessionId?: string;
+  signal?: AbortSignal;
+  detachedTimeoutMs?: number;
+  detachedTimer?: ReturnType<typeof setTimeout>;
+  timeout?: ReturnType<typeof setTimeout>;
+  reannounceTimer?: ReturnType<typeof setTimeout>;
+  abortHandler?: () => void;
+  trace?: ZCodeProtocolTrace;
+}
+
+/**
+ * 迁出方对收养方暴露的最小面：接手 pending 反向请求、会话 redirect、app 资源登记。
+ * 具体实现就是 ZCodeProtocolAgentServer；接口独立出来让 server-operations/context
+ * 不依赖 server 类本身。
+ */
+export interface ZCodeProtocolSessionMigrationTarget {
+  /** 在 owner sink 上投递（或重新登记）一条 pending 反向请求；无 sink 时转 park。 */
+  deliverPendingClientRequest(pending: ZCodeProtocolPendingClientRequest): void;
+  /** 反向请求入口（含自身的 owner redirect 判定）；迁出方把迟到的请求重定向到这里。 */
+  requestClient<T>(
+    method: ZCodeProtocolMethod,
+    params: unknown,
+    resultSchema: ParamsSchema<T>,
+    options?: ZCodeProtocolClientRequestOptions,
+  ): Promise<T>;
+  /** 收养的 app 登记进本 owner 的资源集，shutdown 扫尾时不漏关。 */
+  adoptSessionApp(app: ZCodeApp): void;
+  /** 按 pending.owner 归属清理 keys/parked 登记与计时器。 */
+  discardPendingClientRequest(pending: ZCodeProtocolPendingClientRequest): void;
+}
+
+/**
+ * 断线（detached）owner server 对收养流程暴露的最小面。
+ * locateSessionOwner 只返回 detached owner；仍连着 client 的 owner 不可被抢。
+ */
+export interface ZCodeProtocolDetachedSessionOwner {
+  /** 等该 session 在旧 owner resident pool 上的 in-flight 去激活收尾。 */
+  awaitSessionDeactivation(sessionId: string): Promise<void>;
+  /**
+   * 原子转出：摘除 record、登记 redirect、迁移该 session 的 pending 反向请求、
+   * 释放 app 资源登记。deactivation in-flight 或无 record 时返回 undefined。
+   */
+  claimSessionRecord(
+    sessionId: string,
+    newOwner: ZCodeProtocolSessionMigrationTarget,
+  ): ZCodeProtocolSessionRecord | undefined;
 }
 
 export interface ZCodeProtocolAgentServerContext {
@@ -174,6 +255,17 @@ export interface ZCodeProtocolAgentServerContext {
   // 协议请求则持有 operation lease，禁止异步 handler 与容量回收交错。
   sessionResidentPool?: SessionResidentPool;
   sessions: Map<string, ZCodeProtocolSessionRecord>;
+  /**
+   * 同步收养尝试：session 常驻在某 detached owner 时转出到本 context。
+   * 旧 owner 上 deactivation in-flight 的会话直接放弃（requireSession 等同步路径
+   * 不能 await，调用方应回落到 adoptDetachedSession）。
+   */
+  claimDetachedSession?(sessionId: string): boolean;
+  /**
+   * 异步收养：先等旧 owner 的去激活收尾再转出。session/resume 等异步入口
+   * 必须走这条，避免把正在 app.close 的半死 record 挂给新 owner。
+   */
+  adoptDetachedSession?(sessionId: string): Promise<boolean>;
   /** 仅覆盖异步创建窗口，结束即释放；输入命令仍由 CommandInbox 排队。 */
   sessionCreationIds?: Set<string>;
   notify(notification: ZCodeProtocolNotification): void;
@@ -342,7 +434,10 @@ export function requireSession(
   sessionId: string,
   options: { deliveryKind?: ZCodeDeliveryKind; operation?: string } = {},
 ): ZCodeProtocolSessionRecord {
-  const record = context.sessions.get(sessionId);
+  let record = context.sessions.get(sessionId);
+  if (!record && context.claimDetachedSession?.(sessionId)) {
+    record = context.sessions.get(sessionId);
+  }
   if (!record) {
     // 诊断：readSession 只读取活跃 runtime；记录缺失时要区分“冷会话尚未恢复”和“ID 已失效”，
     // 不能只留下相同的错误文本，否则无法判断 UI 是读早了还是 task index 带来了脏引用。

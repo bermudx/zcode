@@ -228,6 +228,11 @@ export class SessionResidentPool {
     return this.inFlightDeactivations.get(sessionId) ?? Promise.resolve();
   }
 
+  /** 同步版在途判定：requireSession 等同步收养路径不能 await，用它拒绝抢半死 record。 */
+  isDeactivationInFlight(sessionId: string): boolean {
+    return this.inFlightDeactivations.has(sessionId);
+  }
+
   private isEligible(sessionId: string, facts: SessionResidencyFacts): boolean {
     return (
       facts.persisted &&

@@ -37,6 +37,24 @@ export class ProtocolRuntimeResources {
     if (this.stopping) throw new Error("ZCode Protocol runtime is stopping");
   }
 
+  /**
+   * session 被新连接收养时 app 归属随 record 转移：untrack 只是从本 owner 的
+   * shutdown 清扫集中摘除（不关 app），再由收养方 adopt 进自己的资源集。
+   * app.close 的包装修饰仍指向原 owner 的 apps.delete，幂等无副作用。
+   */
+  untrack(app: ZCodeApp): void {
+    this.apps.delete(app);
+  }
+
+  adopt(app: ZCodeApp): void {
+    // 收养方已在 shutdown：app 不能无人认领，直接停掉（与 create 的 stopping 分支同语义）。
+    if (this.stopping) {
+      void this.stopApp(app);
+      return;
+    }
+    this.apps.add(app);
+  }
+
   close(): Promise<void> {
     this.stopping = true;
     this.closePromise ??= Promise.resolve().then(async () => {

@@ -73,9 +73,11 @@ import {
 import { ZCodeProtocolAgentServer } from "../src/zcode-protocol/server.js";
 import { ZCodeProtocolNdjsonConnection } from "../src/zcode-protocol/transport.js";
 import { shouldCloseSessionForExpectedPersistence } from "../src/zcode-protocol/server-operations.js";
-import type {
-  ZCodeProtocolAgentServerContext,
-  ZCodeProtocolSessionRecord,
+import {
+  PROTOCOL_CLIENT_REQUEST_ERROR_CODES,
+  ProtocolRequestError,
+  type ZCodeProtocolAgentServerContext,
+  type ZCodeProtocolSessionRecord,
 } from "../src/zcode-protocol/server-types.js";
 import {
   buildSessionSnapshot,
@@ -5763,6 +5765,243 @@ describe("ZCodeProtocolAgentServer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("detached session adoption", () => {
+    const buildPermissionBrokerCall = (options: ZCodeAppOptions | undefined) =>
+      options?.permissionBroker?.requestPermission({
+        input: { command: "rm -rf tmp" },
+        mode: "build",
+        reason: "Bash requires approval",
+        requestId: "perm_detached",
+        requestedAt: new Date(1),
+        riskLevel: "high",
+        ruleId: "rule_1",
+        sessionId: (options?.sessionId ?? "sess_test") as never,
+        toolCallId: "tool_1" as never,
+        toolName: "Bash",
+        traceId: "trace_test" as never,
+      });
+
+    it("keeps a pending interaction across detach, migrates it to the adopting server, and answers it there", async () => {
+      // 客户端断线 → session/turn 与挂起的交互活在 detached owner 上；
+      // 新连接的 session/resume 收养同一 record，而不是冷物化第二个 runtime。
+      const outgoingA: ZCodeProtocolMessage[] = [];
+      let brokerResultPromise:
+        | ReturnType<NonNullable<ZCodeAppOptions["permissionBroker"]>["requestPermission"]>
+        | undefined;
+      let createCount = 0;
+      const serverA = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => {
+          createCount += 1;
+          return createFakeApp(options, {
+            sendInput: async () => {
+              brokerResultPromise = buildPermissionBrokerCall(options);
+              await brokerResultPromise;
+              return { kind: "rejected", reason: "no_active_turn" };
+            },
+          });
+        },
+        cwd: workspace.workspacePath,
+        version: "test-version",
+      });
+      setTestNotificationSink(serverA, (message) => outgoingA.push(message));
+
+      const created = zcodeSessionStateSnapshotSchema.parse(
+        await requestResult(serverA, {
+          id: 1,
+          method: zcodeProtocolMethods.sessionCreate,
+          params: { workspace },
+        }),
+      );
+      await requestResult(serverA, {
+        id: 2,
+        method: zcodeProtocolMethods.sessionSend,
+        params: { sessionId: created.session.sessionId, content: "run command" },
+      });
+      await vi.waitFor(() => {
+        expect(brokerResultPromise).toBeDefined();
+      });
+      expect(
+        outgoingA.some(
+          (message) => message.method === "interaction/requestPermission" && "id" in message,
+        ),
+      ).toBe(true);
+      let brokerSettled = false;
+      void Promise.resolve(brokerResultPromise).then(
+        () => {
+          brokerSettled = true;
+        },
+        () => {
+          brokerSettled = true;
+        },
+      );
+
+      serverA.markClientDetached(new Error("socket closed"));
+      expect(serverA.hasResidentSession(created.session.sessionId)).toBe(true);
+      // 挂着 pending 交互的孤儿不可回收；交互本身在断线瞬间也不能被悄悄拒绝。
+      expect(serverA.isReapable()).toBe(false);
+      // 让断线当拍可能触发的同步/微任务拒绝有机会落地，再断言"确实仍 pending"。
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(brokerSettled).toBe(false);
+
+      // 新连接落在全新的 server 上；entrypoint 的 locateSessionOwner 找到 detached owner。
+      const outgoingB: ZCodeProtocolMessage[] = [];
+      const serverB = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => {
+          createCount += 1;
+          return createFakeApp(options);
+        },
+        cwd: workspace.workspacePath,
+        locateSessionOwner: (sessionId) =>
+          serverA.hasResidentSession(sessionId) ? serverA : undefined,
+        version: "test-version",
+      });
+      setTestNotificationSink(serverB, (message) => outgoingB.push(message));
+
+      await requestResult(serverB, {
+        id: 3,
+        method: zcodeProtocolMethods.sessionResume,
+        params: { sessionId: created.session.sessionId },
+      });
+
+      // 收养而非冷物化：B 没有再建 app，record 已转到 B 的 sessions。
+      expect(createCount).toBe(1);
+      expect(serverA.hasResidentSession(created.session.sessionId)).toBe(false);
+      expect(serverB.hasResidentSession(created.session.sessionId)).toBe(true);
+
+      const migrated = outgoingB.find(
+        (message) => message.method === "interaction/requestPermission" && "id" in message,
+      );
+      expect(migrated).toMatchObject({
+        method: "interaction/requestPermission",
+        params: { requestId: "perm_detached", sessionId: created.session.sessionId },
+      });
+
+      await serverB.handleMessage({
+        id: migrated && "id" in migrated ? migrated.id : "",
+        result: { decision: "allow" },
+      });
+      await expect(brokerResultPromise).resolves.toMatchObject({ decision: "allow" });
+
+      // record 与 pending 全部迁出后，detached owner 才可被 reaper 回收。
+      expect(serverA.isReapable()).toBe(true);
+    });
+
+    it("redirects late owner-side requests for an adopted session to the new owner", async () => {
+      // 旧 app 的 broker 闭包仍持有旧 context.requestClient；收养后迟到的
+      // 反向请求必须沿 sessionOwnerRedirects 落到收养方 sink，而不是 park 在孤儿上。
+      const outgoingA: ZCodeProtocolMessage[] = [];
+      const outgoingB: ZCodeProtocolMessage[] = [];
+      let appOptions: ZCodeAppOptions | undefined;
+      const serverA = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => {
+          appOptions = options;
+          return createFakeApp(options);
+        },
+        cwd: workspace.workspacePath,
+        version: "test-version",
+      });
+      setTestNotificationSink(serverA, (message) => outgoingA.push(message));
+      const created = zcodeSessionStateSnapshotSchema.parse(
+        await requestResult(serverA, {
+          id: 1,
+          method: zcodeProtocolMethods.sessionCreate,
+          params: { workspace },
+        }),
+      );
+      serverA.markClientDetached(new Error("socket closed"));
+
+      const serverB = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => createFakeApp(options),
+        cwd: workspace.workspacePath,
+        locateSessionOwner: (sessionId) =>
+          serverA.hasResidentSession(sessionId) ? serverA : undefined,
+        version: "test-version",
+      });
+      setTestNotificationSink(serverB, (message) => outgoingB.push(message));
+      await requestResult(serverB, {
+        id: 2,
+        method: zcodeProtocolMethods.sessionResume,
+        params: { sessionId: created.session.sessionId },
+      });
+
+      const lateBrokerCall = buildPermissionBrokerCall(appOptions);
+      await vi.waitFor(() => {
+        expect(
+          outgoingB.some(
+            (message) => message.method === "interaction/requestPermission" && "id" in message,
+          ),
+        ).toBe(true);
+      });
+      const routed = outgoingB.find(
+        (message) => message.method === "interaction/requestPermission" && "id" in message,
+      );
+      await serverB.handleMessage({
+        id: routed && "id" in routed ? routed.id : "",
+        result: { decision: "deny" },
+      });
+      await expect(lateBrokerCall).resolves.toMatchObject({ decision: "deny" });
+      expect(
+        outgoingA.some(
+          (message) => message.method === "interaction/requestPermission" && "id" in message,
+        ),
+      ).toBe(false);
+    });
+
+    it("fails an orphaned interaction with timedOut after the detached timeout", async () => {
+      // 有界孤儿等待：客户端不回来应答，pending 请求按 timedOut 失败落地，
+      // turn 以一次如实的拒绝结束，而不是永久挂住。
+      vi.useFakeTimers();
+      try {
+        let brokerResultPromise:
+          | ReturnType<NonNullable<ZCodeAppOptions["permissionBroker"]>["requestPermission"]>
+          | undefined;
+        const server = new ZCodeProtocolAgentServer({
+          createZCodeApp: (options) =>
+            createFakeApp(options, {
+              sendInput: async () => {
+                brokerResultPromise = buildPermissionBrokerCall(options);
+                await brokerResultPromise;
+                return { kind: "rejected", reason: "no_active_turn" };
+              },
+            }),
+          cwd: workspace.workspacePath,
+          version: "test-version",
+        });
+        setTestNotificationSink(server, () => {});
+        const created = zcodeSessionStateSnapshotSchema.parse(
+          await requestResult(server, {
+            id: 1,
+            method: zcodeProtocolMethods.sessionCreate,
+            params: { workspace },
+          }),
+        );
+        await requestResult(server, {
+          id: 2,
+          method: zcodeProtocolMethods.sessionSend,
+          params: { sessionId: created.session.sessionId, content: "run command" },
+        });
+        await vi.waitFor(() => {
+          expect(brokerResultPromise).toBeDefined();
+        });
+        const settled = brokerResultPromise.then(
+          () => "resolved" as const,
+          (error: unknown) => error,
+        );
+
+        server.markClientDetached(new Error("socket closed"));
+        // DETACHED_CLIENT_REQUEST_TIMEOUT_MS = 10min；越过它即按 timedOut 拒绝。
+        await vi.advanceTimersByTimeAsync(10 * 60_000 + 1_000);
+        const outcome = await settled;
+        expect(outcome).toBeInstanceOf(ProtocolRequestError);
+        expect((outcome as ProtocolRequestError).code).toBe(
+          PROTOCOL_CLIENT_REQUEST_ERROR_CODES.timedOut,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // M5 ③-4：session/rewind、session/rewindCascade 旧协议词已删除（v4 fork/edit/retry

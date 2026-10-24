@@ -89,6 +89,9 @@ export function applyProtocolProviderRegistry(
   };
 }
 
+/** 断线 server 兜底回收的扫描节拍；判定条件（无活 turn、无 pending 反向请求）在 server.isReapable。 */
+const DETACHED_SERVER_SWEEP_INTERVAL_MS = 30_000;
+
 /** socket 监听模式下一条已接入连接的全部归属物：协议 server 是该连接的会话 owner。 */
 interface AttachedProtocolConnection {
   broker?: NodeReplBrowserBroker;
@@ -152,6 +155,13 @@ export async function runZCodeProtocolAgent(
   const ownedServers = new Set<ZCodeProtocolAgentServer>();
   const ownedBrokers = new Set<NodeReplBrowserBroker>();
   const attachedConnections = new Set<AttachedProtocolConnection>();
+  /**
+   * 传输已断但 owner server 未 shutdown 的连接：sessions/反向请求继续存活，
+   * 等新连接经 locateSessionOwner + session/resume 把 record 收养走；全空闲后
+   * 由 orphan sweep 兜底 shutdown，防止孤儿 server 无限驻留。
+   */
+  const detachedConnections = new Set<AttachedProtocolConnection>();
+  let detachedSweepTimer: ReturnType<typeof setInterval> | undefined;
   // 进程级 MCP pool 的反向请求（elicitation / 官方 auth）归最近接入的协议会话 owner。
   let latestProtocolServer: ZCodeProtocolAgentServer | undefined;
   let socketListener: ProtocolSocketListener | undefined;
@@ -315,9 +325,24 @@ export async function runZCodeProtocolAgent(
     );
     options.lifecycle?.signal.throwIfAborted();
 
-    const detachConnection = async (entry: AttachedProtocolConnection): Promise<void> => {
-      if (!attachedConnections.delete(entry)) return;
+    const detachConnection = async (
+      entry: AttachedProtocolConnection,
+      detachOptions: { orphan: boolean } = { orphan: true },
+    ): Promise<void> => {
+      if (!attachedConnections.delete(entry) && !detachedConnections.delete(entry)) return;
       entry.sampler?.stop();
+      if (latestProtocolServer === entry.server) {
+        latestProtocolServer = [...attachedConnections].at(-1)?.server;
+      }
+      if (detachOptions.orphan) {
+        // 建链期早夭等路径可能没走 onTransportClosed；幂等补标记，否则
+        // clientDetached=false 的孤儿永远不满足 isReapable，reaper 回收不掉。
+        entry.server.markClientDetached(new Error("ZCode Protocol client detached"));
+        // 孤儿化：不 shutdown、不释放投影，server 与其 sessions 迁入 detached 池
+        // 等收养；broker（connection 级 MCP 资源）也随 entry 保留。
+        detachedConnections.add(entry);
+        return;
+      }
       try {
         entry.server.disposeProjections();
       } catch (error) {
@@ -337,9 +362,6 @@ export async function runZCodeProtocolAgent(
         });
       }
       ownedServers.delete(entry.server);
-      if (latestProtocolServer === entry.server) {
-        latestProtocolServer = [...attachedConnections].at(-1)?.server;
-      }
       if (entry.broker) {
         ownedBrokers.delete(entry.broker);
         try {
@@ -351,6 +373,22 @@ export async function runZCodeProtocolAgent(
             module: "bootstrap.zcode_protocol",
           });
         }
+      }
+    };
+
+    /** 进程级 session 归属索引：只检索 detached owner；活连接上的 session 不参与收养。 */
+    const findDetachedSessionOwner = (sessionId: string) => {
+      for (const entry of detachedConnections) {
+        if (entry.server.hasResidentSession(sessionId)) return entry.server;
+      }
+      return undefined;
+    };
+
+    /** 全空闲孤儿 server 的兜底回收；reaper 判定（无活 turn/无 pending）在 server.isReapable。 */
+    const reapDetachedConnections = (): void => {
+      for (const entry of detachedConnections) {
+        if (!entry.server.isReapable()) continue;
+        void detachConnection(entry, { orphan: false }).catch(() => undefined);
       }
     };
 
@@ -406,6 +444,9 @@ export async function runZCodeProtocolAgent(
         mcpPort,
         mcpTelemetry: mcpTelemetryTracker,
         sessionStore,
+        // 断线重连/新客户端 resume 的收养入口：只找 detached owner，活连接
+        // 上的 session 保持对原 client 的排他权。
+        locateSessionOwner: (sessionId) => findDetachedSessionOwner(sessionId),
         syncAccountProviderConfig: activeProviderRegistryRuntime.syncAccountProviderConfig,
         // standalone 账号面自带凭据鉴权端口（createStandaloneProviderRuntimeHeadersPort）。
         // socket core 没有 Host 可应答 interactionRequestProviderRuntimeHeaders，
@@ -447,7 +488,7 @@ export async function runZCodeProtocolAgent(
           handleMessage: (message) => server.handleMessage(message),
           input: connectionInput,
           logger,
-          onTransportClosed: (error) => server.disconnectClient(error),
+          onTransportClosed: (error) => server.markClientDetached(error),
           output: connectionOutput,
           takePostResponseBatch: (requestId) => server.takePostResponseBatch(requestId),
         });
@@ -477,8 +518,8 @@ export async function runZCodeProtocolAgent(
         server,
       };
       attachedConnections.add(entry);
-      // 传输关闭（客户端断开 / abort）→ 该连接的协议会话 owner 走现有终止语义：
-      // disconnectClient 取消前台执行，shutdown 回收该连接创建的全部 app 资源。
+      // 传输关闭（客户端断开 / abort）→ 该连接的协议会话 owner 孤儿化：turn 与
+      // pending 交互随 record 存活，等新连接收养；真正终止边界只剩进程 shutdown。
       void connection.waitForClose().then(
         () => detachConnection(entry),
         () => detachConnection(entry),
@@ -579,6 +620,10 @@ export async function runZCodeProtocolAgent(
         module: "bootstrap.zcode_protocol",
         socketPath,
       });
+      // 孤儿 server 的兜底回收：detached 且无活 turn、无 pending 反向请求才 shutdown；
+      // 挂着 turn 或等交互的孤儿不动，等收养或 detached 超时自行落地。
+      detachedSweepTimer = setInterval(reapDetachedConnections, DETACHED_SERVER_SWEEP_INTERVAL_MS);
+      detachedSweepTimer.unref?.();
       // 关闭信号只有两个来源：lifecycle abort（信号/调用方）或 listener 自身失败。
       const abort = options.lifecycle?.signal;
       await Promise.race([
@@ -590,7 +635,11 @@ export async function runZCodeProtocolAgent(
         }),
       ]);
       await socketListener.close();
-      await Promise.allSettled([...attachedConnections].map((entry) => detachConnection(entry)));
+      await Promise.allSettled(
+        [...attachedConnections, ...detachedConnections].map((entry) =>
+          detachConnection(entry, { orphan: false }),
+        ),
+      );
     } else {
       const entry = await attachConnection(input, output);
       startupTimer.complete("ZCode Protocol agent startup completed", {
@@ -611,6 +660,7 @@ export async function runZCodeProtocolAgent(
     throw error;
   } finally {
     options.lifecycle?.requestShutdown();
+    if (detachedSweepTimer) clearInterval(detachedSweepTimer);
     await socketListener?.close().catch(() => undefined);
     await cleanupProtocolRuntime({
       logger,

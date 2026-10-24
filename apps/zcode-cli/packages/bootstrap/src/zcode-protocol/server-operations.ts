@@ -1525,6 +1525,19 @@ export async function activateSessionForResume(
   if (existing) {
     return { record: existing };
   }
+  // 客户端断线后重连：session 常驻在 detached owner 上时收养到本连接，
+  // 让在跑的 turn/挂起的交互原样续命；收养失败才回落到冷物化路径。
+  if (await context.adoptDetachedSession?.(params.sessionId)) {
+    const adopted = context.sessions.get(params.sessionId);
+    if (adopted) {
+      context.logger?.info("ZCode Protocol session resume adopted detached owner record", {
+        event: "zcode_protocol.session.resume_adopted",
+        module: "bootstrap.zcode_protocol",
+        sessionId: params.sessionId,
+      });
+      return { record: adopted };
+    }
+  }
   let session = await getPersistedSession(context, params.sessionId);
   if (!session || session.time.deleted !== undefined) {
     // 诊断：冷恢复只有在持久化记录也不存在时才会走到这里；单凭错误文本无法和
@@ -3680,6 +3693,7 @@ async function createRecord(
     app,
     createdAt: now,
     eventStore,
+    ownerContext: context,
     memoryEnabled: startupPreferences.memoryEnabled,
     subagentRuntimeConfigEnabled: startupPreferences.subagentRuntimeConfigEnabled,
     modelContextBudgetStrategy: startupPreferences.modelContextBudgetStrategy,
@@ -3696,7 +3710,10 @@ async function createRecord(
     workspace,
   };
   const unsubscribeSessionEvents = app.runtime.subscribeEvents({
-    onSessionEvent: (event) => onSessionEvent(context, record, event),
+    // 事件扇出走 record.ownerContext：owner 客户端断线、session 被新连接
+    // 收养后，ownerContext 改挂新 context；用物化闭包的 context 会把事件
+    // 继续发往死连接的 notify。
+    onSessionEvent: (event) => onSessionEvent(record.ownerContext ?? context, record, event),
   });
   record.unsubscribe = () => {
     unsubscribeSessionEvents();

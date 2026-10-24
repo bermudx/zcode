@@ -294,6 +294,50 @@ Ctrl-C 有两条投递路径，二者必须共享同一条 guard（`PiTuiApp.han
 因此 `run-tui` 装 SIGINT handler 转发到同一 intent；退出时摘掉 handler
 （signal handler 是 ref 句柄，不摘会让进程在 TUI 退出后挂着不退）。
 
+### 客户端退出：detach / adopt / 回收
+
+协议 server 是**按连接**建的（每条 socket 一个 `ZCodeProtocolAgentServer`
+与一份 `sessions` 表），所以"客户端退出"拆成两档语义：
+
+- **传输断开 = detach**（`markClientDetached`）：连接移出 attached、进入
+  `detachedConnections` 池；server、sessions、在跑 turn、pending 反向
+  请求全部保留，只取消只回本连接的请求级工作（generateText/plugin op）。
+- **进程终止 = shutdown**（`disconnectClient` + `runtimeResources.close`）：
+  拒绝全部反向请求、取消前台执行。SIGTERM/进程退出仍走这条，语义不变。
+
+**收养（adopt）**：新连接的 server 没有旧 session 时，`session/resume`
+与 `requireSession` 先经 `locateSessionOwner` 找持有该 record 的 detached
+owner，命中则原子转出（`claimSessionRecord`：摘出 sessions 表 → 登记
+`sessionOwnerRedirects` → 迁移该 session 的 pending 反向请求 → app 资源
+登记过户）而非冷物化第二个 runtime。事件扇出走 `record.ownerContext`
+间接层，收养后改挂新 context；旧 owner 上迟到的反向请求沿 redirect 落到
+新 sink。旧 owner resident pool 有 in-flight 去激活时，异步路径先
+`awaitSessionDeactivation`，同步路径直接放弃收养走冷恢复。
+
+**孤儿交互的有界等待**：pending 反向请求在 owner detached 后按
+`detachedTimeoutMs`（默认 `DETACHED_CLIENT_REQUEST_TIMEOUT_MS` = 10min）
+兜底，超时按 `timedOut`（-32022）拒绝——孤儿会话上的审批/提问最终如实
+失败，不会永久挂住一个 turn。sink 恢复（`setNotificationSink`）时 park 的
+请求自动续投并撤除计时器。
+
+**回收**：entrypoint 每 30s 扫 detached 池，只有同时满足 detached、无
+非 aborted 活跃 turn、无 pending/parked 反向请求的 server 才 shutdown
+（`isReapable`）；挂着实例的孤儿等收养或超时自行落地。
+
+**退出 UX（busy 三选一）**：turn 在跑（含等交互）时，退出必须显式选边——
+
+| 按键（busy、草稿为空时第一下） | 行为 |
+| ------------------------------ | ---- |
+| Ctrl-D | detach & quit：只关客户端，agent 在 core 继续跑 |
+| Ctrl-C | stop & quit：`requestStopActiveTurn` → `session/stop` 有界回执（1.5s）后退出 |
+| Esc / 其他键 | 取消，回到 turn |
+
+空闲时 Ctrl-C 双击 / Ctrl-D 退出语义不变。armed 窗口
+`BUSY_QUIT_CHOICE_WINDOW_MS` = 4s；Ctrl-C 的 armed 判定放在
+`handleCtrlCIntent` 内，SIGINT 路径同样生效，双击 Ctrl-C 停 agent 的旧
+肌肉记忆保留。客户端侧 `AttachSessionHandle.stopActiveTurn` 把 `sessionStop`
+做成有 ack 的有界等待——socket 先关会让 fire-and-forget 的 stop 落不了线。
+
 ### 审批与提问反向请求（interaction/*）
 
 in-process 模式下 core 的 permission broker 直接调用 TUI requester；attach
