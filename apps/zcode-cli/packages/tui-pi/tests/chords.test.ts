@@ -21,9 +21,11 @@ import type { TuiSubmitPromptResult } from "@zcode/tui/internals";
 import {
   LAST_REPLY_COPIED_STATUS,
   NEW_SESSION_BUSY_STATUS,
+  NO_QUEUED_TO_RESTORE_STATUS,
   NO_REPLY_TO_COPY_STATUS,
   THINKING_COLLAPSED_STATUS,
   THINKING_EXPANDED_STATUS,
+  restoredQueuedStatus,
 } from "../src/chords.js";
 import {
   CTRL_C,
@@ -32,6 +34,8 @@ import {
   CTRL_N,
   CTRL_O,
   CTRL_P,
+  CTRL_Q,
+  ALT_UP,
   CTRL_T,
   CTRL_X,
   ESC,
@@ -426,5 +430,111 @@ test("Ctrl+T re-renders existing rows: expanded body reaches the terminal stream
     h.output().includes("expand-only tail"),
     "expanded thought body must reach the terminal stream",
   );
+  await h.stop();
+});
+
+test("Ctrl+Q while busy queues the draft as a follow-up (delivery queue)", async () => {
+  // pi-mono app.message.followUp 对齐：busy Ctrl+Q 显式走 follow-up 队列
+  // （attach 模式本地 FIFO），而不是 Enter 的 steer lane。
+  const deliveries: (string | undefined)[] = [];
+  const h = createHarness({
+    sendInput: async (_input, options) => {
+      deliveries.push(options?.delivery);
+      return { kind: "queued", pendingInputId: "q1", queueLength: 1, turnId: "turn-1" as never };
+    },
+    submitPrompt: async () => ({ response: "unused" }),
+  });
+  h.store.set("busy", true);
+  h.feed("queue me");
+  h.feed(CTRL_Q);
+  await h.flush();
+  assert.deepEqual(deliveries, ["queue"]);
+  assert.equal(h.draftText(), "");
+  assert.equal(h.store.state.queuedInputs.length, 1);
+  await h.stop();
+});
+
+test("Ctrl+Q while idle submits like Enter", async () => {
+  const submitted: string[] = [];
+  const h = createHarness({
+    submitPrompt: async (input) => {
+      submitted.push(input.text);
+      return { response: "ok" };
+    },
+  });
+  h.feed("send now");
+  h.feed(CTRL_Q);
+  await h.flush();
+  assert.deepEqual(submitted, ["send now"]);
+  await h.stop();
+});
+
+test("Ctrl+Q on an empty draft is a no-op", async () => {
+  const h = createHarness({
+    submitPrompt: async () => {
+      throw new Error("must not submit");
+    },
+  });
+  h.feed(CTRL_Q);
+  await h.flush();
+  assert.equal(h.store.state.queuedInputs.length, 0);
+  await h.stop();
+});
+
+test("Alt+Up with an empty queue reports nothing to restore", async () => {
+  const h = createHarness();
+  h.feed(ALT_UP);
+  await h.flush();
+  assert.equal(h.store.state.status, NO_QUEUED_TO_RESTORE_STATUS);
+  await h.stop();
+});
+
+test("Alt+Up restores queued inputs to the editor and removes them from owners", async () => {
+  // pi-mono app.message.dequeue 对齐：steer pending + follow-up 队列按序拼回
+  // 输入框，当前草稿保留在末尾；owner 摘除按 id 全量下发。
+  const removals: string[][] = [];
+  const h = createHarness({
+    removeQueuedInputs: async (ids) => {
+      removals.push([...ids]);
+      return ids;
+    },
+  });
+  h.store.set("queuedInputs", [
+    { id: "p1", text: "first queued" },
+    { id: "p2", text: "second queued" },
+  ]);
+  h.feed("current draft");
+  h.feed(ALT_UP);
+  await h.flush();
+  assert.deepEqual(removals, [["p1", "p2"]]);
+  assert.equal(h.draftText(), "first queued\n\nsecond queued\n\ncurrent draft");
+  assert.equal(h.store.state.status, restoredQueuedStatus(2));
+  await h.stop();
+});
+
+test("Alt+Up counts only actually-removed items", async () => {
+  // 竞态下部分项已被消费：状态按实际移除数报，文本仍全部恢复（输入不丢）。
+  const h = createHarness({
+    removeQueuedInputs: async () => ["p1"],
+  });
+  h.store.set("queuedInputs", [
+    { id: "p1", text: "still there" },
+    { id: "p2", text: "already consumed" },
+  ]);
+  h.feed(ALT_UP);
+  await h.flush();
+  assert.equal(h.draftText(), "still there\n\nalready consumed");
+  assert.equal(h.store.state.status, restoredQueuedStatus(1));
+  await h.stop();
+});
+
+test("Alt+Up without the removeQueuedInputs port still restores the text", async () => {
+  // 端口未接线的宿主：文本恢复不缺席，队列行交给事件投影收敛。
+  const h = createHarness();
+  h.store.set("queuedInputs", [{ id: "p1", text: "orphaned queue item" }]);
+  h.feed(ALT_UP);
+  await h.flush();
+  assert.equal(h.draftText(), "orphaned queue item");
+  assert.equal(h.store.state.status, restoredQueuedStatus(1));
   await h.stop();
 });

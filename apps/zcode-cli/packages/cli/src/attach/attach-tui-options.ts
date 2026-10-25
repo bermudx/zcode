@@ -495,6 +495,10 @@ export function createAttachPromptHandler(
     }
     return current.sendInput(input, sendOptions as never);
   };
+  // Alt+Up 撤回端口：本地队列项客户端摘除，core pendingInputs 项走协议
+  // （session/discardPendingInputs）；随 current 跟随 /new /resume /fork。
+  submitPrompt.removeQueuedInputs = (pendingInputIds) =>
+    current.discardPendingInputs(pendingInputIds);
   submitPrompt.setMode = async (mode) => {
     const result = await current.setMode(mode as string);
     return { mode: result.mode as never };

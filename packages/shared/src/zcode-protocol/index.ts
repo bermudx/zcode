@@ -2091,6 +2091,20 @@ export const zcodeSessionRecallPreviousInputResultSchema = z
     entry: z.object({ text: z.string() }).strict().nullable(),
   })
   .strict();
+export const zcodeSessionDiscardPendingInputsParamsSchema = z
+  .object({
+    sessionId: nonEmptyString,
+    // pendingInputId ≡ core pendingInputs/deferred queue 的 id 空间
+    // （TurnSteerQueued.payload.pendingInputId 即同一 id）。逐项桥
+    // app.removeQueueItem(reason:"user_removed")；未命中 id 不算失败。
+    pendingInputIds: z.array(nonEmptyString).min(1),
+  })
+  .strict();
+export const zcodeSessionDiscardPendingInputsResultSchema = z
+  .object({
+    removed: z.array(nonEmptyString),
+  })
+  .strict();
 export const zcodeSessionRecordInputHistoryParamsSchema = z
   .object({
     sessionId: nonEmptyString,
@@ -2182,6 +2196,10 @@ export const zcodeSessionSendParamsSchema = z
     offPeakRunType: z.enum(["init", "resume"]).optional(),
     botDeliveryTarget: zcodeAutomationBotDeliveryTargetSchema.optional(),
     toolDenylist: z.array(nonEmptyString).optional(),
+    // attach 瘦客户端的 steer lane（pi-mono 对齐）：busy 时直驱 core steerTurn
+    // 注入 active turn pendingInputs；idle 时与普通 send 同路（客户端侧
+    // race 回退）。附件与 steer 互斥——guard 由服务端拒绝、客户端不发送。
+    delivery: z.enum(["steer"]).optional(),
   })
   .strict()
   .superRefine((payload, context) => {
@@ -2211,6 +2229,17 @@ export const zcodeSessionSendResultSchema = z
     sessionId: nonEmptyString,
     accepted: z.literal(true),
     stateRevision: z.number().int().nonnegative(),
+    // delivery:"steer" 被 core 接纳进 active turn pendingInputs 时携带；
+    // 客户端用它构造 sendInput 的 queued 返回（事件流仍以
+    // turn_steer_queued 为 UI 事实来源，这里只是回执）。
+    steerQueued: z
+      .object({
+        pendingInputId: nonEmptyString,
+        queueLength: z.number().int().nonnegative(),
+        turnId: nonEmptyString,
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ZCodeSessionSendResult = z.infer<typeof zcodeSessionSendResultSchema>;
@@ -4229,6 +4258,7 @@ export const zcodeProtocolMethods = {
   // 输入历史归 session store 所有（server 侧）；attach 客户端的 composer
   // 召回与 slash 记录都走这两个 topic，不另建 client-local 双写路径。
   sessionRecallPreviousInput: "session/recallPreviousInput",
+  sessionDiscardPendingInputs: "session/discardPendingInputs",
   sessionRecordInputHistory: "session/recordInputHistory",
   sessionRequestRuntimePreferences: "session/requestRuntimePreferences",
   subagentsReadRuntimeConfig: "subagents/readRuntimeConfig",

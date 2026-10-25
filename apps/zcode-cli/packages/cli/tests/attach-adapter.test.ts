@@ -162,9 +162,16 @@ async function startFakeCore(
           .then((value) =>
             socket.write(`${JSON.stringify({ id: message.id, result: value ?? {} })}\n`),
           )
-          .catch((error: Error) =>
+          .catch((error: Error & { code?: number; data?: unknown }) =>
             socket.write(
-              `${JSON.stringify({ error: { code: -32000, message: error.message }, id: message.id })}\n`,
+              `${JSON.stringify({
+                error: {
+                  code: typeof error.code === "number" ? error.code : -32000,
+                  data: error.data,
+                  message: error.message,
+                },
+                id: message.id,
+              })}\n`,
             ),
           );
       }
@@ -1549,6 +1556,314 @@ test("loadStartupOptions 的 slashCommands 含协议目录里的自定义命令"
       "expected catalog request",
     );
   } finally {
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// ── steer / follow-up 双 lane 与 Alt+Up 撤回（pi-mono 对齐，2026-10-25）──
+// Enter busy → 协议 delivery:"steer" 直驱 core steerTurn（真实事件驱动 UI）；
+// Ctrl+Q busy → 本地 follow-up FIFO；撤回分本地摘除与 session/discardPendingInputs。
+
+/** 单并发 busy 夹具：首回合 turn_started 后挂起，pendingTurns 非空。 */
+async function startBusyFixture(
+  dir: string,
+  respondSteer: (
+    request: Captured,
+  ) => unknown = () => ({},
+  ),
+): Promise<{
+  core: FakeCore;
+  handle: AttachSessionHandle;
+  runtime: AttachRuntime;
+  settleFirstTurn: () => void;
+}> {
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      if (request.params.delivery === "steer") return respondSteer(request);
+      const inputId = request.params.inputId as string;
+      queueMicrotask(() => {
+        notify(
+          rawEvent({
+            inputId,
+            payload: { inputId, input: request.params.content, turnNumber: 1 },
+            seq: 1,
+            turnId: "turn-busy",
+            type: "turn_started",
+          }),
+        );
+      });
+      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    }
+    if (request.method === "session/discardPendingInputs") {
+      return { removed: [] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const settleFirstTurn = (): void => {
+    core.notify(
+      rawEvent({
+        payload: { response: "done", resultType: "completed" },
+        seq: 9,
+        turnId: "turn-busy",
+        type: "turn_complete",
+      }),
+    );
+  };
+  void handle.submitPrompt("first").catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  return { core, handle, runtime, settleFirstTurn };
+}
+
+test("busy sendInput delivery steer → session/send delivery:steer，回执 pendingInputId 直通", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-steer-"));
+  const steerReceipt = {
+    accepted: true,
+    sessionId: SID,
+    stateRevision: 2,
+    steerQueued: { pendingInputId: "core-p1", queueLength: 1, turnId: "turn-busy" },
+  };
+  const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir, () => steerReceipt);
+  const events: Array<{ payload: Record<string, unknown>; type: string }> = [];
+  handle.addSink((event) => events.push(event as never));
+  try {
+    const result = await handle.sendInput("redirect please", { delivery: "steer" });
+    assert.equal(result.kind, "queued");
+    if (result.kind === "queued") {
+      assert.equal(result.pendingInputId, "core-p1");
+      assert.equal(result.queueLength, 1);
+    }
+    const steerSend = core.requests.find(
+      (r) => r.method === "session/send" && r.params.delivery === "steer",
+    );
+    assert.ok(steerSend, "expected session/send with delivery steer");
+    assert.equal(steerSend.params.content, "redirect please");
+    assert.equal(steerSend.params.sessionId, SID);
+    // steer 不落本地 follow-up 队列：settle 后不得重放第二条 session/send。
+    settleFirstTurn();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const sends = core.requests.filter((r) => r.method === "session/send");
+    assert.equal(
+      sends.filter((r) => r.params.delivery !== "steer").length,
+      1,
+      "steer must not re-enter the local follow-up queue",
+    );
+    // 队列区由 core 真实事件驱动，客户端不合成 queued 行。
+    assert.equal(
+      events.filter((event) => event.type === "turn_steer_queued").length,
+      0,
+      "steer lane must not synthesize turn_steer_queued locally",
+    );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("steer 被拒（guard.steerRejected.*）回退本地 follow-up 队列", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-steer-reject-"));
+  // responder 里同步 throw 会炸掉 socket data handler：协议错误必须以
+  // rejected promise 的形式进入 fake core 的应答链。
+  const rejectSteer = (): Promise<never> => {
+    const error = new Error(
+      "Steer rejected: turn_not_steerable",
+    ) as Error & { code: number; data: unknown };
+    error.code = -32010;
+    error.data = { reasonCode: "guard.steerRejected.turn_not_steerable" };
+    return Promise.reject(error);
+  };
+  const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir, rejectSteer);
+  const events: Array<{ payload: Record<string, unknown>; type: string }> = [];
+  handle.addSink((event) => events.push(event as never));
+  try {
+    const result = await handle.sendInput("queue me instead", { delivery: "steer" });
+    assert.equal(result.kind, "queued");
+    if (result.kind === "queued") {
+      assert.match(result.pendingInputId, /^attach-input-queued-/);
+    }
+    const queued = events.find((event) => event.type === "turn_steer_queued");
+    assert.ok(queued, "fallback must synthesize the follow-up queue row");
+    assert.equal(queued.payload.delivery, "queue");
+    assert.equal(queued.payload.input, "queue me instead");
+  } finally {
+    settleFirstTurn();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("steer 协议级失败（非 guard.steerRejected）如实上抛", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-steer-error-"));
+  const rejectSteer = (): Promise<never> => Promise.reject(new Error("socket exploded"));
+  const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir, rejectSteer);
+  try {
+    await assert.rejects(
+      () => handle.sendInput("fail loudly", { delivery: "steer" }),
+      /socket exploded/,
+    );
+  } finally {
+    settleFirstTurn();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("busy sendInput delivery queue → 本地 follow-up 队列，不触 steer 协议", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-queue-"));
+  const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir);
+  const events: Array<{ payload: Record<string, unknown>; type: string }> = [];
+  handle.addSink((event) => events.push(event as never));
+  try {
+    const result = await handle.sendInput("after you finish", { delivery: "queue" });
+    assert.equal(result.kind, "queued");
+    assert.equal(
+      core.requests.some((r) => r.method === "session/send" && r.params.delivery === "steer"),
+      false,
+      "explicit queue must not touch the steer protocol lane",
+    );
+    const queued = events.find((event) => event.type === "turn_steer_queued");
+    assert.ok(queued);
+    assert.equal(queued.payload.delivery, "queue");
+  } finally {
+    settleFirstTurn();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("discardPendingInputs：本地项摘除合成 discarded，core 项走 session/discardPendingInputs", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-discard-"));
+  let remoteRemoved: string[] = [];
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      const inputId = request.params.inputId as string;
+      queueMicrotask(() => {
+        core.notify(
+          rawEvent({
+            inputId,
+            payload: { inputId, input: request.params.content, turnNumber: 1 },
+            seq: 1,
+            turnId: "turn-busy",
+            type: "turn_started",
+          }),
+        );
+      });
+      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    }
+    if (request.method === "session/discardPendingInputs") {
+      remoteRemoved = request.params.pendingInputIds as string[];
+      return { removed: [remoteRemoved[0]] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const events: Array<{ payload: Record<string, unknown>; type: string }> = [];
+  handle.addSink((event) => events.push(event as never));
+  try {
+    void handle.submitPrompt("first").catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const local = await handle.sendInput("local follow-up", { delivery: "queue" });
+    assert.equal(local.kind, "queued");
+    const localId = local.kind === "queued" ? local.pendingInputId : "";
+
+    const removed = await handle.discardPendingInputs([localId, "core-p9"]);
+    assert.deepEqual(removed, [localId, "core-p9"]);
+    // 本地项：合成 turn_steer_discarded（UI 摘行）；未命中项留给真实事件。
+    const discarded = events.filter((event) => event.type === "turn_steer_discarded");
+    assert.equal(discarded.length, 1);
+    assert.deepEqual(discarded[0]!.payload.pendingInputIds, [localId]);
+    // core 项：协议下发，返回实际移除集。
+    const discardCall = core.requests.find(
+      (r) => r.method === "session/discardPendingInputs",
+    );
+    assert.ok(discardCall);
+    assert.deepEqual(discardCall.params.pendingInputIds, ["core-p9"]);
+    assert.equal(discardCall.params.sessionId, SID);
+    assert.deepEqual(remoteRemoved, ["core-p9"]);
+  } finally {
+    // 收掉挂起的首回合，避免悬空 pendingTurn 拖住测试进程的事件循环。
+    core.notify(
+      rawEvent({
+        payload: { response: "done", resultType: "completed" },
+        seq: 99,
+        turnId: "turn-busy",
+        type: "turn_complete",
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("createAttachPromptHandler 暴露 removeQueuedInputs 端口并随句柄生效", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-remove-port-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/discardPendingInputs") {
+      return { removed: request.params.pendingInputIds };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    assert.equal(typeof handler.removeQueuedInputs, "function");
+    const removed = await handler.removeQueuedInputs!(["core-p1", "core-p2"]);
+    assert.deepEqual(removed, ["core-p1", "core-p2"]);
+    const discardCall = core.requests.find(
+      (r) => r.method === "session/discardPendingInputs",
+    );
+    assert.ok(discardCall);
+    assert.deepEqual(discardCall.params.pendingInputIds, ["core-p1", "core-p2"]);
+  } finally {
+    await runtime.close();
     await core.close();
     await rm(dir, { force: true, recursive: true });
   }

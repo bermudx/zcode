@@ -5,6 +5,7 @@
 // the model change still travels through the core (state.updated) instead of a
 // client-local guess.
 
+import { matchesKey } from "@earendil-works/pi-tui";
 import {
   NO_SELECTABLE_MODEL_STATUS,
   ONLY_ONE_MODEL_STATUS,
@@ -84,4 +85,31 @@ export const openModelPicker = (input: {
   };
   input.setSelection(createSelectionState(selection));
   input.setStatus("Select a model.");
+};
+
+/**
+ * Ctrl+P（轮换）/ Ctrl+L（选择器）的 chord 分派。返回 true 表示命中
+ * （调用方消费输入）。
+ */
+export const handleModelChord = (input: {
+  currentModel: string;
+  data: string;
+  draft: string;
+  models: readonly TuiModelOption[];
+  setSelection: (selection: SelectionState | undefined) => void;
+  setStatus: (status: string) => void;
+  submitValue: (
+    value: string,
+    options?: SubmitValueOptions,
+  ) => Promise<TuiSubmitPromptResult | undefined>;
+}): boolean => {
+  if (matchesKey(input.data, "ctrl+p")) {
+    rotateModel(input);
+    return true;
+  }
+  if (matchesKey(input.data, "ctrl+l")) {
+    openModelPicker(input);
+    return true;
+  }
+  return false;
 };

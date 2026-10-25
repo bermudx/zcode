@@ -14,6 +14,7 @@ import type {
   DynamicWorkflowRunResumeResult,
   DynamicWorkflowRunProgressPayload,
   DynamicWorkflowRunSessionSummary,
+  InputDelivery,
   PluginLoadOutcome,
   PluginMetadata,
   WorkflowRunSnapshot,
@@ -25,7 +26,13 @@ import type {
 } from "../command-center-custom.js";
 
 export type TuiSubmitOptions = Parameters<TuiSubmitPrompt>[1];
-export type TuiSendInputOptions = Parameters<TuiSendInput>[1];
+/**
+ * app/协议层 sendInput 选项：delivery 用 core 的 InputDelivery
+ * （TuiSendInput 的 "steer"|"queue" 是 TUI 语义，由 TuiPromptHandler 映射）。
+ */
+export type TuiSendInputOptions = Omit<Parameters<TuiSendInput>[1], "delivery"> & {
+  delivery?: InputDelivery;
+};
 export type CommandCenterMode = NonNullable<TuiSubmitPromptResult["mode"]>;
 export type SwitchableCommandCenterMode = Extract<
   CommandCenterMode,

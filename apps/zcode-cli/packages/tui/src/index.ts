@@ -25,6 +25,7 @@ export type {
   TuiStartupOptions,
   TuiSetMode,
   TuiSetModeResult,
+  TuiRemoveQueuedInputs,
   TuiSendInput,
   TuiSendInputResult,
   TuiSkillSuggestion,

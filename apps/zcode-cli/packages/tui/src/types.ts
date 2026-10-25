@@ -2,7 +2,6 @@ import type { WorkflowRunProgressEnvelope } from "@zcode/shared/zcode-protocol-v
 import type { ModelSelection, ZCodeModelOption } from "@zcode/shared";
 import type {
   CollaborationMode,
-  InputDelivery,
   ModelUsageSummary,
   McpServerStatus,
   PermissionBrokerRequest,
@@ -203,12 +202,22 @@ export type TuiSendInput = (
   input: TuiPromptInput,
   options: {
     abortSignal?: AbortSignal;
-    delivery?: InputDelivery;
+    /** busy 输入的 TUI 语义：steer=注入当前 turn（Enter），queue=follow-up 排队（Ctrl+Q）。 */
+    delivery?: "steer" | "queue";
     expectedTurnId?: TurnId;
     onEvent?: (event: SessionEvent) => void | Promise<void>;
     requestPermission?: TuiRequestPermission;
   },
 ) => Promise<TuiSendInputResult>;
+
+/**
+ * Alt+Up 撤回：把 TUI 队列区投影出的 pendingInputIds 交回其 owner 摘除
+ * （attach：core pendingInputs 走协议、客户端本地队列本地摘除；进程内：
+ * app.removeQueueItem）。返回实际移除的 id 集——已被消费/未命中的项不撤。
+ */
+export type TuiRemoveQueuedInputs = (
+  pendingInputIds: readonly string[],
+) => Promise<readonly string[]>;
 
 export type TuiRecallPreviousInput = (
   skip?: number,
@@ -338,6 +347,7 @@ export type TuiOptions = {
   readClipboardImage?: TuiReadClipboardImage;
   recallPreviousInput?: TuiRecallPreviousInput;
   sendInput?: TuiSendInput;
+  removeQueuedInputs?: TuiRemoveQueuedInputs;
   setMode?: TuiSetMode;
   effortOptions?: readonly TuiEffortOption[];
   modelOptions?: readonly TuiModelOption[];

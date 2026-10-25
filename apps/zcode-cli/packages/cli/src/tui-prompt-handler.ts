@@ -349,7 +349,16 @@ export function createTuiSubmitPrompt(
       }
       const activeApp = await getApp();
       if (activeApp.sendInput) {
-        const result = await activeApp.sendInput(input, options);
+        // TUI 语义 → InputDelivery：steer=steer_active_turn（busy 注入当前
+        // turn，idle 与 auto 同开新回合）。queue 刻意不映射：进程内没有客户端
+        // follow-up 队列，runtime deferred queue 的 auto-drain 提升器只在
+        // v4 bridge 存在，排队输入会随回合静默丢失；完整 queue 语义在
+        // attach 模式（piz），见 turn-steering.md attach lane 节。
+        const { delivery, ...restOptions } = options ?? {};
+        const result = await activeApp.sendInput(input, {
+          ...restOptions,
+          ...(delivery === "steer" ? { delivery: "steer_active_turn" as const } : {}),
+        });
         if (result.kind !== "started_turn") return result;
         return withTuiMetadata(result.result, activeApp, currentCliMode(modeState));
       }
@@ -362,6 +371,28 @@ export function createTuiSubmitPrompt(
     } finally {
       activeRequestPermission = previousRequestPermission;
     }
+  };
+
+  // Alt+Up 撤回端口（进程内）：直达 core pendingInputs 的 removeQueueItem；
+  // 真实 turn_steer_discarded 事件纠正 TUI 队列区投影。
+  submitPrompt.removeQueuedInputs = async (pendingInputIds) => {
+    const activeApp = (await getApp()) as CommandCenterApp & {
+      removeQueueItem?: (
+        pendingInputId: string,
+        options?: { reason?: "user_removed" | "promoted" },
+      ) => Promise<boolean>;
+    };
+    const removed: string[] = [];
+    for (const pendingInputId of pendingInputIds) {
+      try {
+        if (await activeApp.removeQueueItem?.(pendingInputId, { reason: "user_removed" })) {
+          removed.push(pendingInputId);
+        }
+      } catch {
+        // 单项失败不阻断其余撤回；已被消费/未命中返回 false，如实计数。
+      }
+    }
+    return removed;
   };
 
   attachTuiAppQueries(submitPrompt, getApp);

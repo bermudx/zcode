@@ -162,6 +162,8 @@ export type SelectionState = TuiSelection & {
 
 export type SubmitValueOptions = {
   abortStatus?: string;
+  /** busy 分支的投递意图：steer=Enter（缺省），queue=Ctrl+Q follow-up 排队。 */
+  delivery?: "steer" | "queue";
   preserveDraft?: boolean;
   preserveSelection?: boolean;
   silent?: boolean;

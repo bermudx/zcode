@@ -62,6 +62,7 @@ import {
   zcodeSessionMessagesParamsSchema,
   zcodeProtocolNotifications,
   zcodeSessionReadParamsSchema,
+  zcodeSessionDiscardPendingInputsParamsSchema,
   zcodeSessionRecallPreviousInputParamsSchema,
   zcodeSessionRecordInputHistoryParamsSchema,
   elideSessionSnapshotForIndex,
@@ -2123,6 +2124,49 @@ export async function sendPrompt(context: ZCodeProtocolAgentServerContext, rawPa
   }
   assertExpectedRevision(record, params.expectedRevision);
   assertExpectedProviderRevision(context, record, params.expectedProviderRevision);
+  // attach steer lane（pi-mono 对齐）：busy 输入直驱 core steerTurn 注入
+  // active turn pendingInputs（guide：下一 tool/text 边界消费）。
+  // 拒绝（含 no_active_turn 的 settle 竞态）如实上报 reasonCode——客户端对
+  // no_active_turn/turn_not_steerable 回退本地 follow-up 队列，由客户端
+  // flush 时序保序；服务端不擅自开新回合（客户端没有等待它的 pendingTurns）。
+  if (params.delivery === "steer") {
+    if (params.attachments !== undefined && params.attachments.length > 0) {
+      throw new ProtocolRequestError(-32010, "Steering does not support attachments", {
+        reasonCode: "guard.steerAttachmentsUnsupported",
+      });
+    }
+    context.logger?.info("ZCode Protocol session/send steer", {
+      inputId: params.inputId,
+      queryId: params.queryId,
+      sessionId: params.sessionId,
+      textLength: params.content.length,
+      workspacePath: record.workspace.workspacePath,
+    });
+    const steered = await record.app.steerTurn(params.content, {
+      delivery: "guide",
+      ...(params.inputId !== undefined ? { inputId: params.inputId } : {}),
+      ...(params.queryId !== undefined ? { queryId: params.queryId as QueryId } : {}),
+    });
+    if (steered.kind === "queued") {
+      return {
+        ...afterPromptAccepted(context, record, "steer_queued"),
+        steerQueued: {
+          pendingInputId: steered.pendingInputId,
+          queueLength: steered.queueLength,
+          turnId: steered.turnId,
+        },
+      };
+    }
+    context.logger?.warn("ZCode Protocol session/send steer rejected", {
+      reason: steered.reason,
+      sessionId: params.sessionId,
+      textLength: params.content.length,
+      workspacePath: record.workspace.workspacePath,
+    });
+    throw new ProtocolRequestError(-32010, `Steer rejected: ${steered.reason}`, {
+      reasonCode: `guard.steerRejected.${steered.reason}`,
+    });
+  }
   if (record.activeAbortController) {
     context.logger?.warn("ZCode Protocol session/send rejected: active prompt exists", {
       inputId: params.inputId,
@@ -2207,6 +2251,39 @@ export async function sendPrompt(context: ZCodeProtocolAgentServerContext, rawPa
   // 同步等待首 token/整轮会让超过 30s 的请求触发 host timeout，并且阻塞后续 session/resume、list 等协议消息。
   // 这里收到输入后立即 ACK，后台 turn 继续通过 session event/state.updated 推送进度。
   return afterPromptAccepted(context, record, "prompt_started");
+}
+
+/**
+ * attach steer 撤回（Alt+Up）：把 TUI 队列区投影出的 pendingInputId 逐项
+ * 桥到 app.removeQueueItem(reason:"user_removed")。命中项由 core 发真实
+ * turn_steer_discarded 事件；未命中 id（已被消费/移除的竞态）不算失败，
+ * 从 removed 列表如实反映，客户端据此只恢复仍存在的输入。
+ */
+export async function discardPendingInputs(
+  context: ZCodeProtocolAgentServerContext,
+  rawParams: unknown,
+) {
+  const params = parseParams(zcodeSessionDiscardPendingInputsParamsSchema, rawParams);
+  const record = requireSession(context, params.sessionId);
+  const removed: string[] = [];
+  for (const pendingInputId of params.pendingInputIds) {
+    try {
+      if (await record.app.removeQueueItem(pendingInputId, { reason: "user_removed" })) {
+        removed.push(pendingInputId);
+      }
+    } catch (error) {
+      // 单项失败不阻断其余撤回；如实上报已移除集，失败细节进日志。
+      context.logger?.warn("ZCode Protocol discardPendingInputs item failed", {
+        error: error instanceof Error ? error.message : String(error),
+        pendingInputId,
+        sessionId: params.sessionId,
+        workspacePath: record.workspace.workspacePath,
+      });
+    }
+  }
+  record.stateRevision++;
+  record.updatedAt = Date.now();
+  return { removed };
 }
 
 export async function compactSession(context: ZCodeProtocolAgentServerContext, rawParams: unknown) {

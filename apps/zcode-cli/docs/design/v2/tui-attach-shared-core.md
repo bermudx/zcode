@@ -61,6 +61,8 @@ herdr pane 1..N                    每 workspace 一个
 - `TuiOptions` 端口 → 协议映射（有则用，无则在
   `packages/shared/src/zcode-protocol/index.ts` 补 zod schema）：
   - `submitPrompt` / `sendInput`（steer）/ `setMode` → 对应请求 topic
+  - `removeQueuedInputs` → `session/discardPendingInputs` 请求 topic
+    （本地队列项客户端摘除，core pendingInputs 项走协议，2026-10-25）
   - `subscribeSessionEvents` → 通知 topic（沿用 desktop-continuous 语义）
   - `recallPreviousInput` / `listModelOptions` / `slashCommands` /
     `listWorkflowRuns` / `readSubagents` / `readSubagentTranscript` /
@@ -188,25 +190,48 @@ herdr pane 1..N                    每 workspace 一个
 
 ## 交互语义收口（busy 队列 / 断线重连 / 会话选择）
 
-### busy 输入本地队列
+### busy 输入：steer 与 follow-up 队列（pi-mono 对齐，2026-10-25）
 
 core 的 `session/send` 同一时间只接纳一个 prompt（并发时拒绝
-"A prompt is already running"）。与本地 CommandInbox 同语义的排队
-放在 **attach 客户端**（`AttachSessionHandle.sendInput`）：
+"A prompt is already running"）。busy 输入分两条 lane，语义对齐
+pi-mono（Enter=steer，Ctrl+Q=queue follow-up）：
 
-- `pendingTurns` 非空（有回合在跑）时，`sendInput` 把输入停进
-  本地 FIFO 队列，返回 `{kind:"queued", pendingInputId, queueLength,
-  turnId}`，并同步向 sinks 发本地合成 `turn_steer_queued` 事件，
-  让 TUI 队列区立即可见。
-- `expectedTurnId` 与当前活跃回合不一致时返回
-  `{kind:"rejected", reason:"expected_turn_mismatch"}`。
-- 回合 settle（`turn_complete`/`turn_error`）后 microtask 触发
-  `flushQueuedInputs`：先合成 `turn_steer_drained`（UI 摘除队列行），
-  再把该输入作为新回合 `session/send`；user 行由 core 正常的
-  `user_message`/`turn_started` 下发，不伪造 transcript。
-  一次只放一条——新回合重新占住 `pendingTurns`，余下条目等
-  下一轮 settle 接力；flush 失败合成 `session_notice` 错误行并
-  继续后续条目。
+- **steer（`sendInput` options `delivery:"steer"`）**：经
+  `session/send` 新增的可选 `delivery:"steer"` 参数直驱 core 的
+  `app.steerTurn`（`inputPresentation:"user_steer"`、
+  `delivery:"guide"`）——输入注入 active turn 的 pendingInputs，
+  在下一个 tool/text 边界被消费。core 发真实
+  `turn_steer_queued`/`turn_steer_drained` 事件，客户端不合成。
+  拒绝（`no_active_turn` settle 竞态、`turn_not_steerable`、附件 steer）
+  服务端回 `guard.steerRejected.{reason}`，客户端回退**本地 follow-up
+  队列**并提示，用户输入永不丢失；服务端不擅自开新回合（客户端没有
+  等待它的 pendingTurns）。
+- **follow-up 队列（`delivery:"queue"`，与缺省行为一致）**：
+  排队放在 **attach 客户端**（`AttachSessionHandle.sendInput`），
+  settle 后作为新回合重放：
+
+  - `pendingTurns` 非空（有回合在跑）时，`sendInput` 把输入停进
+    本地 FIFO 队列，返回 `{kind:"queued", pendingInputId, queueLength,
+    turnId}`，并同步向 sinks 发本地合成 `turn_steer_queued` 事件
+    （`delivery:"queue"`），让 TUI 队列区立即可见。
+  - `expectedTurnId` 与当前活跃回合不一致时返回
+    `{kind:"rejected", reason:"expected_turn_mismatch"}`。
+  - 回合 settle（`turn_complete`/`turn_error`）后 microtask 触发
+    `flushQueuedInputs`：先合成 `turn_steer_drained`（UI 摘除队列行），
+    再把该输入作为新回合 `session/send`；user 行由 core 正常的
+    `user_message`/`turn_started` 下发，不伪造 transcript。
+    一次只放一条——新回合重新占住 `pendingTurns`，余下条目等
+    下一轮 settle 接力；flush 失败合成 `session_notice` 错误行并
+    继续后续条目。
+
+两 lane 的 pending 输入在 TUI 端只有**一个事实来源**：事件投影出的
+`queuedInputs`（core 真实事件 + 本地合成事件同形，按 `pendingInputId`
+幂等 upsert/remove）。Alt+Up 撤回（见 tui-pi-frontend.md）经
+`TuiOptions.removeQueuedInputs` 端口：本地队列项客户端摘除（合成
+`turn_steer_discarded`），core pendingInputs 项经新增
+`session/discardPendingInputs` 方法（params `{sessionId,
+pendingInputIds}`，result `{removed: string[]}`，逐项桥
+`app.removeQueueItem`，core 发真实 `turn_steer_discarded`）。
 
 ### slash 命令路由
 
