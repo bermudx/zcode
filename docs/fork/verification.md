@@ -301,7 +301,7 @@ re-run in the main checkout before promote, all green unless stated:
     correct, clean exit 0 on double Ctrl-C, and zero new session rows in
     the operator's store (newest NewsWiki session still 2026-10-14).
 
-## 2026-10-24 — promotion of the fef8e49f pair (herdr reporter durability + footer stats-row) + promote-from-main gate
+## 2026-10-24 — promotion of the a590c7e4 pair (herdr reporter durability + footer stats-row) + promote-from-main gate
 
 Operator policy after the earlier branch-only promotion: **piz is promoted
 from `main` only**. Encoded mechanically — `promote-piz.sh` now refuses when
@@ -310,8 +310,8 @@ positive path exercised by this promotion). `main` was first fast-forwarded
 to the promoted 9b46915f content, then the two noon patches were rebased
 onto it and ff-merged: `0e1b3d4b` (herdr reporter durability) and
 `94f9dd1d` (footer stats-row right-zone <4-col bow-out), plus a lint fixup
-commit. One rebase conflict in FORK.md P004 (custom-commands vs durability
-wording) resolved keeping both.
+commit (`a590c7e4`, the promoted content). One rebase conflict in FORK.md
+P004 (custom-commands vs durability wording) resolved keeping both.
 
 Battery on final main, all green unless stated:
 
