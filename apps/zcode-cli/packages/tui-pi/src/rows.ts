@@ -202,7 +202,7 @@ class ThoughtPartRow implements Component {
     // 收起时纯文本截到可见宽度再加样式；展开时折行保全文，不丢内容。
     const bodyWidth = Math.max(1, width - 2);
     const source = expanded
-      ? this.part.text.split("\n")
+      ? this.part.text.split(/\r\n|\r|\n/u)
       : this.part.text
           .split("\n")
           .filter((line) => line.trim().length > 0)

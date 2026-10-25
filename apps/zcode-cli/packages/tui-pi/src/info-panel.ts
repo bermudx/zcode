@@ -1,4 +1,4 @@
-// Session info overlay (Ctrl+X B): mode/model/thought, context usage, todos,
+// Session info overlay (Ctrl+O): mode/model/thought, context usage, todos,
 // modified files, subagents, MCP servers, network requests. Mirrors the
 // React frontend's sidebar content; state comes from the shared event
 // projection, the store's SubagentDirectory snapshot (single owner — the
@@ -37,7 +37,7 @@ export class SessionInfoPanel implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    // Esc and Ctrl+X are handled by the app's chord dispatch (dismiss/leader).
+    // Esc and Ctrl+O are handled by the app's chord dispatch (dismiss/toggle).
     void data;
   }
 
@@ -140,7 +140,7 @@ export class SessionInfoPanel implements Component, Focusable {
     if (this.loadFailed || s.subagentsError) {
       lines.push(`  ${theme.muted("(subagent / MCP data unavailable)")}`);
     }
-    lines.push(`  ${theme.muted("Ctrl+X B or Esc to close")}`);
+    lines.push(`  ${theme.muted("Ctrl+O or Esc to close")}`);
     return lines;
   }
 }

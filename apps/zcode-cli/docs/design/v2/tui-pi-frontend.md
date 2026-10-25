@@ -92,7 +92,8 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   `keyEventFromInput` 驱动的两键 leader：旧 `Ctrl+X`→B sidebar leader 在
   kitty 协议下收不到 CSI-u 形式的 ctrl+x，leader 永不 arm、后续普通键落进
   编辑器，实测失效后随本次键位调整退役（`resolveSidebarShortcut` 仍归
-  opentui 前端使用）。
+  opentui 前端使用）。`Ctrl+Y` 不再被 app 拦截，回落到 Editor 自带的
+  kill-ring yank（此前一直被 copy chord 遮蔽）。
   chord 匹配前先经 `isKeyRelease` 丢弃 kitty release 事件且不消费（交还焦点
   组件，由 `wantsKeyRelease` 过滤）：pi-tui 推 `\x1b[>7u`（flag 2 = 上报
   press/repeat/release），release 与 press 键码相同而 `matchesKey` 不区分

@@ -19,7 +19,9 @@ import {
 } from "@zcode/tui/internals";
 import type { TuiSubmitPromptResult } from "@zcode/tui/internals";
 import {
+  LAST_REPLY_COPIED_STATUS,
   NEW_SESSION_BUSY_STATUS,
+  NO_REPLY_TO_COPY_STATUS,
   THINKING_COLLAPSED_STATUS,
   THINKING_EXPANDED_STATUS,
 } from "../src/chords.js";
@@ -306,14 +308,14 @@ test("Ctrl+X copies the last agent reply through writeClipboardText", async () =
   h.feed(CTRL_X);
   await h.flush();
   assert.deepEqual(copied, ["final answer"]);
-  assert.equal(h.store.state.status, "Copied last assistant reply.");
+  assert.equal(h.store.state.status, LAST_REPLY_COPIED_STATUS);
   await h.stop();
 });
 
 test("Ctrl+X without a reply reports the failure", async () => {
   const h = createHarness();
   h.feed(CTRL_X);
-  assert.equal(h.store.state.status, "No assistant reply to copy.");
+  assert.equal(h.store.state.status, NO_REPLY_TO_COPY_STATUS);
   await h.stop();
 });
 
@@ -365,6 +367,24 @@ test("Ctrl+N while busy only hints and does not submit", async () => {
   await h.stop();
 });
 
+test("Ctrl+N while an attach turn is active (activeTurnId) only hints", async () => {
+  // attach 侧远端发起的 turn 只有 activeTurnId 没有 busy——两条 busy 判定腿都
+  // 要盖住，否则 Ctrl+N 会在 attach 下把 /new 排进 steer 队列。
+  const submitted: string[] = [];
+  const h = createHarness({
+    submitPrompt: async (input) => {
+      submitted.push(input.text);
+      return { response: "" };
+    },
+  });
+  h.store.set("activeTurnId", "turn-1" as never);
+  h.feed(CTRL_N);
+  await h.flush();
+  assert.equal(h.store.state.status, NEW_SESSION_BUSY_STATUS);
+  assert.deepEqual(submitted, []);
+  await h.stop();
+});
+
 test("Ctrl+T toggles thought expansion globally", async () => {
   const h = createHarness();
   assert.equal(h.store.state.expandThoughts, false);
@@ -374,5 +394,37 @@ test("Ctrl+T toggles thought expansion globally", async () => {
   h.feed(CTRL_T);
   assert.equal(h.store.state.expandThoughts, false);
   assert.equal(h.store.state.status, THINKING_COLLAPSED_STATUS);
+  await h.stop();
+});
+
+test("Ctrl+T re-renders existing rows: expanded body reaches the terminal stream", async () => {
+  // flag 翻转只是状态；行缓存不 invalidate 的话终端永远看不到展开后的正文。
+  // 这条用例钉住 flag → invalidate → re-render 的完整链路。
+  const h = createHarness();
+  h.store.set("messages", [
+    {
+      content: "",
+      parts: [
+        {
+          contentCharCount: 23,
+          status: "thought",
+          text: "preview line one\npreview line two\nexpand-only tail",
+          type: "thought",
+        },
+      ],
+      role: "agent",
+    },
+  ]);
+  await h.flush();
+  assert.ok(
+    !h.output().includes("expand-only tail"),
+    "collapsed preview must not show the third reasoning line",
+  );
+  h.feed(CTRL_T);
+  await h.flush();
+  assert.ok(
+    h.output().includes("expand-only tail"),
+    "expanded thought body must reach the terminal stream",
+  );
   await h.stop();
 });

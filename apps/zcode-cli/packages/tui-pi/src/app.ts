@@ -586,7 +586,7 @@ export class PiTuiApp {
           for (const row of this.rows) row.invalidate();
           this.transcript.invalidate();
         },
-        lastReply: lastAgentReplyText(store.state.messages),
+        lastReply: () => lastAgentReplyText(store.state.messages),
         setExpandThoughts: (expanded) => store.set("expandThoughts", expanded),
         setStatus: (status) => store.set("status", status),
         submitNewSession: () => void this.submitValue(NEW_SESSION_COMMAND),

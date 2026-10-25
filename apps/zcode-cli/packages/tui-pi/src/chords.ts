@@ -13,24 +13,28 @@ export const NEW_SESSION_BUSY_STATUS =
 export const NEW_SESSION_COMMAND = "/new";
 export const THINKING_EXPANDED_STATUS = "Thinking expanded.";
 export const THINKING_COLLAPSED_STATUS = "Thinking collapsed.";
+export const LAST_REPLY_COPIED_STATUS = "Copied last assistant reply.";
+export const NO_REPLY_TO_COPY_STATUS = "No assistant reply to copy.";
+export const COPY_REPLY_FAILED_STATUS = "Could not copy last assistant reply.";
 
 export const copyLastReply = (input: {
-  lastReply: string | undefined;
+  lastReply: () => string | undefined;
   setStatus: (status: string) => void;
   writeClipboardText: TuiOptions["writeClipboardText"];
 }): void => {
-  const { lastReply, setStatus, writeClipboardText } = input;
+  const { setStatus, writeClipboardText } = input;
+  const lastReply = input.lastReply();
   if (!lastReply) {
-    setStatus("No assistant reply to copy.");
+    setStatus(NO_REPLY_TO_COPY_STATUS);
     return;
   }
   if (!writeClipboardText) {
-    setStatus("Could not copy last assistant reply.");
+    setStatus(COPY_REPLY_FAILED_STATUS);
     return;
   }
   void Promise.resolve(writeClipboardText(lastReply)).then(
-    () => setStatus("Copied last assistant reply."),
-    () => setStatus("Could not copy last assistant reply."),
+    () => setStatus(LAST_REPLY_COPIED_STATUS),
+    () => setStatus(COPY_REPLY_FAILED_STATUS),
   );
 };
 
@@ -41,7 +45,7 @@ export const handleGlobalChord = (input: {
   data: string;
   expandThoughts: boolean;
   invalidateThoughtRows: () => void;
-  lastReply: string | undefined;
+  lastReply: () => string | undefined;
   setExpandThoughts: (expanded: boolean) => void;
   setStatus: (status: string) => void;
   submitNewSession: () => void;
