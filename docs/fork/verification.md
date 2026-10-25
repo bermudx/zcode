@@ -339,6 +339,49 @@ Battery on final main, all green unless stated:
   only; label herdr durability live behavior **unverified** until a real
   herdr pane cycle is observed.
 
+## 2026-10-25 — promotion of the 6537f416 pair (app-server ready budget 60s + lock/ready split)
+
+Fix for the boot-storm restore failure: herdr session restore spawned 16+
+panes at once; `piz --resume` clients each spawned a shared core whose
+spawn→listen exceeded the spec'd 10s ready deadline under cold-boot load;
+every client timed out and SIGTERMed a core that was mid-startup.
+Observed in `~/.zcode/cli/log`: six `startup.failed` with
+"Protocol received SIGTERM" at 16:27:08–14Z; calm-system spawn→listen is
+~2s. `session/resume` on the affected session verified live (883ms, full
+snapshot) before the fix — session data was never at risk.
+
+Change: `APP_SERVER_READY_TIMEOUT_MS` 10s→60s, and the ready window now
+starts at spawn completion instead of sharing the entry/lock-wait deadline.
+Spec `tui-attach-shared-core.md` updated. Merge note: the patch branch was
+initially cut from `patch/tui-pi-steer-queue-parity`'s tip, so the first
+ff-merge pulled the steer-queue feature into main; main was reset and the
+fix rebased alone — steer stays on its own branch unpromoted.
+
+Battery on final main, all green unless stated:
+
+- Root typecheck; CLI workspace typecheck (34/34 turbo tasks); root lint
+  0 errors / 96 warnings; CLI lint via `run-cli-lint.mjs` from repo root:
+  0 errors / 71 warnings / 13 accepted; `architecture:check --changed`
+  0 violations.
+- CLI suite (package script): 588/591, 3 fail = exactly the known
+  pre-existing set (build.test.mjs clientOnly deep-equal + 2 SEA asset
+  tests). Extra attach files (resume-target, resume-fallback,
+  model-option, interactions): 43/43. New regression test "full ready
+  window after a contested lock wait" passes (1.5s).
+- tui-pi 175/175 on rerun; first run had one transient load flake
+  (`!cmd runs locally`, passes isolated and on suite rerun — same class
+  as the documented 2026-10-24 flake).
+- adapters signing 9/9; bootstrap socket-listener 4/4; shared attach
+  contract 4/4.
+- Fresh dist pair (25/25) + `build:attach`; bundle grep confirms
+  `APP_SERVER_READY_TIMEOUT_MS = 6e4` and `readyDeadline = now() +
+  waitForSocketMs` in `zcode-attach.cjs` before promote.
+- `promote-piz.sh` from clean main.
+- Installed-pair smoke (real `piz`, util-linux `script` pty): scratch
+  workspace + isolated `ZCODE_DATA_BASE_DIR`, banner `piz v0.17.0`,
+  footer pwd row `/tmp/piz-smoke-ws (main)` + `yolo` token; scratch core
+  confirmed via `/proc/<pid>/cwd` and stopped by its own pid file.
+
 Still NOT done: the full acceptance gate above (model turn, signing against
 the real provider request, allowance evidence, Ctrl-C signal path, memory
 matrix) remains open and unchanged.
