@@ -137,7 +137,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the c6130f43 pair (commands + `--model`), promoted 2026-10-24 after the verification matrix — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the 9b46915f pair (resume prefix expansion + surfaced resume failures), promoted 2026-10-24 after the verification matrix — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
