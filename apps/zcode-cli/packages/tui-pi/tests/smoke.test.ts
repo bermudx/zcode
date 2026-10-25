@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CTRL_X, ENTER, ESC, createHarness } from "./harness.js";
+import { CTRL_O, ENTER, ESC, createHarness } from "./harness.js";
 
 test("mount renders composer statusline into the terminal", async () => {
   const h = createHarness({ initialMode: "build", initialModel: "prov/model" });
@@ -31,12 +31,11 @@ test("typed draft and submit flow through the real input channel", async () => {
   await h.stop();
 });
 
-test("Ctrl+X B paints the info overlay into the terminal stream", async () => {
+test("Ctrl+O paints the info overlay into the terminal stream", async () => {
   const h = createHarness({ initialMode: "plan" });
   await h.flush();
   h.resetOutput();
-  h.feed(CTRL_X);
-  h.feed("b");
+  h.feed(CTRL_O);
   await h.flush();
   assert.match(h.output(), /Session/);
   h.feed(ESC);

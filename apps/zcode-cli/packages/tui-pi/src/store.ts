@@ -41,6 +41,8 @@ export class AppStore {
     cacheStats: undefined as CacheStats | undefined,
     contextUsage: {} as ContextUsage,
     draftAttachments: [] as DraftAttachment[],
+    /** Ctrl+T：transcript 内 thought part 正文展开/收起（纯展示态）。 */
+    expandThoughts: false,
     lastError: undefined as string | undefined,
     lastEvent: "",
     liveModelText: "",

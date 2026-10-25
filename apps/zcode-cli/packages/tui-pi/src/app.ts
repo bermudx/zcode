@@ -24,7 +24,6 @@ import {
   ESCAPE_PAUSE_PROMPT,
   NO_ACTIVE_OUTPUT_STATUS,
   SIDEBAR_HIDDEN_STATUS,
-  SIDEBAR_LEADER_HINT,
   SIDEBAR_SHOWN_STATUS,
   applyMainSessionEvent,
   applyWorkflowProgressToMirror,
@@ -32,13 +31,11 @@ import {
   appendWorkflowInterruptedNotices,
   createDoublePressGuard,
   createSelectionState,
-  createSidebarShortcutState,
   createTuiPermissionRequester,
   interruptedWorkflowNotices,
   lastAgentReplyText,
   resolveDoublePressIntent,
   resetDoublePressGuard,
-  resolveSidebarShortcut,
   seedWorkflowMirror,
   submitDuringActiveTurn,
   submitIdleTurn,
@@ -46,6 +43,7 @@ import {
   workflowRunSeedFromSummary,
   type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
+import { NEW_SESSION_COMMAND, handleGlobalChord } from "./chords.js";
 import { StatusFooter } from "./footer.js";
 import { PiBanner } from "./banner.js";
 import { Composer } from "./composer.js";
@@ -58,7 +56,6 @@ import { createCtrlCIntentGuard, resetCtrlCExitGuard } from "./ctrl-c-intent.js"
 import { BusyQuitChoice } from "./quit-choice.js";
 import { SessionInfoPanel } from "./info-panel.js";
 import { PiInputHistory } from "./input-history.js";
-import { keyEventFromInput } from "./keys.js";
 import { ApprovalPanel, QueuedInputsRow, SelectionPanel } from "./panels.js";
 import { MessageRow, piMarkdownTheme, reconcileTranscript } from "./rows.js";
 import { cycleCollaborationMode } from "./mode-switch.js";
@@ -121,7 +118,6 @@ export class PiTuiApp {
   private queuedRow: QueuedInputsRow | undefined;
   private workflowCard: WorkflowCard;
   private infoOverlay: OverlayHandle | undefined;
-  private readonly sidebarShortcut = createSidebarShortcutState();
   private startupApplied = false;
   private readonly history: PiInputHistory;
   /** 子代理目录唯一 owner；组件只读 store。 */
@@ -552,17 +548,8 @@ export class PiTuiApp {
     // Autocomplete owns the keyboard while open.
     if (this.editor.isShowingAutocomplete()) return undefined;
 
-    // Ctrl+X leader for the session-info overlay (same chord as the React
-    // frontend's sidebar): Ctrl+X arms, B toggles.
-    const shortcutKey = keyEventFromInput(data);
-    if (shortcutKey) {
-      const intent = resolveSidebarShortcut(this.sidebarShortcut, shortcutKey, Date.now());
-      if (intent === "arm") store.set("status", SIDEBAR_LEADER_HINT);
-      if (intent === "toggle") this.toggleInfoPanel();
-      // "pass"/toggle-files/toggle-apis must not consume: pass-through keys reach the editor.
-      if (intent === "arm" || intent === "toggle") return { consume: true };
-    }
-
+    // 所有 chord 只走 matchesKey：它识别 kitty CSI-u 键码，keyEventFromInput
+    // 不识别——两键 leader（旧 Ctrl+X→B）在 kitty 下永不 arm，已退役。
     if (matchesKey(data, "ctrl+c")) {
       this.handleCtrlCIntent();
       return { consume: true };
@@ -590,21 +577,23 @@ export class PiTuiApp {
       return { consume: true };
     }
 
-    if (matchesKey(data, "ctrl+y")) {
-      const reply = lastAgentReplyText(store.state.messages);
-      if (!reply) {
-        store.set("status", "No assistant reply to copy.");
-        return { consume: true };
-      }
-      const writer = this.options.writeClipboardText;
-      if (!writer) {
-        store.set("status", "Could not copy last assistant reply.");
-        return { consume: true };
-      }
-      void Promise.resolve(writer(reply)).then(
-        () => store.set("status", "Copied last assistant reply."),
-        () => store.set("status", "Could not copy last assistant reply."),
-      );
+    if (
+      handleGlobalChord({
+        busy: store.state.busy || Boolean(store.state.activeTurnId),
+        data,
+        expandThoughts: store.state.expandThoughts,
+        invalidateThoughtRows: () => {
+          for (const row of this.rows) row.invalidate();
+          this.transcript.invalidate();
+        },
+        lastReply: lastAgentReplyText(store.state.messages),
+        setExpandThoughts: (expanded) => store.set("expandThoughts", expanded),
+        setStatus: (status) => store.set("status", status),
+        submitNewSession: () => void this.submitValue(NEW_SESSION_COMMAND),
+        toggleInfoPanel: () => this.toggleInfoPanel(),
+        writeClipboardText: this.options.writeClipboardText,
+      })
+    ) {
       return { consume: true };
     }
 
@@ -726,6 +715,7 @@ export class PiTuiApp {
   private syncTranscript(): void {
     reconcileTranscript({
       container: this.transcript,
+      expandThoughts: () => this.store.state.expandThoughts,
       markdownTheme: this.mdTheme,
       messages: this.store.state.messages,
       rows: this.rows,

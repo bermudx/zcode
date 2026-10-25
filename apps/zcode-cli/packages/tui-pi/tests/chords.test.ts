@@ -15,17 +15,23 @@ import {
   NO_SELECTABLE_MODEL_STATUS,
   PROMPT_DRAFT_CLEARED_STATUS,
   SIDEBAR_HIDDEN_STATUS,
-  SIDEBAR_LEADER_HINT,
   SIDEBAR_SHOWN_STATUS,
 } from "@zcode/tui/internals";
 import type { TuiSubmitPromptResult } from "@zcode/tui/internals";
 import {
+  NEW_SESSION_BUSY_STATUS,
+  THINKING_COLLAPSED_STATUS,
+  THINKING_EXPANDED_STATUS,
+} from "../src/chords.js";
+import {
   CTRL_C,
   CTRL_D,
   CTRL_L,
+  CTRL_N,
+  CTRL_O,
   CTRL_P,
+  CTRL_T,
   CTRL_X,
-  CTRL_Y,
   ESC,
   SHIFT_TAB,
   createHarness,
@@ -289,7 +295,7 @@ test("Ctrl+L opens a filterable model selection panel", async () => {
   await h.stop();
 });
 
-test("Ctrl+Y copies the last agent reply through writeClipboardText", async () => {
+test("Ctrl+X copies the last agent reply through writeClipboardText", async () => {
   const copied: string[] = [];
   const h = createHarness({
     writeClipboardText: async (text) => {
@@ -297,27 +303,76 @@ test("Ctrl+Y copies the last agent reply through writeClipboardText", async () =
     },
   });
   h.store.set("messages", [{ content: "final answer", role: "agent" }]);
-  h.feed(CTRL_Y);
+  h.feed(CTRL_X);
   await h.flush();
   assert.deepEqual(copied, ["final answer"]);
   assert.equal(h.store.state.status, "Copied last assistant reply.");
   await h.stop();
 });
 
-test("Ctrl+Y without a reply reports the failure", async () => {
+test("Ctrl+X without a reply reports the failure", async () => {
   const h = createHarness();
-  h.feed(CTRL_Y);
+  h.feed(CTRL_X);
   assert.equal(h.store.state.status, "No assistant reply to copy.");
   await h.stop();
 });
 
-test("Ctrl+X B toggles the session info overlay", async () => {
+test("Ctrl+O toggles the session info overlay", async () => {
   const h = createHarness();
-  h.feed(CTRL_X);
-  assert.equal(h.store.state.status, SIDEBAR_LEADER_HINT);
-  h.feed("b");
+  h.feed(CTRL_O);
+  assert.equal(h.store.state.status, SIDEBAR_SHOWN_STATUS);
+  h.feed(CTRL_O);
+  assert.equal(h.store.state.status, SIDEBAR_HIDDEN_STATUS);
+  await h.stop();
+});
+
+test("Ctrl+O overlay still closes on Esc", async () => {
+  const h = createHarness();
+  h.feed(CTRL_O);
   assert.equal(h.store.state.status, SIDEBAR_SHOWN_STATUS);
   h.feed(ESC);
   assert.equal(h.store.state.status, SIDEBAR_HIDDEN_STATUS);
+  await h.stop();
+});
+
+test("Ctrl+N submits /new through the normal pipeline while idle", async () => {
+  const submitted: string[] = [];
+  const h = createHarness({
+    submitPrompt: async (input) => {
+      submitted.push(input.text);
+      return { response: "" };
+    },
+  });
+  h.feed(CTRL_N);
+  await h.flush();
+  assert.deepEqual(submitted, ["/new"]);
+  await h.stop();
+});
+
+test("Ctrl+N while busy only hints and does not submit", async () => {
+  const submitted: string[] = [];
+  const h = createHarness({
+    submitPrompt: async (input) => {
+      submitted.push(input.text);
+      return { response: "" };
+    },
+  });
+  h.store.set("busy", true);
+  h.feed(CTRL_N);
+  await h.flush();
+  assert.equal(h.store.state.status, NEW_SESSION_BUSY_STATUS);
+  assert.deepEqual(submitted, []);
+  await h.stop();
+});
+
+test("Ctrl+T toggles thought expansion globally", async () => {
+  const h = createHarness();
+  assert.equal(h.store.state.expandThoughts, false);
+  h.feed(CTRL_T);
+  assert.equal(h.store.state.expandThoughts, true);
+  assert.equal(h.store.state.status, THINKING_EXPANDED_STATUS);
+  h.feed(CTRL_T);
+  assert.equal(h.store.state.expandThoughts, false);
+  assert.equal(h.store.state.status, THINKING_COLLAPSED_STATUS);
   await h.stop();
 });

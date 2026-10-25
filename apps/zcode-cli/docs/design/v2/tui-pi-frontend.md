@@ -82,9 +82,17 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - 全局键经 `tui.addInputListener` 拦截（先于焦点组件）：`Ctrl+C`（有草稿→清空；
   否则 2s 双击退出）、`Ctrl+D`（空草稿退出）、双 `Esc`（2s 内中断当前 turn）、
   `Ctrl+P`（轮换可用模型，silent 提交 `/model`）、`Ctrl+L`（直接弹出可过滤模型
-  选择面板，回车提交 `/model <ref>`）、`Ctrl+Y`（复制最后一条 agent 回复）、
+  选择面板，回车提交 `/model <ref>`）、`Ctrl+X`（复制最后一条 agent 回复）、
+  `Ctrl+N`（新 session：空闲时提交 `/new`，turn 进行中只提示不触发）、
+  `Ctrl+T`（展开/收起全部 thought part 正文，默认收起到两行预览）、
+  `Ctrl+O`（开/关 session 信息面板，见末节）、
   `Ctrl+V`/`Alt+V`（剪贴板图片粘贴，见下节）、`Shift+Tab`（mode 轮换
   `plan→build→guarded→yolo`）、空草稿 `+`/`-`（展开/收起 workflow 卡）。
+- 所有 chord 只走 `matchesKey` 判定（识别 kitty CSI-u 键码）。不做
+  `keyEventFromInput` 驱动的两键 leader：旧 `Ctrl+X`→B sidebar leader 在
+  kitty 协议下收不到 CSI-u 形式的 ctrl+x，leader 永不 arm、后续普通键落进
+  编辑器，实测失效后随本次键位调整退役（`resolveSidebarShortcut` 仍归
+  opentui 前端使用）。
   chord 匹配前先经 `isKeyRelease` 丢弃 kitty release 事件且不消费（交还焦点
   组件，由 `wantsKeyRelease` 过滤）：pi-tui 推 `\x1b[>7u`（flag 2 = 上报
   press/repeat/release），release 与 press 键码相同而 `matchesKey` 不区分
@@ -195,7 +203,7 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   `appendWorkflowInterruptedNotices`）。`WorkflowCard` 内联渲染在转写与交互区
   之间：每 run 一行（状态 | label | settled/used | actors），空草稿 `+`/`-`
   切换展开 actors、reports 预览与 log tail。
-- 信息面板：Ctrl+X leader 复用 `resolveSidebarShortcut`（Ctrl+X → B 开/关），
+- 信息面板：`Ctrl+O` 直开/关（`Ctrl+X` leader 已退役，见上节），
   `SessionInfoPanel` 经 `tui.showOverlay` 右栏呈现：mode/model/thought、ctx、
   token 用量、最近事件、todos、修改文件、subagents（running/ended）、MCP
   servers、最近网络请求；Esc 关闭。subagents 段渲染 `store.state.subagents`
@@ -249,8 +257,8 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 ## 验收
 
 - `zcode tui --tui-frontend=pi` 启动 composer；提交 prompt 流式渲染 markdown +
-  工具行；权限/选择/问题面板可交互；`Ctrl+P/L/Y`、`Shift+Tab`、双 Esc、Ctrl+C
-  语义与 opentui 前端一致。
+  工具行；权限/选择/问题面板可交互；`Ctrl+P/L/X/N/T/O`、`Shift+Tab`、双 Esc、
+  Ctrl+C 语义符合本文件键位表。
 - `--tui-frontend` 非法值报错；缺省走 opentui 行为不变（回归）。
 - `node:test` 用例：投影（事件→Message[]）、提交分支、审批结果合成、
   选择/问题状态机、草稿命令解析、键位守卫；`VirtualTerminal` 冒烟渲染。

@@ -18,8 +18,8 @@ const PIZ_LOGO_LINES = [
 
 const LOGO_WIDTH = 19;
 const INFO_GAP = "   ";
-const HINT_LINE_1 = "esc interrupt · ctrl+c/d clear/exit · shift+tab mode";
-const HINT_LINE_2 = "/ commands · ! shell · ctrl+p/l models · ctrl+v paste";
+const HINT_LINE_1 = "esc interrupt · ctrl+c/d clear/exit · shift+tab mode · ctrl+o info";
+const HINT_LINE_2 = "/ commands · ! shell · ctrl+p/l models · ctrl+x/n/t copy/new/think";
 
 export class PiBanner implements Component {
   private models: readonly TuiModelOption[] = [];

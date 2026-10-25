@@ -12,8 +12,10 @@ import { formatShellTranscriptRow } from "../src/shell.js";
 import { createPiTheme } from "../src/theme.js";
 
 const theme = createPiTheme({ noColor: false });
-const render = (message: Message, width: number): string[] =>
-  new MessageRow(message, theme, piMarkdownTheme(theme)).render(width);
+const render = (message: Message, width: number, expandThoughts = false): string[] =>
+  new MessageRow(message, theme, piMarkdownTheme(theme), () => expandThoughts).render(
+    width,
+  );
 
 const assertFits = (lines: string[], width: number): void => {
   for (const [index, line] of lines.entries()) {
@@ -100,6 +102,56 @@ test("markdown agent rows stay inside the width", () => {
 test("a one-cell-wide terminal does not produce negative widths", () => {
   const lines = render({ content: "abc", role: "user" }, 1);
   assertFits(lines, 1);
+});
+
+const THOUGHT_TEXT = "first reasoning line\nsecond reasoning line\nthird reasoning line";
+
+const thoughtMessage = (): Message => ({
+  content: "",
+  parts: [
+    {
+      contentCharCount: THOUGHT_TEXT.length,
+      status: "thought",
+      text: THOUGHT_TEXT,
+      type: "thought",
+    },
+  ],
+  role: "agent",
+});
+
+test("collapsed thought parts keep the two-line preview", () => {
+  const lines = render(thoughtMessage(), 60);
+  assert.ok(lines[0]!.includes("+ thought"), "collapsed label carries the + marker");
+  assert.ok(lines.some((line) => line.includes("first reasoning line")));
+  assert.ok(lines.some((line) => line.includes("second reasoning line")));
+  assert.ok(
+    !lines.some((line) => line.includes("third reasoning line")),
+    "collapsed preview caps at two lines",
+  );
+});
+
+test("expanded thought parts render the full reasoning text", () => {
+  const lines = render(thoughtMessage(), 60, true);
+  assert.ok(lines[0]!.includes("- thought"), "expanded label carries the - marker");
+  assert.ok(lines.some((line) => line.includes("third reasoning line")));
+});
+
+test("expanded thought parts wrap long lines within the width", () => {
+  const message: Message = {
+    content: "",
+    parts: [
+      {
+        contentCharCount: LONG_SENTENCE.length,
+        status: "thought",
+        text: LONG_SENTENCE,
+        type: "thought",
+      },
+    ],
+    role: "agent",
+  };
+  const lines = render(message, 40, true);
+  assertFits(lines, 40);
+  assert.ok(lines.length > 2, "long expanded reasoning must wrap");
 });
 
 test("tool part markdown bodies (ExitPlanMode plan) render inside the width", () => {

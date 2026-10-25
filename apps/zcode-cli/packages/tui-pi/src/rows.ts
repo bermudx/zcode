@@ -180,6 +180,7 @@ class ThoughtPartRow implements Component {
   constructor(
     private part: ThoughtTranscriptPart,
     private readonly theme: PiTheme,
+    private readonly expandThoughts: () => boolean,
   ) {}
 
   setPart(part: ThoughtTranscriptPart): void {
@@ -189,18 +190,30 @@ class ThoughtPartRow implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
+    // 折叠/展开指示符沿用 +/-（折叠 + 展开 -）；Ctrl+T 全局切换。
+    const expanded = this.expandThoughts();
     const label =
       this.part.status === "thinking"
         ? this.theme.muted("⠋ thinking…")
-        : this.theme.muted(`✻ thought (${this.part.contentCharCount} chars)`);
-    // 流式 reasoning 单行可能远超终端宽度；doRender 对超宽行直接抛错崩 TUI，
-    // 必须先把纯文本截到可见宽度再加样式。
+        : this.theme.muted(
+            `${expanded ? "-" : "+"} thought (${this.part.contentCharCount} chars)`,
+          );
+    // 流式 reasoning 单行可能远超终端宽度；doRender 对超宽行直接抛错崩 TUI。
+    // 收起时纯文本截到可见宽度再加样式；展开时折行保全文，不丢内容。
     const bodyWidth = Math.max(1, width - 2);
-    const body = this.part.text
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .slice(0, 2)
-      .map((line) => `  ${this.theme.dim(truncateToWidth(line.trim(), bodyWidth))}`);
+    const source = expanded
+      ? this.part.text.split("\n")
+      : this.part.text
+          .split("\n")
+          .filter((line) => line.trim().length > 0)
+          .slice(0, 2)
+          .map((line) => line.trim());
+    const body: string[] = [];
+    for (const raw of source) {
+      for (const line of expanded ? wrapTextWithAnsi(raw, bodyWidth) : [raw]) {
+        body.push(`  ${this.theme.dim(truncateToWidth(line, bodyWidth))}`);
+      }
+    }
     return [label, ...body];
   }
 }
@@ -212,12 +225,13 @@ class PartRow implements Component {
     part: TranscriptPart,
     private readonly theme: PiTheme,
     markdownTheme: MarkdownTheme,
+    expandThoughts: () => boolean,
   ) {
     this.child =
       part.type === "tool"
         ? new ToolPartRow(part, theme, markdownTheme)
         : part.type === "thought"
-          ? new ThoughtPartRow(part, theme)
+          ? new ThoughtPartRow(part, theme, expandThoughts)
           : part.format === "plain"
             ? new Text(part.text, 2, 0)
             : new Markdown(part.text, 0, 0, markdownTheme);
@@ -251,6 +265,7 @@ export class MessageRow implements Component {
     message: Message,
     private readonly theme: PiTheme,
     private readonly markdownTheme: MarkdownTheme,
+    private readonly expandThoughts: () => boolean,
   ) {
     this.message = message;
   }
@@ -343,7 +358,10 @@ export class MessageRow implements Component {
     if (message.parts && message.parts.length > 0) {
       while (this.partRows.length < message.parts.length) {
         const part = message.parts[this.partRows.length];
-        if (part) this.partRows.push(new PartRow(part, theme, this.markdownTheme));
+        if (part)
+          this.partRows.push(
+            new PartRow(part, theme, this.markdownTheme, this.expandThoughts),
+          );
       }
       for (let index = 0; index < message.parts.length; index += 1) {
         const part = message.parts[index];
@@ -374,6 +392,7 @@ const transcriptPartText = (message: Message): string =>
 /** Reconcile the rendered component list against the message list. */
 export const reconcileTranscript = (input: {
   container: { children: Component[]; invalidate(): void };
+  expandThoughts: () => boolean;
   messages: readonly Message[];
   theme: PiTheme;
   markdownTheme: MarkdownTheme;
@@ -385,7 +404,12 @@ export const reconcileTranscript = (input: {
   while (rows.length < targetCount) {
     const message = messages[rows.length];
     if (!message) break;
-    const row = new MessageRow(message, input.theme, input.markdownTheme);
+    const row = new MessageRow(
+      message,
+      input.theme,
+      input.markdownTheme,
+      input.expandThoughts,
+    );
     rows.push(row);
     container.children.push(row);
   }

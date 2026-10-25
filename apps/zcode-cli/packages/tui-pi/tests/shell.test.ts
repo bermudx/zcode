@@ -329,6 +329,7 @@ test("user rows hide the inline block but keep the notice", () => {
     { content: `${block}\n\nreview this`, role: "user" },
     theme,
     piMarkdownTheme(theme),
+    () => false,
   ).render(80);
   // 用户块首行是 bg 填充，内容行从 index 1 起。
   assert.ok(lines[1]!.startsWith("> review this"));
