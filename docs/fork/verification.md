@@ -301,6 +301,44 @@ re-run in the main checkout before promote, all green unless stated:
     correct, clean exit 0 on double Ctrl-C, and zero new session rows in
     the operator's store (newest NewsWiki session still 2026-10-14).
 
+## 2026-10-24 — promotion of the fef8e49f pair (herdr reporter durability + footer stats-row) + promote-from-main gate
+
+Operator policy after the earlier branch-only promotion: **piz is promoted
+from `main` only**. Encoded mechanically — `promote-piz.sh` now refuses when
+HEAD is not `main` or the tracked tree is dirty (both refusal paths tested;
+positive path exercised by this promotion). `main` was first fast-forwarded
+to the promoted 9b46915f content, then the two noon patches were rebased
+onto it and ff-merged: `0e1b3d4b` (herdr reporter durability) and
+`94f9dd1d` (footer stats-row right-zone <4-col bow-out), plus a lint fixup
+commit. One rebase conflict in FORK.md P004 (custom-commands vs durability
+wording) resolved keeping both.
+
+Battery on final main, all green unless stated:
+
+- Root typecheck; CLI typecheck (34/34); root lint 0 errors / 96 warnings;
+  CLI lint via `npm_execpath` shim: 0 errors / 71 warnings / 13 accepted
+  (one new `no-useless-spread` warning from the herdr patch was fixed
+  rather than carried); `architecture:check --changed` 0 violations.
+- CLI suite + explicit attach files: 621 total, 618 pass, 3 fail = exactly
+  the known pre-existing set. One transient `app-server-spawn` flake on a
+  combined first run (56ms test); 10/10 isolated and 33/33 ×2 combined
+  reruns — load flake, not a regression.
+- tui-pi 166/166 (incl. the new stats-row case); adapters signing 9/9;
+  bootstrap socket-listener 4/4; shared attach contract 4/4.
+- Fresh dist pair (18:27-18:30) + `build:attach`; bundle greps before
+  promote: `SEND_ATTEMPTS`/`HEARTBEAT_MS` ×4, resume `is ambiguous:` ×1 in
+  `zcode-attach.cjs`; `MIN_RIGHT_WIDTH` ×2 in tui-pi `dist/index.js`.
+- `promote-piz.sh` from clean main (gate positive path).
+- Installed-pair smoke (real `piz`, pty): isolated-dir `--resume sess_bogus123`
+  → `Error: Session not found`, exit 1, no TUI, scratch core cleaned by
+  pid file; real-store `piz --resume sess_99f180d5` in `~/Documents/NewsWiki`
+  still restores the transcript (marker ×4), footer pwd/stats rows render,
+  clean exit 0, zero new session rows.
+- Live herdr-socket reporting was NOT exercised (no herdr session in the
+  smoke path): retry/backoff/heartbeat/argv-reuse covered by unit tests
+  only; label herdr durability live behavior **unverified** until a real
+  herdr pane cycle is observed.
+
 Still NOT done: the full acceptance gate above (model turn, signing against
 the real provider request, allowance evidence, Ctrl-C signal path, memory
 matrix) remains open and unchanged.
