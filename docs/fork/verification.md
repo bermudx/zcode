@@ -382,6 +382,36 @@ Battery on final main, all green unless stated:
   footer pwd row `/tmp/piz-smoke-ws (main)` + `yolo` token; scratch core
   confirmed via `/proc/<pid>/cwd` and stopped by its own pid file.
 
+## 2026-10-25 — promotion of the 4855b2b4 pair (steer-queue parity merged, same cycle)
+
+Operator confirmed the steer-queue feature (`fbe7dbee`,
+`patch/tui-pi-steer-queue-parity`) was meant to ship; merged to main via
+`--no-ff` 4855b2b4 (busy Enter steers, Ctrl+Q queues, Alt+Up restores;
+spans shared protocol schema + bootstrap server-ops + attach client +
+tui-pi chords). First recorded battery for this feature; full re-run on
+the merged tree, all green unless stated:
+
+- Root typecheck; CLI workspace typecheck (34/34); root lint 0 errors /
+  96 warnings; CLI lint 0 errors / 71 warnings / 13 accepted;
+  `architecture:check --changed` 0 violations.
+- CLI suite (package script): 594/597, 3 fail = exactly the known
+  pre-existing set (build.test.mjs clientOnly deep-equal + 2 SEA asset
+  tests). Suite grew by steer's 6 attach-adapter steer tests — all pass.
+  Extra attach files: 43/43.
+- bootstrap 9/9 (socket-listener 4 + new protocol-steer-queue 5);
+  adapters signing 9/9; shared attach contract 4/4; tui-pi 185/185
+  (steer added 10 tests; no flake this run).
+- Fresh dist pair (25/25) + `build:attach`; bundle greps:
+  `delivery:"steer"` in zcode-attach.cjs, `delivery: "steer"` +
+  `steerRejected` in zcode.cjs, `APP_SERVER_READY_TIMEOUT_MS = 6e4`.
+- `promote-piz.sh` from clean main; dist-runtime greps confirm both.
+- Installed-pair smoke (real `piz`, pty, isolated `ZCODE_DATA_BASE_DIR`):
+  banner + pwd row + `yolo` render; scratch core stopped by pid file.
+
+NOT exercised live: an actual busy-Enter steer against a real model turn
+(unit-tested end-to-end at protocol level only). Label steer UX
+**unverified live** until observed in a real session.
+
 Still NOT done: the full acceptance gate above (model turn, signing against
 the real provider request, allowance evidence, Ctrl-C signal path, memory
 matrix) remains open and unchanged.
