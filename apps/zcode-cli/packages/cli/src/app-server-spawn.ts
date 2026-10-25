@@ -11,8 +11,12 @@ import {
   type AppServerAttachWorkspace,
 } from "@zcode/shared";
 
-/** socket 就绪等待上限：与 spec 对齐的 10s。 */
-const APP_SERVER_READY_TIMEOUT_MS = 10_000;
+/** socket 就绪等待上限：60s。10s 曾在开机风暴下误杀仍在正常启动的 core：
+ *  2026-10-25 实测 herdr 开机恢复同时拉起十余个 agent 进程，core 从 spawn 到
+ *  listen 需要 >10s（平静时约 2s），所有 attach 客户端在 10s 处超时并 SIGTERM
+ *  掉即将就绪的子进程，piz --resume 全灭。60s 容忍冷启动竞争；core 真正
+ *  失败时 childExit 路径仍快速报错，不会等到超时。 */
+const APP_SERVER_READY_TIMEOUT_MS = 60_000;
 const APP_SERVER_PROBE_INTERVAL_MS = 50;
 const APP_SERVER_PROBE_TIMEOUT_MS = 500;
 /** 启动锁被视为 stale 的兜底时长：锁文件读不出 pid 时用 mtime 判定。 */
@@ -190,7 +194,10 @@ export async function ensureServer(
 
     // .pid/.info 由 server 端在 listen 成功后自登记（bind 成功者才是 owner）；
     // 客户端在这里写会在双 spawn 竞争下登记死进程。本端只等 socket 就绪。
-    while (now() < deadline) {
+    // 就绪窗口从 spawn 完成起算，不吃前面锁等待的预算：锁竞争获胜时剩余的
+    // 锁预算可能已近零，不能把刚出生的 core 立刻判死。
+    const readyDeadline = now() + waitForSocketMs;
+    while (now() < readyDeadline) {
       if (childError) {
         throw new Error(`app-server spawn failed: ${childError.message}`, {
           cause: childError,

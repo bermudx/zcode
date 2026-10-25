@@ -42,8 +42,12 @@ herdr pane 1..N                    每 workspace 一个
   `zcode app-server --socket <path> --no-plugins`。
 - 生命周期 v1：首个客户端发现无 socket 时负责 detached 启动服务端
   （setsid，stdio 全断开），原子锁（`O_CREAT|O_EXCL` lock 文件）防双
-  启动；等待 socket 就绪超时 10s。停止：`kill $(cat <path>.pid)`，
-  写入文档；不做 idle 自动退出。
+  启动；等待 socket 就绪超时 60s。停止：`kill $(cat <path>.pid)`，
+  写入文档；不做 idle 自动退出。锁等待与就绪等待各占独立预算：
+  就绪窗口从新 spawn 完成起算，等锁耗掉的预算不压缩 core 启动
+  （2026-10-25 实测：herdr 开机恢复并发拉起十余个 agent 时 core 的
+  spawn→listen 超过旧 10s 上限，客户端超时误杀正常启动中的 core，
+  piz --resume 全灭；上限提至 60s 并把锁/就绪预算拆开）。
 
 ### 2. 客户端：`zcode attach`
 

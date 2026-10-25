@@ -273,6 +273,51 @@ test("ensureServer waits out a live-pid lock instead of stealing it", async (t) 
   );
 });
 
+test("ensureServer gives the spawned server a full ready window after a contested lock wait", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("unix socket path only");
+    return;
+  }
+  const directory = await temporaryDirectory();
+  const socketPath = join(directory, "core-slow-start.sock");
+  // 回归 2026-10-25 开机风暴：锁等待与就绪等待共用同一 deadline 时，等锁耗尽的
+  // 预算会让刚 spawn 的 core 只剩近零就绪窗口被误杀。就绪窗口必须从 spawn 起算。
+  const WAIT_MS = 1_200;
+  const LOCK_HOLD_MS = 800;
+  const SERVER_DELAY_MS = 600;
+  const scriptPath = join(directory, "slow-server.mjs");
+  await writeFile(
+    scriptPath,
+    `import { createServer } from "node:net";
+const socketIndex = process.argv.indexOf("--socket");
+const socketPath = process.argv[socketIndex + 1];
+const server = createServer((socket) => socket.end());
+setTimeout(() => server.listen(socketPath), ${SERVER_DELAY_MS});
+process.on("SIGTERM", () => process.exit(0));
+`,
+  );
+  // 活 pid 锁：不能回收，只能等持有者自行释放；持有时长刻意吃掉大半共享预算。
+  const lockPath = `${socketPath}.lock`;
+  await writeFile(lockPath, `${process.pid}\n`);
+  const lockRelease = setTimeout(() => {
+    void rm(lockPath, { force: true });
+  }, LOCK_HOLD_MS);
+  try {
+    const result = await ensureTestServer({
+      workspace,
+      socketPath,
+      env: {},
+      spawnSpec: fakeSpawnSpec(scriptPath),
+      waitForSocketMs: WAIT_MS,
+      pollIntervalMs: 20,
+    });
+    assert.equal(result.started, true);
+    assert.equal(result.socketPath, socketPath);
+  } finally {
+    clearTimeout(lockRelease);
+  }
+});
+
 test("ensureServer marks spawned attach cores with ZCODE_ATTACH_CORE=1", async (t) => {
   if (process.platform === "win32") {
     t.skip("unix socket path only");
