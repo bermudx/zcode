@@ -27,7 +27,12 @@ import { applyTurnCompleteEvent, applyTurnCompleteFallbackResponse } from "./app
 import { applyToolTranscriptEvent } from "./app-tool-transcript.js";
 import { DEFAULT_TUI_COPY } from "./app-locale.js";
 import { removeQueuedInputs, upsertQueuedInput } from "./app-queued-inputs.js";
-import { applyCompactTimelineEvent, applyCompactTurnErrorEvent } from "./app-compact-timeline.js";
+import {
+  applyCompactTimelineEvent,
+  applyCompactTurnErrorEvent,
+  compactCommandFromText,
+} from "./app-compact-timeline.js";
+import { redactSensitivePromptForTranscript } from "./app-submit.js";
 import { applyWorkflowProgressEvent, type WorkflowMirrorSetter } from "./app-workflow-events.js";
 import { asRecord, formatNumber, numberField, stringField } from "./state.js";
 
@@ -93,6 +98,12 @@ export function applySessionEventToState(
       applyTurnSteerQueuedEvent(payload, handlers.setQueuedInputs);
       break;
     case SessionEventType.TurnSteerDrained:
+      applyTurnSteerDrainedEvent(
+        payload,
+        handlers.setQueuedInputs,
+        handlers.setMessages,
+      );
+      break;
     case SessionEventType.TurnSteerDiscarded:
       applyTurnSteerFinishedEvent(payload, handlers.setQueuedInputs);
       break;
@@ -240,6 +251,49 @@ function applyTurnSteerFinishedEvent(
   setQueuedInputs((current) =>
     removeQueuedInputs(current, stringArrayField(payload, "pendingInputIds")),
   );
+}
+
+let drainedUserMessageSequence = 0;
+
+/**
+ * drain 事实自带文本与持久 messageId（`TurnSteerDrainedPayload.drainedInputs`，
+ * 与 resume 侧 product projection 同一依据）：排队输入被注入模型上下文时，
+ * 每条输入要落成 transcript user 行。此前 live 投影只清队列区——用户消息
+ * 从 queue 消失后又不在 transcript 里，转写中凭空消失，只在上游思考文本中
+ * 可见。messageId 作行 id：事件去重窗之外的重复投递按 id 幂等。
+ * `/compact` 输入按 compact-timeline 契约渲染为 timeline 行，不回显 user 行。
+ */
+function applyTurnSteerDrainedEvent(
+  payload: Record<string, unknown>,
+  setQueuedInputs: React.Dispatch<React.SetStateAction<QueuedInput[]>> | undefined,
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+): void {
+  setQueuedInputs?.((current) =>
+    removeQueuedInputs(current, stringArrayField(payload, "pendingInputIds")),
+  );
+  const drainedInputs = payload.drainedInputs;
+  if (!Array.isArray(drainedInputs)) return;
+  const rows: Message[] = [];
+  for (const item of drainedInputs) {
+    const record = asRecord(item);
+    const text = stringField(record, "text");
+    if (!text) continue;
+    const intent = asRecord(record.intent);
+    if (stringField(intent, "kind") === "compact" || compactCommandFromText(text)) continue;
+    const id =
+      stringField(record, "messageId") ??
+      (() => {
+        drainedUserMessageSequence += 1;
+        return `drained-user-${drainedUserMessageSequence}`;
+      })();
+    rows.push({ content: redactSensitivePromptForTranscript(text), id, role: "user" });
+  }
+  if (rows.length === 0) return;
+  setMessages((current) => {
+    const existing = new Set(current.map((message) => message.id));
+    const missing = rows.filter((row) => !existing.has(row.id));
+    return missing.length === 0 ? current : [...current, ...missing];
+  });
 }
 
 function stringArrayField(payload: Record<string, unknown>, key: string): string[] {

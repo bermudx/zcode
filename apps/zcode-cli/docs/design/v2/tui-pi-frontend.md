@@ -202,7 +202,11 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   `submitPrompt`；`busy`→`sendInput`，queued → 队列区（`TurnSteerQueued`/
   `Drained`/`Discarded` 同步），rejected → status 提示。本地 user row 乐观追加，
   `/login *-api-key` 文本在 transcript 中脱敏；`/compact` 渲染为
-  compact-timeline row 且不回显 response。
+  compact-timeline row 且不回显 response。`TurnSteerDrained` 除清队列区外，
+  按 `drainedInputs`（自带文本与持久 messageId，resume 侧 product projection
+  同一依据）把每条被消费的输入落成 transcript user 行——live 投影此前只清
+  队列，排队消息从转写中凭空消失；messageId 作行 id 天然幂等，`/compact`
+  输入不回显（共享 reducer `app-events.ts`，两个 TUI 前端同享）。
 - `requestPermission`：CreateWorkflow/AmendWorkflow 沿用 CLI 自动放行例外；
   AskUserQuestion 经 `AskUserQuestionInputSchema` 校验 → 问题向导内联面板
   （选项、Other 输入、multiSelect、review 页，`decision:"modify"` 回传

@@ -277,6 +277,78 @@ test("tracks queued turn steering events outside transcript messages", () => {
   );
 
   assert.deepEqual(state.queuedInputs, []);
+  // 旧事件（无 drainedInputs）只清队列区，不追加 user 行。
+  assert.deepEqual(state.messages, []);
+});
+
+test("drained queued inputs render as transcript user rows", () => {
+  const state = createSessionEventState();
+
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerQueued, {
+      input: "you agree it needs serious polish no?",
+      inputPreview: "you agree it needs serious polish no?",
+      pendingInputId: "pending-1",
+      queueLength: 1,
+      targetTurnId: "turn-1",
+    }),
+  );
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerDrained, {
+      drainedInputs: [
+        { messageId: "message-1", pendingInputId: "pending-1", text: "you agree it needs serious polish no?" },
+      ],
+      injectedMessageIds: ["message-1"],
+      pendingInputIds: ["pending-1"],
+      targetTurnId: "turn-1",
+    }),
+  );
+
+  assert.deepEqual(state.queuedInputs, []);
+  assert.deepEqual(
+    state.messages.map((message) => ({ content: message.content, id: message.id, role: message.role })),
+    [
+      {
+        content: "you agree it needs serious polish no?",
+        id: "message-1",
+        role: "user",
+      },
+    ],
+  );
+
+  // 同一事件重复投递（事件去重窗之外）按 messageId 幂等，不叠行。
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerDrained, {
+      drainedInputs: [
+        { messageId: "message-1", pendingInputId: "pending-1", text: "you agree it needs serious polish no?" },
+      ],
+      injectedMessageIds: ["message-1"],
+      pendingInputIds: ["pending-1"],
+      targetTurnId: "turn-1",
+    }),
+  );
+  assert.equal(state.messages.length, 1);
+});
+
+test("drained compact inputs do not render a user row", () => {
+  const state = createSessionEventState();
+
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerDrained, {
+      drainedInputs: [
+        { intent: { kind: "compact" }, messageId: "message-compact", pendingInputId: "pending-c", text: "/compact" },
+        { messageId: "message-2", pendingInputId: "pending-2", text: "real follow-up" },
+      ],
+      injectedMessageIds: ["message-compact", "message-2"],
+      pendingInputIds: ["pending-c", "pending-2"],
+      targetTurnId: "turn-1",
+    }),
+  );
+
+  assert.deepEqual(
+    state.messages.map((message) => message.content),
+    ["real follow-up"],
+  );
 });
 
 test("renders compact lifecycle events as a single timeline row", () => {
