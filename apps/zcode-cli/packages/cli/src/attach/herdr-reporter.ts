@@ -110,7 +110,7 @@ export class AttachHerdrReporter {
 
   /** 在途与重试中的上报全部完成的信号（测试断言用）。 */
   settled(): Promise<void> {
-    return Promise.all([...this.pendingSends]).then(() => undefined);
+    return Promise.all(this.pendingSends).then(() => undefined);
   }
 
   private readonly onEvent = (event: SessionEvent): void => {
