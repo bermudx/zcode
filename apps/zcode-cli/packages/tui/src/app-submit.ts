@@ -157,7 +157,10 @@ export async function submitDuringActiveTurn(input: {
       toPromptInput(input.text, promptAttachments, input.modelSelection),
       {
         abortSignal: input.signal,
-        delivery: "auto",
+        // Enter 缺省 steer（pi-mono 对齐）；Ctrl+Q 显式 queue。缺省值改变的是
+        // attach 模式（旧：本地排队重放；新：协议直驱 core steerTurn）；
+        // 进程内 steer→steer_active_turn 与旧 auto 的 busy 分支等价。
+        delivery: input.submitOptions?.delivery ?? "steer",
         expectedTurnId: input.activeTurnId,
         onEvent: input.applySessionEvent,
         requestPermission: input.requestPermission,

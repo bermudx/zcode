@@ -183,6 +183,25 @@ Drain 只允许发生在 tool calling loop 的安全边界：
 
 UI 只能做乐观展示，不能把本地 busy 状态当作队列事实来源。
 
+### attach 瘦客户端 lane（2026-10-25，pi-mono 对齐）
+
+attach 客户端没有进程内 runtime，steer 经 `session/send` 的可选
+`delivery:"steer"` 参数直驱 `app.steerTurn`（服务端映射
+`inputPresentation:"user_steer"`、`delivery:"guide"`）：
+
+- busy Enter → `sendInput({delivery:"steer"})` → core pendingInputs，
+  真实 queued/drained 事件驱动 UI 队列区；
+- busy Ctrl+Q → `sendInput({delivery:"queue"})` → 客户端本地
+  follow-up FIFO（settle 后作为新回合重放，见
+  tui-attach-shared-core.md"busy 输入"节）——core deferred queue
+  的 auto-drain 提升器在 v4 bridge，瘦客户端 lane 不依赖它；
+- steer 被拒（`turn_not_steerable`、附件、`no_active_turn` settle 竞态）时
+  服务端拒绝并回 `guard.steerRejected.{reason}` reasonCode，客户端回退
+  本地 follow-up 队列（flush 时序在客户端，保序），输入不丢；
+- Alt+Up 撤回：core pendingInputs 项经 `session/discardPendingInputs`
+  逐项 `removeQueueItem`（真实 `turn_steer_discarded` 事件），本地
+  队列项客户端摘除（合成同形事件）。
+
 Busy TUI 可以在调用 `sendInput` 前先插入一个临时本地 user transcript row，
 用于保留用户输入在可见对话中的时间顺序。这个 row 在
 `turn_steer_queued` event、`sendInput` 返回 `queued`，或 `sendInput`

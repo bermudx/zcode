@@ -83,11 +83,17 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   否则 2s 双击退出）、`Ctrl+D`（空草稿退出）、双 `Esc`（2s 内中断当前 turn）、
   `Ctrl+P`（轮换可用模型，silent 提交 `/model`）、`Ctrl+L`（直接弹出可过滤模型
   选择面板，回车提交 `/model <ref>`）、`Ctrl+X`（复制最后一条 agent 回复）、
+  `Ctrl+Q`（busy 时把草稿排进 follow-up 队列——`submitValue(text,
+  {delivery:"queue"})`；空闲时与 Enter 等价，pi-mono 对齐）、
   `Ctrl+N`（新 session：空闲时提交 `/new`，turn 进行中只提示不触发）、
   `Ctrl+T`（展开/收起全部 thought part 正文，默认收起到两行预览）、
   `Ctrl+O`（开/关 session 信息面板，见末节）、
   `Ctrl+V`/`Alt+V`（剪贴板图片粘贴，见下节）、`Shift+Tab`（mode 轮换
-  `plan→build→guarded→yolo`）、空草稿 `+`/`-`（展开/收起 workflow 卡）。
+  `plan→build→guarded→yolo`）、空草稿 `+`/`-`（展开/收起 workflow 卡）、
+  `Alt+Up`（把排队输入（steer pending + follow-up 队列）按序拼回输入框
+  （`\n\n` 连接、保留当前草稿在末尾），并经 `TuiOptions.removeQueuedInputs`
+  端口从其 owner（attach：core pendingInputs / 客户端本地队列）摘除；
+  队列为空时提示"没有可恢复的排队输入"。pi-mono 对齐）。
 - 所有 chord 只走 `matchesKey` 判定（识别 kitty CSI-u 键码）。不做
   `keyEventFromInput` 驱动的两键 leader：旧 `Ctrl+X`→B sidebar leader 在
   kitty 协议下收不到 CSI-u 形式的 ctrl+x，leader 永不 arm、后续普通键落进
@@ -171,7 +177,9 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   - 紧凑计数与 pi-mono `formatTokens` 等值：<1k 原值、<10k 一位小数 `k`、
     <1M 整数 `k`、<10M 一位小数 `M`、否则整数 `M`。
   `busy`/`activeTurnId` 时活动行 spinner 转动；busy 不锁输入（steer 语义经 `sendInput`
-  `delivery:"auto"`）。mode 显示协作模式（来自快照 `settings.mode.current`，
+  `delivery:"steer"`——attach 模式经协议 `session/send delivery:"steer"` 直驱 core
+  `steerTurn`，进程内模式映射 `steer_active_turn`；被拒时回退 follow-up 队列，见
+  turn-steering.md attach lane 节）。mode 显示协作模式（来自快照 `settings.mode.current`，
   plan 覆盖期间为 `plan`，见 tui-mode-switching.md 与 tui-attach-shared-core.md）。
 - 子代理目录：`SubagentDirectory`（`tui-pi/src/subagents.ts`）把
   `options.readSubagents` 的快照收敛进 `store.state.subagents`，是目录的唯一
@@ -182,8 +190,11 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   双重守卫丢弃过期快照。会话投影重置（`resetSessionProjection`）时清空目录。
   `readSubagents` 端口缺失（非 attach / 未接线）时整体静默缺省。
 - `submitPrompt` / `sendInput` 分支语义与 `app-submit.ts` 相同：空闲→
-  `submitPrompt`；`busy`→`sendInput`，queued → 队列区（`TurnSteerQueued`/
-  `Drained`/`Discarded` 同步），rejected → status 提示。本地 user row 乐观追加，
+  `submitPrompt`；`busy`→`sendInput`（Enter 缺省 `delivery:"steer"`，
+  Ctrl+Q 显式 `delivery:"queue"`），queued → 队列区（`TurnSteerQueued`/
+  `Drained`/`Discarded` 同步；steer 项来自 core 真实事件、follow-up 项
+  来自 attach 本地合成事件，按 `pendingInputId` 幂等），rejected →
+  status 提示。本地 user row 乐观追加，
   `/login *-api-key` 文本在 transcript 中脱敏；`/compact` 渲染为
   compact-timeline row 且不回显 response。
 - `requestPermission`：CreateWorkflow/AmendWorkflow 沿用 CLI 自动放行例外；

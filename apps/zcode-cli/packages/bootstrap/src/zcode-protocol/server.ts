@@ -37,6 +37,7 @@ import {
   closeSession,
   compactSession,
   createSession,
+  discardPendingInputs,
   forkSession,
   generateWorkspaceText,
   goalSession,
@@ -771,6 +772,8 @@ export class ZCodeProtocolAgentServer {
         return await subscribeSession(this.context, request.params);
       case zcodeProtocolMethods.sessionRecallPreviousInput:
         return await recallPreviousInput(this.context, request.params);
+      case zcodeProtocolMethods.sessionDiscardPendingInputs:
+        return await discardPendingInputs(this.context, request.params);
       case zcodeProtocolMethods.sessionRecordInputHistory:
         return await recordInputHistory(this.context, request.params);
       case zcodeProtocolMethods.sessionSend:

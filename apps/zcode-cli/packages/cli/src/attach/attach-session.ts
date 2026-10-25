@@ -22,6 +22,14 @@ import type {
 } from "@zcode/tui";
 import type { CollaborationMode, TurnId } from "@zcode/contracts";
 import type { AttachClient } from "./attach-client.js";
+import {
+  discardPendingInputs as discardPendingInputsLane,
+  queueFollowUpInput,
+  steerActiveTurn,
+  type QueuedLocalInput,
+  type SendInputOptions,
+  type SteerQueueContext,
+} from "./attach-steer.js";
 import { toProtocolAttachments } from "./attach-attachments.js";
 import { PendingInteractions } from "./attach-interactions.js";
 import { requestSessionStopBestEffort } from "./attach-session-stop.js";
@@ -112,24 +120,6 @@ type PendingTurn = {
   resolve: (result: TuiSubmitPromptResult) => void;
   reject: (error: Error) => void;
   turnId?: string;
-};
-
-type SendInputOptions = {
-  abortSignal?: AbortSignal;
-  delivery?: string;
-  expectedTurnId?: TurnId;
-  onEvent?: (event: SessionEvent) => void | Promise<void>;
-  requestPermission?: (
-    request: unknown,
-    requestOptions?: unknown,
-  ) => Promise<unknown>;
-};
-
-type QueuedLocalInput = {
-  input: TuiPromptInput;
-  options?: SendInputOptions;
-  pendingInputId: string;
-  targetTurnId?: string;
 };
 
 /**
@@ -374,8 +364,13 @@ export class AttachSessionHandle {
   }
 
   /**
-   * CommandCenterApp.sendInput：忙时本地排队（core 的 session/send 只收一个并发
-   * prompt，排队语义在客户端），settle 后 flushQueuedInputs 逐条重放为新回合。
+   * CommandCenterApp.sendInput：busy 时按 delivery 分 lane（pi-mono 对齐）：
+   * - `delivery:"steer"`（Enter）：经 `session/send delivery:"steer"` 直驱 core
+   *   steerTurn 注入 active turn pendingInputs；真实 turn_steer_queued 事件驱动
+   *   UI。拒绝（settle 竞态 / turn 不可 steer / 附件）回退本地 follow-up 队列。
+   * - 缺省与 `delivery:"queue"`（Ctrl+Q）：本地排队，settle 后
+   *   flushQueuedInputs 逐条重放为新回合（core 的 session/send 只收一个并发
+   *   prompt，排队语义在客户端）。
    */
   async sendInput(
     input: TuiPromptInput,
@@ -396,33 +391,33 @@ export class AttachSessionHandle {
         };
       }
       const text = typeof input === "string" ? input : input.text;
-      const pendingInputId = `${PROMPT_INPUT_ID_PREFIX}-queued-${++this.queueCounter}`;
-      this.queuedInputs.push({
-        input,
-        options,
-        pendingInputId,
-        targetTurnId: activeTurnId,
-      });
-      // 投影 queued 行立即进 UI 队列区（applyTurnSteerQueuedEvent 只读
-      // pendingInputId/inputPreview，其余字段为对齐协议事件形状）。
-      this.emitSinkEvent("turn_steer_queued", {
-        delivery: "queue",
-        input: text,
-        inputPreview: text,
-        inputSize: text.length,
-        pendingInputId,
-        queueLength: this.queuedInputs.length,
-        ...(activeTurnId ? { targetTurnId: activeTurnId } : {}),
-      });
-      return {
-        kind: "queued",
-        pendingInputId,
-        queueLength: this.queuedInputs.length,
-        turnId: (activeTurnId ?? "") as TurnId,
-      };
+      const hasAttachments =
+        typeof input !== "string" && (input.attachments?.length ?? 0) > 0;
+      const ctx = this.steerQueueContext();
+      if (options?.delivery === "steer" && !hasAttachments) {
+        return steerActiveTurn(ctx, text, options, activeTurnId);
+      }
+      return queueFollowUpInput(ctx, input, options, text, activeTurnId);
     }
     const result = await this.submitPrompt(input, options);
     return { kind: "started_turn", result };
+  }
+
+  /** steer/queue lane 的上下文：lane 实现在 attach-steer.ts（800 行门）。 */
+  private steerQueueContext(): SteerQueueContext {
+    return {
+      clientOf: () => this.clientOf(),
+      emitSinkEvent: (type, payload) => this.emitSinkEvent(type, payload),
+      nextInputId: () => this.nextInputId(),
+      nextQueueCounter: () => ++this.queueCounter,
+      queuedInputs: this.queuedInputs,
+      sessionId: this.sessionId,
+    };
+  }
+
+  /** Alt+Up 撤回（TuiRemoveQueuedInputs 端口）；实现见 attach-steer.ts。 */
+  async discardPendingInputs(pendingInputIds: readonly string[]): Promise<string[]> {
+    return discardPendingInputsLane(this.steerQueueContext(), pendingInputIds);
   }
 
   private scheduleQueuedFlush(): void {

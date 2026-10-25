@@ -87,6 +87,40 @@ test("busy submit steers through sendInput and shows the queue row", async () =>
   await h.stop();
 });
 
+test("busy Enter passes the steer delivery (pi-mono parity default)", async () => {
+  // Enter 的 busy 缺省是 steer：delivery 缺省值改变的是 attach 模式的 lane
+  // （旧本地排队 → 协议直驱 core steerTurn）。这条钉住缺省不再回落 "auto"。
+  const deliveries: (string | undefined)[] = [];
+  const h = createHarness({
+    sendInput: async (_input, options) => {
+      deliveries.push(options?.delivery);
+      return { kind: "queued", pendingInputId: "s1", queueLength: 1, turnId: "turn-1" as never };
+    },
+    submitPrompt: async () => ({ response: "unused" }),
+  });
+  h.store.set("busy", true);
+  h.store.set("activeTurnId", "turn-1" as never);
+  await h.app.submitValue("redirect please");
+  assert.deepEqual(deliveries, ["steer"]);
+  await h.stop();
+});
+
+test("busy submit with delivery queue keeps the follow-up lane", async () => {
+  const deliveries: (string | undefined)[] = [];
+  const h = createHarness({
+    sendInput: async (_input, options) => {
+      deliveries.push(options?.delivery);
+      return { kind: "queued", pendingInputId: "q1", queueLength: 1, turnId: "turn-1" as never };
+    },
+    submitPrompt: async () => ({ response: "unused" }),
+  });
+  h.store.set("busy", true);
+  h.store.set("activeTurnId", "turn-1" as never);
+  await h.app.submitValue("after you finish", { delivery: "queue" });
+  assert.deepEqual(deliveries, ["queue"]);
+  await h.stop();
+});
+
 test("rejected steer restores the draft and reports the reason", async () => {
   const h = createHarness({
     sendInput: async () => ({ kind: "rejected", reason: "turn_finished" }) as TuiSendInputResult,

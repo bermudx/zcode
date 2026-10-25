@@ -43,13 +43,18 @@ import {
   workflowRunSeedFromSummary,
   type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
-import { NEW_SESSION_COMMAND, handleGlobalChord } from "./chords.js";
+import {
+  NEW_SESSION_COMMAND,
+  handleGlobalChord,
+  handleSteerQueueChord,
+  matchesImagePasteChord,
+} from "./chords.js";
 import { StatusFooter } from "./footer.js";
 import { PiBanner } from "./banner.js";
 import { Composer } from "./composer.js";
 import { PiDraftAttachments } from "./attachments.js";
 import { PiImagePaste } from "./image-paste.js";
-import { openModelPicker, rotateModel } from "./model-chords.js";
+import { handleModelChord } from "./model-chords.js";
 import { createShellEscapeRunner, type ShellEscapeRunner } from "./shell-prompt.js";
 import { isShellCommand } from "./shell.js";
 import { createCtrlCIntentGuard, resetCtrlCExitGuard } from "./ctrl-c-intent.js";
@@ -511,7 +516,7 @@ export class PiTuiApp {
     });
   };
 
-  private handleEditorSubmit(text: string): void {
+  private handleEditorSubmit(text: string, submitOptions?: SubmitValueOptions): void {
     const trimmed = text.trim();
     if (!trimmed) return;
     this.editor.addToHistory(trimmed);
@@ -521,7 +526,7 @@ export class PiTuiApp {
       void this.shellEscape.run(trimmed);
       return;
     }
-    void this.submitValue(trimmed);
+    void this.submitValue(trimmed, submitOptions);
   }
 
   /* ---------- chords ---------- */
@@ -597,30 +602,39 @@ export class PiTuiApp {
       return { consume: true };
     }
 
-    // 剪贴板图片：ctrl+v 与 React 前端一致；Windows 终端常吃掉 ctrl+v，alt+v 兜底。
-    if (matchesKey(data, "ctrl+v") || matchesKey(data, "alt+v")) {
+    // Ctrl+Q（busy follow-up 排队）与 Alt+Up（排队输入拼回输入框）：
+    // pi-mono 对齐，分派实现在 chords.ts（含面板开放期的放行语义）。
+    if (
+      handleSteerQueueChord({
+        data,
+        editor: this.editor,
+        history: this.history,
+        options: this.options,
+        store,
+        submit: (text, submitOptions) => this.handleEditorSubmit(text, submitOptions),
+      })
+    ) {
+      return { consume: true };
+    }
+
+    // 剪贴板图片：ctrl+v 与 React 前端一致；alt+v 兜底（Windows 终端常吃掉 ctrl+v）。
+    if (matchesImagePasteChord(data)) {
       void this.imagePaste.paste();
       return { consume: true };
     }
 
-    if (matchesKey(data, "ctrl+p")) {
-      rotateModel({
+    // Ctrl+P 轮换 / Ctrl+L 选择器：分派在 model-chords.ts。
+    if (
+      handleModelChord({
         currentModel: store.state.model,
+        data,
         draft: this.editor.getText(),
-        models: store.state.modelOptions,
-        setStatus: (status) => store.set("status", status),
-        submitValue: this.submitValue,
-      });
-      return { consume: true };
-    }
-
-    if (matchesKey(data, "ctrl+l")) {
-      openModelPicker({
-        currentModel: store.state.model,
         models: store.state.modelOptions,
         setSelection: (selection) => store.set("selection", selection),
         setStatus: (status) => store.set("status", status),
-      });
+        submitValue: this.submitValue,
+      })
+    ) {
       return { consume: true };
     }
 

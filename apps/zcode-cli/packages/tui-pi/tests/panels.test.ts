@@ -12,7 +12,7 @@ import {
   type ApprovalPrompt,
 } from "@zcode/tui/internals";
 import { setActiveTuiThemeMode } from "@zcode/tui/internals";
-import { ApprovalPanel, SelectionPanel } from "../src/panels.js";
+import { ApprovalPanel, QueuedInputsRow, SelectionPanel } from "../src/panels.js";
 import { AppStore } from "../src/store.js";
 import { createPiTheme } from "../src/theme.js";
 import { DOWN, ENTER, ESC, paste } from "./harness.js";
@@ -258,4 +258,16 @@ test("question wizard Esc denies", () => {
   const panel = new ApprovalPanel(approval, store, theme());
   panel.handleInput(ESC);
   assert.equal(resolved[0]!.decision, "deny");
+});
+
+test("QueuedInputsRow renders queued texts plus the Alt+Up restore hint", () => {
+  // pi-mono 对齐：队列区必须提示 dequeue 键——否则恢复入口不可发现。
+  const row = new QueuedInputsRow(
+    [{ id: "p1", text: "first" }, { id: "p2", text: "second" }],
+    theme(),
+  );
+  const lines = row.render(80).join("\n");
+  assert.ok(lines.includes("first"));
+  assert.ok(lines.includes("second"));
+  assert.match(lines, /Alt\+Up restores queued inputs/);
 });

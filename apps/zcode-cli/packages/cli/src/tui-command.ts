@@ -128,6 +128,7 @@ export const runTuiCommand = async (
         stdin: ctx.stdin,
         stdout: ctx.stdout,
         recallPreviousInput: promptHandler.recallPreviousInput,
+        removeQueuedInputs: promptHandler.removeQueuedInputs,
         sendInput: promptHandler.sendInput,
         setMode: promptHandler.setMode,
         submitPrompt: promptHandler,
