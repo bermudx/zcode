@@ -22,6 +22,8 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CLI_PKG="$ROOT/apps/zcode-cli/packages/cli"
 
+fail() { echo "promote-piz: $1" >&2; exit 1; }
+
 # Policy (2026-10-24): piz is promoted from main only, never from a patch
 # branch. Promoting a branch that main lacks silently regresses the next
 # main-based promotion (the resume fix shipped this way once). The gate is
@@ -38,8 +40,6 @@ DST="$CLI_PKG/dist-runtime"
 TMP="$CLI_PKG/.dist-runtime.tmp.$$"
 TUI_PI="$ROOT/apps/zcode-cli/packages/tui-pi"
 TUI="$ROOT/apps/zcode-cli/packages/tui"
-
-fail() { echo "promote-piz: $1" >&2; exit 1; }
 
 for f in zcode-attach.cjs zcode.cjs; do
 	[ -f "$SRC/$f" ] || fail "missing $SRC/$f — build first"
