@@ -143,6 +143,11 @@ just commits, when budgeting syncs.
 The external `zcode-allowance-update` script manages the parked standalone tree;
 **do not use it to update piz**.
 
+**Promotion policy (2026-10-24):** promote only from a clean `main`, never
+from patch branches — `promote-piz.sh` refuses otherwise. A branch-only
+promotion regresses the next main-based promotion (this happened once with
+the resume fix and is the reason the gate is mechanical).
+
 Use pinned tools from `mise.toml`; see [build/check commands](docs/fork/verification.md).
 The full core build and `build:attach` thin client must be paired. Next install
 work must stage a versioned pair outside development worktrees, attach full Git

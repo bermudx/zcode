@@ -14,13 +14,25 @@
 # with source edits. npm deps (react, zod, pi-tui) still resolve at the repo
 # root node_modules, unchanged.
 #
-# Usage: run after the verification matrix passes —
+# Usage: run after the verification matrix passes, from a clean main —
 #   sh apps/zcode-cli/scripts/promote-piz.sh
 
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CLI_PKG="$ROOT/apps/zcode-cli/packages/cli"
+
+# Policy (2026-10-24): piz is promoted from main only, never from a patch
+# branch. Promoting a branch that main lacks silently regresses the next
+# main-based promotion (the resume fix shipped this way once). The gate is
+# mechanical so the rule survives memory: HEAD must be main and the tracked
+# tree must be clean — dist/ is content-keyed, so a clean main tree is what
+# the bundles claim to be.
+BRANCH="$(git -C "$ROOT" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+[ "$BRANCH" = "main" ] ||
+	fail "refusing to promote: HEAD is '${BRANCH:-detached}', not main (promote from main only)"
+git -C "$ROOT" diff-index --quiet HEAD -- ||
+	fail "refusing to promote: tracked files differ from HEAD (commit or discard first)"
 SRC="$CLI_PKG/dist"
 DST="$CLI_PKG/dist-runtime"
 TMP="$CLI_PKG/.dist-runtime.tmp.$$"

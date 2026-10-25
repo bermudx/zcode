@@ -18,7 +18,9 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   pair built in THIS checkout; it does not auto-update. The wrapper execs
   `apps/zcode-cli/packages/cli/dist-runtime/`, a frozen dir written only by
   `apps/zcode-cli/scripts/promote-piz.sh` — run it after the verification
-  matrix passes, never as part of a dev build. Dev builds write
+  matrix passes, never as part of a dev build, and only from a clean `main`
+  (the script enforces branch + cleanliness; promoting anything main lacks
+  regresses the next main-based promotion). Dev builds write
   `packages/*/dist/` and cannot leak into `piz`; frontend externals resolve
   to snapshots inside `dist-runtime/node_modules` (see
   `docs/fork/verification.md`). `zcode` on PATH still points to the old
