@@ -415,3 +415,54 @@ NOT exercised live: an actual busy-Enter steer against a real model turn
 Still NOT done: the full acceptance gate above (model turn, signing against
 the real provider request, allowance evidence, Ctrl-C signal path, memory
 matrix) remains open and unchanged.
+
+## 2026-10-25 — live defect in the 4855b2b4 pair fixed and re-promoted (086f08c7 pair)
+
+Operator's first live use of steer/queue reported both behaviors broken.
+Artifact diagnosis (session `sess_0a87550a`, real data dir): the core lane
+was fully correct — busy Enter sent `session/send delivery:"steer"` at
+04:41:29, core queued it (`session_input` guide), promoted it into
+`MessageHistory` at the next model-request boundary (04:41:37, msg seq 28),
+and the model reacted to the mid-turn reminder in-request. The TUI was the
+defect: `turn_steer_drained` only removed the queue-area row; nothing ever
+rendered the steered input as a transcript user row (user rows came only
+from local optimistic inserts), so the model visibly answered a message
+that was nowhere on screen — which also made next-boundary drain read as
+"it queued". Ctrl+Q replay had the same gap (flush happens below the TUI).
+
+Fix `a40b6960` (merged `086f08c7`, client-side only, core stays queue-facts
+owner): drained events' `drainedInputs` payload (contract already ships
+text for exactly this) now appends transcript user rows at the stream
+tail; attach flush's synthesized drained event carries the same subset;
+queue rows label `Steering:`/`Follow-up:` (pi-mono parity) and busy-Enter
+status says "Steering active turn." vs "Input queued.". Specs updated
+first (turn-steering.md, tui-pi-frontend.md). Note: `packages/tui`
+exports `dist/` — rebuild `@zcode/tui` before running tui-pi tests after
+editing it, or tests run stale code (found via a misleading status
+assertion failure).
+
+Battery, all green unless stated:
+
+- @zcode/tui 252/252 (new: drained rows in payload order, discarded,
+  lane labels); tui-pi 186/186 (new: steer→drained→user-row e2e, labels);
+  cli attach-adapter 29/31 (flush now asserts drainedInputs text; the 2
+  failures are the known PATH-zcode set, unchanged from clean HEAD).
+- Root typecheck; CLI typecheck 34/34; root lint 0 errors; CLI lint
+  0 errors / 71 warnings / 13 accepted; `architecture:check --changed` 0.
+- `promote-piz.sh` from clean main.
+
+LIVE verification — the gap that shipped the bug, now closed for both
+lanes, dev pair AND installed dist-runtime pair (PTY driver, real shared
+core + GLM model turn in a scratch workspace): steer pending row + status
+<300ms after busy Enter; drained input rendered as transcript user row;
+Ctrl+Q `Follow-up:` row, replay-after-settle rendered as user row; core
+`session_input` row guide/promoted. Evidence:
+[evidence/2026-10-25-live-steer-dev-pair.plain.log](evidence/2026-10-25-live-steer-dev-pair.plain.log),
+[evidence/2026-10-25-live-steer-installed-pair.plain.log](evidence/2026-10-25-live-steer-installed-pair.plain.log).
+Driver: throwaway PTY script via repo-root node-pty (not kept). The
+previous entry's "steer UX unverified live" caveat is resolved for
+steer/queue rendering; timing semantics remain next-model-request-boundary
+injection by design (pi-mono parity), not mid-stream interruption.
+
+The full acceptance gate (signing against the real provider request,
+allowance evidence, Ctrl-C signal path, memory matrix) remains open.
