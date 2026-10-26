@@ -16,6 +16,12 @@
 // table row takes a zero-overhead fast path. Tables nested in blockquotes or
 // list items are not re-handled here (indented lines don't start a table
 // segment) and keep the stock renderer.
+//
+// Fenced code blocks count as prose: the segment scanner tracks fence state
+// (same state machine the json pretty-printer uses), so a table written
+// *inside* a fence — someone documenting markdown syntax, a TSV snippet —
+// stays one intact code block instead of being torn into a rendered table
+// with dangling fence markers around it.
 
 import {
   Markdown,
@@ -30,6 +36,10 @@ const MAX_WORD_FLOOR = 24;
 /** Cells are measured unwrapped at this width; terminals never approach it. */
 const MEASURE_WIDTH = 4096;
 const JSON_FENCE_MAX_CHARS = 32_768;
+/** Pretty-printed json is indented two spaces, like `JSON.stringify(_, null, 2)`. */
+const JSON_INDENT = "  ";
+/** Bounded cell-measurement cache; cleared wholesale when full (no LRU). */
+const MEASURE_CACHE_LIMIT = 4096;
 
 type CellAlign = "left" | "center" | "right";
 
@@ -40,6 +50,46 @@ type MarkdownTable = {
 };
 
 type Segment = { kind: "markdown"; text: string } | { kind: "table"; table: MarkdownTable };
+
+/** Opening fence line: 3+ backticks or tildes, an optional info string. */
+type Fence = { char: string; info: string; length: number };
+
+/** `open` captures marker + info string; `close` captures the marker only. */
+type FencePatterns = { open: RegExp; close: RegExp };
+
+/**
+ * 顶层 fence 的最多 3 格缩进是 GFM 规则。表格切分只在列 0 生效，所以判断
+ * 「这行是不是 fence」必须用同一套顶层规则：4 格缩进的行按 GFM 属于缩进代码块，
+ * 本来就进不了 `parseTable`，也就不需要 fence 保护。
+ */
+const TOP_LEVEL_FENCE: FencePatterns = {
+  close: /^ {0,3}(`{3,}|~{3,})[ \t]*$/u,
+  open: /^ {0,3}(`{3,}|~{3,})[ \t]*(\S*)/u,
+};
+
+/** 任意缩进 fence：列表项/引用里的 json 块历史上就按缩进 fence 美化。 */
+const INDENTED_FENCE: FencePatterns = {
+  close: /^[ \t]*(`{3,}|~{3,})[ \t]*$/u,
+  open: /^[ \t]*(`{3,}|~{3,})[ \t]*(\S*)/u,
+};
+
+const openFence = (line: string, patterns: FencePatterns): Fence | undefined => {
+  const match = patterns.open.exec(line);
+  if (!match) return undefined;
+  const marker = match[1] ?? "";
+  const info = match[2] ?? "";
+  // GFM：反引号 fence 的 info string 不能再含反引号，含反引号的行不是 fence 起点。
+  if (marker.startsWith("`") && info.includes("`")) return undefined;
+  return { char: marker.charAt(0), info, length: marker.length };
+};
+
+/** 闭合 fence 必须是同类字符且不短于开启行（GFM），否则 fence 还没结束。 */
+const closesFence = (fence: Fence, line: string, patterns: FencePatterns): boolean => {
+  const match = patterns.close.exec(line);
+  if (!match) return false;
+  const marker = match[1] ?? "";
+  return marker.charAt(0) === fence.char && marker.length >= fence.length;
+};
 
 /** Split a GFM table row on unescaped pipes, dropping the outer pipe cells. */
 const splitTableRow = (line: string): string[] => {
@@ -105,14 +155,16 @@ const parseTable = (lines: string[], start: number): { table: MarkdownTable; nex
 
 /**
  * Split markdown source into top-level prose/table segments. Only column-0
- * tables start a segment; anything indented stays prose for the stock
- * renderer, so a failed match can never drop content — the lines just remain
- * part of the surrounding markdown segment.
+ * tables outside fenced code blocks start a segment; anything indented or
+ * inside a fence stays prose for the stock renderer, so a failed match can
+ * never drop content — the lines just remain part of the surrounding markdown
+ * segment.
  */
 export const splitMarkdownSegments = (text: string): Segment[] => {
   const lines = text.split("\n");
   const segments: Segment[] = [];
   let prose: string[] = [];
+  let fence: Fence | undefined;
   let index = 0;
   const flushProse = (): void => {
     if (prose.length > 0) {
@@ -121,6 +173,21 @@ export const splitMarkdownSegments = (text: string): Segment[] => {
     }
   };
   while (index < lines.length) {
+    const line = lines[index] ?? "";
+    // fence 内的行一律留在 prose 段：代码块里的 `|---|---|` 是内容，不是表格。
+    // 逐行找表格而不看 fence，会把 fence 体撕成渲染表格，并留下悬空的 ```。
+    if (fence) {
+      prose.push(line);
+      if (closesFence(fence, line, TOP_LEVEL_FENCE)) fence = undefined;
+      index += 1;
+      continue;
+    }
+    fence = openFence(line, TOP_LEVEL_FENCE);
+    if (fence) {
+      prose.push(line);
+      index += 1;
+      continue;
+    }
     const parsed = parseTable(lines, index);
     if (parsed) {
       flushProse();
@@ -128,7 +195,7 @@ export const splitMarkdownSegments = (text: string): Segment[] => {
       index = parsed.next;
       continue;
     }
-    prose.push(lines[index] ?? "");
+    prose.push(line);
     index += 1;
   }
   flushProse();
@@ -228,38 +295,154 @@ export const balanceColumnWidths = (input: {
   return widths;
 };
 
+/**
+ * 只把字符串里的 `\/` 还原成 `/`。`\\` 是转义后的反斜杠，它后面的 `/` 不是
+ * 转义序列，必须原样保留——正则全局替换会把 `\\/` 的首个反斜杠吃掉。
+ */
+const unescapeJsonSlashes = (text: string): string => {
+  let output = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === "\\" && next === "\\") {
+      output += "\\\\";
+      index += 1;
+      continue;
+    }
+    if (char === "\\" && next === "/") {
+      output += "/";
+      index += 1;
+      continue;
+    }
+    output += char;
+  }
+  return output;
+};
+
+const isJsonWhitespace = (char: string | undefined): boolean =>
+  char === " " || char === "\t" || char === "\n" || char === "\r";
+
+/**
+ * 只重排缩进，不重新序列化：字符串与数字保留源文本。
+ * `JSON.stringify(JSON.parse(x), null, 2)` 会把 9007199254740993 打印成 …992、
+ * 把 1.10 打印成 1.1、把 1e400 打印成 null（double 溢出），转写就显示了模型
+ * 没发过的值。合法性由调用方的 `JSON.parse` 把关，这里只需按 token 扫一遍。
+ */
+const indentJsonText = (source: string): string => {
+  const lines: string[] = [];
+  let current = "";
+  let depth = 0;
+  let inString = false;
+  const flush = (): void => {
+    if (current.length > 0) lines.push(JSON_INDENT.repeat(depth) + current);
+    current = "";
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index] ?? "";
+    if (inString) {
+      current += char;
+      if (char === "\\") {
+        const escaped = source[index + 1];
+        if (escaped !== undefined) {
+          current += escaped;
+          index += 1;
+        }
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      current += char;
+      continue;
+    }
+    if (isJsonWhitespace(char)) continue;
+    if (char === "{" || char === "[") {
+      const closer = char === "{" ? "}" : "]";
+      let lookahead = index + 1;
+      while (lookahead < source.length && isJsonWhitespace(source[lookahead])) lookahead += 1;
+      // 空容器写成 `{}` / `[]`，跟 JSON.stringify 一致。
+      if (source[lookahead] === closer) {
+        current += char + closer;
+        index = lookahead;
+        continue;
+      }
+      current += char;
+      flush();
+      depth += 1;
+      continue;
+    }
+    if (char === "}" || char === "]") {
+      flush();
+      depth = Math.max(0, depth - 1);
+      // 收尾括号后的逗号要粘在同一行，否则会单独占一行（`}\n,`）。
+      let closer = char;
+      let lookahead = index + 1;
+      while (lookahead < source.length && isJsonWhitespace(source[lookahead])) lookahead += 1;
+      if (source[lookahead] === ",") {
+        closer += ",";
+        index = lookahead;
+      }
+      current = closer;
+      flush();
+      continue;
+    }
+    if (char === ",") {
+      current += char;
+      flush();
+      continue;
+    }
+    if (char === ":") {
+      current += ": ";
+      continue;
+    }
+    current += char;
+  }
+  flush();
+  return lines.join("\n");
+};
+
 /** Unescape `\/` and pretty-print `json` fenced blocks (streaming-safe). */
 export const prettifyJsonFences = (text: string): string => {
   const lines = text.split("\n");
   const output: string[] = [];
-  let fence: { marker: string; body: string[] } | undefined;
+  let fence: { body: string[]; json: boolean; markers: Fence } | undefined;
   const flushFence = (): void => {
     if (!fence) return;
-    const body = fence.body.join("\n");
-    let rendered = body.replace(/\\\//gu, "/");
+    const { body: bodyLines, json } = fence;
+    fence = undefined;
+    // 流式刚看到开 fence 行、体还没流入：不补空行（否则每段 fence 末尾多一空行）。
+    if (bodyLines.length === 0) return;
+    const body = bodyLines.join("\n");
+    if (!json) {
+      output.push(body);
+      return;
+    }
+    let rendered = unescapeJsonSlashes(body);
     if (body.length <= JSON_FENCE_MAX_CHARS) {
       try {
-        rendered = JSON.stringify(JSON.parse(body), null, 2);
+        // parse 只作合法性闸门：流式中的半截 JSON 不美化，原文照旧。
+        JSON.parse(rendered);
+        rendered = indentJsonText(rendered);
       } catch {
         // Partial JSON mid-stream (or non-JSON mislabeled json): keep the
         // unescaped body verbatim; the next render retries.
       }
     }
     output.push(rendered);
-    fence = undefined;
   };
   for (const line of lines) {
     if (!fence) {
-      const opening = /^\s*(```|~~~)[ \t]*(\S*)/u.exec(line);
-      if (opening) {
-        output.push(line);
-        if (/^json/iu.test(opening[2] ?? "")) fence = { marker: opening[1] ?? "```", body: [] };
-      } else {
-        output.push(line);
+      output.push(line);
+      const opened = openFence(line, INDENTED_FENCE);
+      // 非 json fence 也要跟踪：否则 fence 体里一行 ```json 会被当成真的 json 块。
+      if (opened) {
+        fence = { body: [], json: /^json/iu.test(opened.info), markers: opened };
       }
       continue;
     }
-    if (line.trim() === fence.marker) {
+    if (closesFence(fence.markers, line, INDENTED_FENCE)) {
       flushFence();
       output.push(line);
       continue;
@@ -268,6 +451,30 @@ export const prettifyJsonFences = (text: string): string => {
   }
   flushFence();
   return output.join("\n");
+};
+
+/**
+ * 单元格自然宽度缓存（按主题分桶，每桶有界）。流式消息每个 delta 都整表重排，
+ * 而测量是「把 cell 当 markdown 按 MEASURE_WIDTH 渲染一次」——同一个 cell 的
+ * 可见宽度不随帧变化，跨帧复用即可省掉一半渲染成本。主题只加零宽 ANSI 序列，
+ * 但宽度仍按主题分桶：将来若有主题加可见前缀，不会污染其他主题的测量结果。
+ */
+const measureCaches = new WeakMap<MarkdownTheme, Map<string, number>>();
+
+const measureCellWidth = (text: string, theme: MarkdownTheme): number => {
+  let cache = measureCaches.get(theme);
+  if (!cache) {
+    cache = new Map();
+    measureCaches.set(theme, cache);
+  }
+  const cached = cache.get(text);
+  if (cached !== undefined) return cached;
+  const rendered = new Markdown(text, 0, 0, theme).render(MEASURE_WIDTH)[0] ?? "";
+  const width = visibleWidth(rtrimSpaces(rendered));
+  // 有界：满了整桶清空重算，不做 LRU（清空一次比每帧算 LRU 便宜）。
+  if (cache.size >= MEASURE_CACHE_LIMIT) cache.clear();
+  cache.set(text, width);
+  return width;
 };
 
 const renderTableSegment = (input: {
@@ -283,11 +490,10 @@ const renderTableSegment = (input: {
   // One child Markdown per cell (bold default style for header cells) so
   // inline emphasis, code spans and links inside cells render exactly like
   // prose. Measured cells are rendered unwrapped; the visible width of that
-  // single line is the column's natural content width.
+  // single line is the column's natural content width (cached across frames).
   const cellBlock = (text: string, bold: boolean): Markdown =>
     new Markdown(text, 0, 0, theme, bold ? { bold: true } : undefined);
-  const naturalOf = (text: string): number =>
-    visibleWidth(rtrimSpaces(cellBlock(text, false).render(MEASURE_WIDTH)[0] ?? ""));
+  const naturalOf = (text: string): number => measureCellWidth(text, theme);
 
   const columns = Array.from({ length: count }, (_, index) => ({
     cells: [table.header[index] ?? "", ...table.rows.map((row) => row[index] ?? "")],

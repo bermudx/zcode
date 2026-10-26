@@ -86,6 +86,70 @@ test("streaming partial table: rows so far render, no crash", () => {
   assert.ok(lines.some((line) => line.includes("1")));
 });
 
+// fence 体里的 `|---|` 是内容不是表格：旧实现逐行找表格，会把代码块撕成
+// 「空 fence 记号 + 渲染表格 + 吞掉后文的悬空 ```」，比 stock Markdown 更差。
+const fencedTableSource = [
+  "Here is the table syntax:",
+  "",
+  "```markdown",
+  "| a | b |",
+  "|---|---|",
+  "| 1 | 2 |",
+  "```",
+  "",
+  "That is how you write one.",
+].join("\n");
+
+test("fenced code blocks are never scanned for tables", () => {
+  assert.deepEqual(
+    splitMarkdownSegments(fencedTableSource).map((segment) => segment.kind),
+    ["markdown"],
+  );
+  const tilde = splitMarkdownSegments("~~~\n| a | b |\n|---|---|\n~~~");
+  assert.deepEqual(
+    tilde.map((segment) => segment.kind),
+    ["markdown"],
+  );
+});
+
+test("a fenced table renders as one intact code block", () => {
+  const lines = renderMarkdown(fencedTableSource, 60);
+  assertFits(lines, 60);
+  const flat = plain(lines);
+  assert.ok(
+    flat.some((line) => line.includes("```markdown")),
+    `opening fence survives:\n${flat.join("\n")}`,
+  );
+  assert.ok(
+    flat.some((line) => line.includes("| a | b |")),
+    "table source stays verbatim inside the fence",
+  );
+  assert.ok(
+    !flat.some((line) => line.includes("─")),
+    "no rendered table rule (the table is a code block here)",
+  );
+  const closing = flat.findIndex((line) => line.trim() === "```");
+  const sentence = flat.findIndex((line) => line.includes("That is how you write one."));
+  assert.ok(closing >= 0, "closing fence survives");
+  assert.ok(sentence > closing, "prose after the fence is not swallowed into it");
+});
+
+test("a fence after a table does not hide the table", () => {
+  const segments = splitMarkdownSegments("| a |\n|---|\n| 1 |\n\n```\n| x | y |\n|---|---|\n```");
+  assert.deepEqual(
+    segments.map((segment) => segment.kind),
+    ["table", "markdown"],
+  );
+});
+
+test("an unclosed fence (mid-stream) keeps the rest as prose", () => {
+  const segments = splitMarkdownSegments("```\n| a | b |\n|---|---|\n| 1 | 2 |");
+  assert.deepEqual(
+    segments.map((segment) => segment.kind),
+    ["markdown"],
+  );
+});
+
 /* ---------- column widths ---------- */
 
 test("compact tables keep natural widths without stretching", () => {
@@ -165,14 +229,27 @@ test("wrapped rows separate with a blank line; single-line rows stay tight", () 
 });
 
 test("cell inline markdown renders (bold, code) and links stop at width", () => {
-  const lines = renderMarkdown(
-    "| name | note |\n|---|---|\n| **bold** | `code` |\n| [link](https://example.com/very/long/url) | x |",
-    60,
-  );
+  const source =
+    "| name | note |\n|---|---|\n| **bold** | `code` |\n| [link](https://example.com/very/long/url) | x |";
+  const lines = renderMarkdown(source, 60);
   assertFits(lines, 60);
-  const flat = plain(lines).join("\n");
-  assert.ok(flat.includes("bold"));
-  assert.ok(flat.includes("code"));
+  const flat = plain(lines);
+  // 断言渲染后的文本：原文 `**bold**` / `` `code` `` 也含 bold/code 字样，
+  // 只查 includes("bold") 时标记没被消化也能过。
+  const styled = flat.find((line) => line.includes("bold"));
+  assert.ok(styled, "bold cell renders");
+  assert.match(styled.trimEnd(), /^bold +code$/u, `cell markers must be consumed: ${styled}`);
+  assert.ok(!flat.join("\n").includes("**"), "no literal emphasis markers");
+  assert.ok(!flat.join("\n").includes("`"), "no literal code-span markers");
+  assert.ok(!flat.join("\n").includes("]("), "no literal link syntax");
+});
+
+test("repeated renders reuse measured cell widths without changing output", () => {
+  const source = "| a | b |\n|---|---|\n| one two | x |\n| three | y |";
+  const markdown = new TranscriptMarkdown(source, 0, mdTheme);
+  const first = markdown.render(24);
+  markdown.invalidate();
+  assert.deepEqual(markdown.render(24), first);
 });
 
 test("prose around a table keeps its spacing", () => {
@@ -211,6 +288,26 @@ test("partial json during streaming keeps content with slashes unescaped", () =>
 
 test("non-json fences are untouched", () => {
   const source = "```ts\nconst a = 1 \\/ 2;\n```";
+  assert.equal(prettifyJsonFences(source), source);
+});
+
+// JSON.stringify(JSON.parse(x)) 会通过 double 重写数字：9007199254740993 → …992、
+// 1.10 → 1.1、1e400（溢出）→ null。转写必须显示模型实际发出的字面值。
+test("json pretty-print preserves number literals instead of re-serializing", () => {
+  const out = prettifyJsonFences('```json\n{"id":9007199254740993,"amount":1.10,"tiny":1e400}\n```');
+  assert.ok(out.includes('"id": 9007199254740993'), out);
+  assert.ok(out.includes('"amount": 1.10'), out);
+  assert.ok(out.includes('"tiny": 1e400'), out);
+});
+
+test("only slash escapes are unescaped; escaped backslashes survive", () => {
+  const out = prettifyJsonFences('```json\n{"raw":"a\\\\/b","url":"https:\\/\\/example.test"}\n```');
+  assert.ok(out.includes('"raw": "a\\\\/b"'), out);
+  assert.ok(out.includes('"url": "https://example.test"'), out);
+});
+
+test("a fence nested in a non-json fence is not pretty-printed", () => {
+  const source = '```\n```json\n{"a":1}\n```\n```';
   assert.equal(prettifyJsonFences(source), source);
 });
 

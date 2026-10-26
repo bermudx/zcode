@@ -129,10 +129,14 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   gutter，无竖线无行间框线；列宽按列内单元格文本总量配比（每列保底最长
   词、封顶 24 格，整体装得下用自然宽度不拉伸），出现换行单元格时行间补
   空行、单行表格保持紧凑；对齐标记（`:-:`/`--:`）生效。表格只在列 0 起
-  始识别，缩进表格（blockquote/列表内）沿用 pi-tui 原渲染；扫描失败永远
-  退化为 prose 段，不丢内容。`json` 围栏代码块渲染前做 `\/` 反转义 +
-  ≤32KB 时 2 空格 pretty-print，流式半截 JSON 解析失败则只反转义原样
-  保留——修复 provider 侧 Z.ai built-in tool 叙事块单行转义 JSON 的可读性。
+  始识别，缩进表格（blockquote/列表内）沿用 pi-tui 原渲染；扫描器同时跟踪
+  fence 状态（与 json 美化同一套开/闭判定），围栏代码块内的 `|---|` 属于
+  代码内容、整块交给 pi-tui 渲染，扫描失败永远退化为 prose 段，不丢内容。
+  `json` 围栏代码块渲染前做 `\/` 反转义 + ≤32KB 时 2 空格重新缩进（只重排
+  空白、字符串与数字保留源文本，`JSON.stringify(JSON.parse(x))` 会把
+  9007199254740993 打印成 …992、把 1.10 打印成 1.1、把 1e400 打印成 null），
+  流式半截 JSON 解析失败则只反转义原样保留——修复 provider 侧 Z.ai
+  built-in tool 叙事块单行转义 JSON 的可读性。
 - thought 行：`{+|-} thought · {formatTokens(n)} chars` 标签（`+`/`-` 即
   Ctrl+T 折叠/展开状态）；收起时至多两行预览带 `▎` 引导列并剥离
   `**`/`` ` ``/标题记号，展开时按原始行折行保全文（不剥记号）；thinking
@@ -205,8 +209,12 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   compact-timeline row 且不回显 response。`TurnSteerDrained` 除清队列区外，
   按 `drainedInputs`（自带文本与持久 messageId，resume 侧 product projection
   同一依据）把每条被消费的输入落成 transcript user 行——live 投影此前只清
-  队列，排队消息从转写中凭空消失；messageId 作行 id 天然幂等，`/compact`
-  输入不回显（共享 reducer `app-events.ts`，两个 TUI 前端同享）。
+  队列，排队消息从转写中凭空消失；messageId 作行 id 天然幂等。只有 typed
+  intent（`intent.kind === "compact"`）跳过、不落 user 行；不按 `/compact`
+  文本二次猜可见性：drain 事实出现即表示该输入已持久成可显示 user message，
+  可见与否是 CLI 权威（与 `transcript-hydration`「UI 不得再靠文本覆盖 CLI
+  visibility authority」一致），按文本跳过会让 live 不显示而 resume 显示
+  （共享 reducer `app-events.ts`，两个 TUI 前端同享）。
 - `requestPermission`：CreateWorkflow/AmendWorkflow 沿用 CLI 自动放行例外；
   AskUserQuestion 经 `AskUserQuestionInputSchema` 校验 → 问题向导内联面板
   （选项、Other 输入、multiSelect、review 页，`decision:"modify"` 回传
@@ -285,7 +293,8 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - `node:test` 用例：投影（事件→Message[]）、提交分支、审批结果合成、
   选择/问题状态机、草稿命令解析、键位守卫；`VirtualTerminal` 冒烟渲染；
   转写渲染（`transcript-markdown.test.ts`）：表格分段/对齐/转义竖线、
-  列宽配比与保底、无边框契约、流式半截表格、json 围栏 pretty-print、
-  thought/tool 行形态与 part 间呼吸位，所有行宽不超给定宽度。
+  列宽配比与保底、无边框契约、流式半截表格、围栏内表格不切分（含未闭合
+  fence）、json 围栏重新缩进与字面量保真、thought/tool 行形态与 part 间
+  呼吸位，所有行宽不超给定宽度。
 - 已知裁剪（后续按需）：子代理转写下钻浏览、workflow 卡与工具卡详情页联动、
   i18n copy 全量接线；先以英文 status 文案起步，结构预留。

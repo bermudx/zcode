@@ -30,7 +30,6 @@ import { removeQueuedInputs, upsertQueuedInput } from "./app-queued-inputs.js";
 import {
   applyCompactTimelineEvent,
   applyCompactTurnErrorEvent,
-  compactCommandFromText,
 } from "./app-compact-timeline.js";
 import { redactSensitivePromptForTranscript } from "./app-submit.js";
 import { applyWorkflowProgressEvent, type WorkflowMirrorSetter } from "./app-workflow-events.js";
@@ -261,7 +260,12 @@ let drainedUserMessageSequence = 0;
  * 每条输入要落成 transcript user 行。此前 live 投影只清队列区——用户消息
  * 从 queue 消失后又不在 transcript 里，转写中凭空消失，只在上游思考文本中
  * 可见。messageId 作行 id：事件去重窗之外的重复投递按 id 幂等。
- * `/compact` 输入按 compact-timeline 契约渲染为 timeline 行，不回显 user 行。
+ *
+ * 可见性只认 typed intent（`intent.kind === "compact"` 是维护命令，不落 user 行），
+ * 不再按 `/compact` 文本再猜一次：drain 事实出现即表示这条输入已被持久成可显示的
+ * user message，可见与否是 CLI 的权威（见 transcript-hydration「UI 不得再靠文本
+ * 覆盖 CLI visibility authority」）。按文本跳过会让同类输入 live 不显示、重开会话
+ * 后 resume 又显示——两边依据不同，转写前后不一致。
  */
 function applyTurnSteerDrainedEvent(
   payload: Record<string, unknown>,
@@ -279,7 +283,7 @@ function applyTurnSteerDrainedEvent(
     const text = stringField(record, "text");
     if (!text) continue;
     const intent = asRecord(record.intent);
-    if (stringField(intent, "kind") === "compact" || compactCommandFromText(text)) continue;
+    if (stringField(intent, "kind") === "compact") continue;
     const id =
       stringField(record, "messageId") ??
       (() => {

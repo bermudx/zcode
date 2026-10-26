@@ -351,6 +351,29 @@ test("drained compact inputs do not render a user row", () => {
   );
 });
 
+// 可见性只看 typed intent，不按 `/compact` 文本重抽：drain 事实里带 messageId 的
+// 输入就是持久 user message，resume 侧（product projection 的 onTurnSteerDrained）
+// 对同一条输入一律落 realUser 行。按文本跳过会让 live 与 resume 不一致。
+test("a drained input whose text merely looks like /compact still renders", () => {
+  const state = createSessionEventState();
+
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerDrained, {
+      drainedInputs: [
+        { messageId: "message-3", pendingInputId: "pending-3", text: "/compact please keep the plan section" },
+      ],
+      injectedMessageIds: ["message-3"],
+      pendingInputIds: ["pending-3"],
+      targetTurnId: "turn-1",
+    }),
+  );
+
+  assert.deepEqual(
+    state.messages.map((message) => ({ content: message.content, role: message.role })),
+    [{ content: "/compact please keep the plan section", role: "user" }],
+  );
+});
+
 test("renders compact lifecycle events as a single timeline row", () => {
   const state = createSessionEventState();
 
