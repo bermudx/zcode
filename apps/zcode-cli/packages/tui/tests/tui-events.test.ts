@@ -247,8 +247,40 @@ test("keeps queued busy input out of the transcript projection", async () => {
   });
 
   assert.deepEqual(state.messages, []);
-  assert.deepEqual(state.queuedInputs, [{ id: "pending-1", text: "queued follow-up" }]);
-  assert.equal(state.status, "Input queued.");
+  assert.deepEqual(state.queuedInputs, [
+    { id: "pending-1", lane: "steer", text: "queued follow-up" },
+  ]);
+  assert.equal(state.status, "Steering active turn.");
+});
+
+test("labels queue-lane pending inputs from the event delivery", () => {
+  const state = createSessionEventState();
+
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerQueued, {
+      delivery: "queue",
+      input: "replay after settle",
+      inputPreview: "replay after settle",
+      pendingInputId: "pending-q",
+      queueLength: 1,
+      targetTurnId: "turn-1",
+    }),
+  );
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerQueued, {
+      delivery: "guide",
+      input: "inject into this turn",
+      inputPreview: "inject into this turn",
+      pendingInputId: "pending-g",
+      queueLength: 2,
+      targetTurnId: "turn-1",
+    }),
+  );
+
+  assert.deepEqual(state.queuedInputs, [
+    { id: "pending-q", lane: "queue", text: "replay after settle" },
+    { id: "pending-g", lane: "steer", text: "inject into this turn" },
+  ]);
 });
 
 test("tracks queued turn steering events outside transcript messages", () => {
@@ -266,7 +298,9 @@ test("tracks queued turn steering events outside transcript messages", () => {
   );
 
   assert.deepEqual(state.messages, []);
-  assert.deepEqual(state.queuedInputs, [{ id: "pending-1", text: "full queued input" }]);
+  assert.deepEqual(state.queuedInputs, [
+    { id: "pending-1", lane: "steer", text: "full queued input" },
+  ]);
 
   state.apply(
     sessionEvent(SessionEventType.TurnSteerDrained, {
@@ -276,6 +310,64 @@ test("tracks queued turn steering events outside transcript messages", () => {
     }),
   );
 
+  assert.deepEqual(state.queuedInputs, []);
+});
+
+test("renders drained steer inputs as transcript user rows in payload order", () => {
+  // 2026-10-25 live 复现的缺口：drained 只清队列区、不补 user 行，模型在回答
+  // 屏幕上不存在的消息。user 行必须由 drainedInputs（自带原文）补出。
+  const state = createSessionEventState();
+
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerQueued, {
+      input: "now to my actual point",
+      inputPreview: "now to my actual point",
+      pendingInputId: "pending-1",
+      queueLength: 1,
+      targetTurnId: "turn-1",
+    }),
+  );
+
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerDrained, {
+      drainedInputs: [
+        { messageId: "message-1", pendingInputId: "pending-1", text: "now to my actual point" },
+        { messageId: "message-2", pendingInputId: "pending-2", text: "second steer" },
+      ],
+      injectedMessageIds: ["message-1", "message-2"],
+      pendingInputIds: ["pending-1", "pending-2"],
+      targetTurnId: "turn-1",
+    }),
+  );
+
+  assert.deepEqual(state.messages, [
+    { content: "now to my actual point", role: "user" },
+    { content: "second steer", role: "user" },
+  ]);
+  assert.deepEqual(state.queuedInputs, []);
+});
+
+test("discarded steer inputs leave the queue area without transcript rows", () => {
+  const state = createSessionEventState();
+
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerQueued, {
+      input: "changed my mind",
+      inputPreview: "changed my mind",
+      pendingInputId: "pending-1",
+      queueLength: 1,
+      targetTurnId: "turn-1",
+    }),
+  );
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerDiscarded, {
+      pendingInputIds: ["pending-1"],
+      reason: "user_removed",
+      targetTurnId: "turn-1",
+    }),
+  );
+
+  assert.deepEqual(state.messages, []);
   assert.deepEqual(state.queuedInputs, []);
 });
 

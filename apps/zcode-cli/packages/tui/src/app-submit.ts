@@ -183,20 +183,27 @@ export async function submitDuringActiveTurn(input: {
     } else {
       // 排队输入还没有被 runtime 注入模型上下文，直接追加到 transcript
       // 会和正在流式输出的回复混在一起；先放到输入框上方的队列区。
+      // user transcript 行由 turn_steer_drained 事件的 drainedInputs 补出。
+      const lane = input.submitOptions?.delivery === "queue" ? "queue" : "steer";
       input.setQueuedInputs((current) =>
         upsertQueuedInput(current, {
           id: result.pendingInputId,
+          lane,
           text: localUserMessage.content,
         }),
       );
+      input.setStatus(
+        lane === "steer"
+          ? result.queueLength > 1
+            ? `Steering active turn (${result.queueLength} pending).`
+            : "Steering active turn."
+          : result.queueLength > 1
+            ? `Input queued (${result.queueLength} pending).`
+            : "Input queued.",
+      );
+      return undefined;
     }
-    input.setStatus(
-      result.kind === "queued"
-        ? result.queueLength > 1
-          ? `Input queued (${result.queueLength} pending).`
-          : "Input queued."
-        : `Input not queued: ${result.reason}.`,
-    );
+    input.setStatus(`Input not queued: ${result.reason}.`);
     return undefined;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

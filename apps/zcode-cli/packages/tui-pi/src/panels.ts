@@ -302,9 +302,11 @@ export class QueuedInputsRow implements Component {
   render(width: number): string[] {
     const visible = this.inputs.slice(0, 3);
     const hidden = this.inputs.length - visible.length;
-    const lines = visible.map(
-      (input) => `  ${this.theme.muted("⧉")} ${this.theme.dim(truncate(input.text, width - 6))}`,
-    );
+    // pi-mono 对齐：Steering=注入当前 turn，Follow-up=settle 后重放新回合。
+    const lines = visible.map((input) => {
+      const label = input.lane === "queue" ? "Follow-up:" : "Steering:";
+      return `  ${this.theme.muted("⧉")} ${this.theme.dim(truncate(`${label} ${input.text}`, width - 6))}`;
+    });
     if (hidden > 0) lines.push(`  ${this.theme.muted(`… ${hidden} more queued`)}`);
     // pi-mono 对齐：队列区提示 Alt+Up 可把全部排队输入拼回输入框编辑。
     lines.push(`  ${this.theme.muted("↳ Alt+Up restores queued inputs to the editor")}`);

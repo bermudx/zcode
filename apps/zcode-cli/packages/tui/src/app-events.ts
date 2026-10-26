@@ -93,6 +93,8 @@ export function applySessionEventToState(
       applyTurnSteerQueuedEvent(payload, handlers.setQueuedInputs);
       break;
     case SessionEventType.TurnSteerDrained:
+      applyTurnSteerDrainedEvent(payload, handlers.setMessages, handlers.setQueuedInputs);
+      break;
     case SessionEventType.TurnSteerDiscarded:
       applyTurnSteerFinishedEvent(payload, handlers.setQueuedInputs);
       break;
@@ -228,7 +230,43 @@ function applyTurnSteerQueuedEvent(
   if (!id || !text) return;
 
   setQueuedInputs((current) =>
-    upsertQueuedInput(current, { id, text }, { preserveExistingText: true }),
+    upsertQueuedInput(
+      current,
+      {
+        id,
+        // delivery:"queue"=settle 后重放新回合；guide/缺省=注入当前 turn。
+        lane: stringField(payload, "delivery") === "queue" ? "queue" : "steer",
+        text,
+      },
+      { preserveExistingText: true },
+    ),
+  );
+}
+
+/**
+ * drained 输入在 core 侧已成为持久 user message，但 TUI transcript 的 user 行
+ * 只由本地乐观追加产生——不在此补行，steer/重放的输入就整场不可见，模型在
+ * 回答屏幕上不存在的消息（2026-10-25 live 复现）。文本取自 payload
+ * drainedInputs（自带原文，不依赖内存 queue 状态），按事件顺序追加在流尾，
+ * 先于下一次 model request 的流式内容。
+ */
+function applyTurnSteerDrainedEvent(
+  payload: Record<string, unknown>,
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+  setQueuedInputs?: React.Dispatch<React.SetStateAction<QueuedInput[]>>,
+): void {
+  const drained = payload.drainedInputs;
+  const rows = Array.isArray(drained)
+    ? drained
+        .map((item) => stringField(asRecord(item), "text"))
+        .filter((text): text is string => Boolean(text))
+        .map((text) => ({ content: text, role: "user" as const }))
+    : [];
+  if (rows.length > 0) {
+    setMessages((current) => [...current, ...rows]);
+  }
+  setQueuedInputs?.((current) =>
+    removeQueuedInputs(current, stringArrayField(payload, "pendingInputIds")),
   );
 }
 

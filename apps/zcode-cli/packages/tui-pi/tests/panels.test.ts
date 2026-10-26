@@ -260,14 +260,20 @@ test("question wizard Esc denies", () => {
   assert.equal(resolved[0]!.decision, "deny");
 });
 
-test("QueuedInputsRow renders queued texts plus the Alt+Up restore hint", () => {
-  // pi-mono 对齐：队列区必须提示 dequeue 键——否则恢复入口不可发现。
+test("QueuedInputsRow labels steer/follow-up lanes plus the Alt+Up restore hint", () => {
+  // pi-mono 对齐：队列区必须提示 dequeue 键——否则恢复入口不可发现；
+  // 行首 lane 标注区分 Steering（注入当前 turn）与 Follow-up（settle 后重放）。
   const row = new QueuedInputsRow(
-    [{ id: "p1", text: "first" }, { id: "p2", text: "second" }],
+    [
+      { id: "p1", lane: "steer", text: "first" },
+      { id: "p2", lane: "queue", text: "second" },
+      { id: "p3", text: "unlabeled defaults to steering" },
+    ],
     theme(),
   );
   const lines = row.render(80).join("\n");
-  assert.ok(lines.includes("first"));
-  assert.ok(lines.includes("second"));
+  assert.ok(lines.includes("Steering: first"));
+  assert.ok(lines.includes("Follow-up: second"));
+  assert.ok(lines.includes("Steering: unlabeled defaults to steering"));
   assert.match(lines, /Alt\+Up restores queued inputs/);
 });

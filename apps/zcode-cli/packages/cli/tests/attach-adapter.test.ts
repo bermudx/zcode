@@ -482,7 +482,12 @@ test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 session/
     const sends = core.requests.filter((r) => r.method === "session/send");
     assert.equal(sends.length, 2);
     assert.equal(sends[1]?.params.content, "second");
-    assert.ok(received.some((event) => event.type === "turn_steer_drained"));
+    // 合成 drained 事件携带 drainedInputs（含原文）：重放的新回合没有本地乐观
+    // user row，TUI transcript 行由 drained payload 补出（2026-10-25 live 修复）。
+    const drained = received.find(
+      (event) => (event as { type: string }).type === "turn_steer_drained",
+    ) as { payload?: { drainedInputs?: Array<{ text?: string }> } } | undefined;
+    assert.ok(drained?.payload?.drainedInputs?.some((item) => item.text === "second"));
   } finally {
     client.close();
     await core.close();
