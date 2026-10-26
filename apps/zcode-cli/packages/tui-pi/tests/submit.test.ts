@@ -83,7 +83,45 @@ test("busy submit steers through sendInput and shows the queue row", async () =>
   assert.equal(steered[0]!.text, "queued question");
   assert.equal(h.store.state.queuedInputs.length, 1);
   assert.equal(h.store.state.queuedInputs[0]!.text, "queued question");
-  assert.equal(h.store.state.status, "Input queued.");
+  assert.equal(h.store.state.status, "Steering active turn.");
+  await h.stop();
+});
+
+test("steered input becomes a transcript user row when drained", async () => {
+  // 2026-10-25 live 复现：steer 注入成功后 UI 整场不显示该输入。pending 只进
+  // 队列区；turn_steer_drained 的 drainedInputs 必须把它补成 transcript user 行。
+  const h = createHarness({
+    sendInput: async () =>
+      ({ kind: "queued", pendingInputId: "p1", queueLength: 1, turnId: "turn-1" as never }) as TuiSendInputResult,
+    submitPrompt: async () => ({ response: "unused" }),
+  });
+  h.store.set("busy", true);
+  h.store.set("activeTurnId", "turn-1" as never);
+  await h.app.submitValue("now to my actual point");
+  assert.deepEqual(h.store.state.messages, []);
+  assert.equal(h.store.state.queuedInputs.length, 1);
+
+  h.app.applyEvent({
+    id: "drain-1",
+    payload: {
+      drainedInputs: [
+        { messageId: "m1", pendingInputId: "p1", text: "now to my actual point" },
+      ],
+      injectedMessageIds: ["m1"],
+      pendingInputIds: ["p1"],
+      targetTurnId: "turn-1",
+    },
+    sequenceNumber: 2,
+    sessionId: "session-1",
+    timestamp: new Date(0),
+    traceId: "trace-1",
+    type: "turn_steer_drained",
+  } as Parameters<typeof h.app.applyEvent>[0]);
+
+  assert.deepEqual(h.store.state.messages, [
+    { content: "now to my actual point", role: "user" },
+  ]);
+  assert.deepEqual(h.store.state.queuedInputs, []);
   await h.stop();
 });
 

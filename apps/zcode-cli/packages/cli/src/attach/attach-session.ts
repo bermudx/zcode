@@ -24,6 +24,7 @@ import type { CollaborationMode, TurnId } from "@zcode/contracts";
 import type { AttachClient } from "./attach-client.js";
 import {
   discardPendingInputs as discardPendingInputsLane,
+  localFollowUpDrainedPayload,
   queueFollowUpInput,
   steerActiveTurn,
   type QueuedLocalInput,
@@ -434,12 +435,9 @@ export class AttachSessionHandle {
     if (!item) return;
     this.flushingQueue = true;
     try {
-      // drained 事件把该条从 UI 队列区摘除；user 行由新回合的
-      // user_message/turn_started 正常下发，不在这里伪造 transcript。
-      this.emitSinkEvent("turn_steer_drained", {
-        pendingInputIds: [item.pendingInputId],
-        targetTurnId: item.targetTurnId,
-      });
+      // drained 事件把该条从 UI 队列区摘除，并按 drainedInputs 给 transcript
+      // 补 user 行（重放的新回合没有本地乐观 user row）。
+      this.emitSinkEvent("turn_steer_drained", localFollowUpDrainedPayload(item));
       await this.submitPrompt(item.input, item.options);
       // 该条结束后 routeTurnEvent 会再次 scheduleQueuedFlush 接力下一条。
     } catch (error) {

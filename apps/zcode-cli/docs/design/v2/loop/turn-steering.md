@@ -91,7 +91,7 @@ Core 必须发出以下事件：
 | event | 时机 | UI 语义 |
 | --- | --- | --- |
 | `turn_steer_queued` | 输入被接受并进入 active turn pending queue | 把用户消息标记为 queued |
-| `turn_steer_drained` | pending input 已注入 `MessageHistory`，下一次 model request 会看到 | 把 queued 标记移除或改为 sent |
+| `turn_steer_drained` | pending input 已注入 `MessageHistory`，下一次 model request 会看到 | 移除队列区行，并按 payload `drainedInputs`（含原文）把每条已注入输入补成 transcript user row |
 | `turn_steer_rejected` | 输入未被接受 | 恢复输入或显示拒绝原因 |
 | `turn_steer_discarded` | pending input 因 turn 失败、取消或恢复策略被丢弃 | 从队列投影移除并显示丢弃原因 |
 
@@ -200,15 +200,21 @@ attach 客户端没有进程内 runtime，steer 经 `session/send` 的可选
   本地 follow-up 队列（flush 时序在客户端，保序），输入不丢；
 - Alt+Up 撤回：core pendingInputs 项经 `session/discardPendingInputs`
   逐项 `removeQueueItem`（真实 `turn_steer_discarded` 事件），本地
-  队列项客户端摘除（合成同形事件）。
+  队列项客户端摘除（合成同形事件）；
+- follow-up 重放（settle 后 flush）的合成 `turn_steer_drained` 事件同样
+  携带 `drainedInputs`（`pendingInputId`+`text` 子集）：重放的新回合没有
+  本地乐观 user row，transcript 行同样由 drained payload 补出，两条 lane
+  的渲染合同一致。
 
-Busy TUI 可以在调用 `sendInput` 前先插入一个临时本地 user transcript row，
-用于保留用户输入在可见对话中的时间顺序。这个 row 在
-`turn_steer_queued` event、`sendInput` 返回 `queued`，或 `sendInput`
-返回 `started_turn` 后才成为已接受展示；如果返回 `rejected` 或调用失败，
-UI 必须移除临时 row 并恢复 draft。这样即使 `sendInput` 在 Promise resolve
-之前同步投递模型 streaming event，新 assistant 投影也只能出现在触发它的
-user row 之后。
+Busy TUI 不做乐观 transcript 行：排队事实以 `turn_steer_queued` 事件 /
+`sendInput` 回执为准，pending 输入显示在输入框上方的队列区（steer 项标
+`Steering:`、follow-up 项标 `Follow-up:`，pi-mono 对齐）。`turn_steer_drained`
+的 payload 自带 `drainedInputs`（`pendingInputId`+`text`，见 Session Events），
+UI 据此把每条已注入输入追加为 transcript user row——事件顺序保证该 row 先于
+下一次 model request 的流式内容；同时移除对应队列区行。`turn_steer_discarded`
+与拒绝路径只移除队列区行并恢复 draft。约束：输入要么可见地进入对话，要么可见
+地回到编辑器；不允许"模型在回答屏幕上不存在的消息"（2026-10-25 live 复现：
+steer 成功注入且落库，TUI 却整场不渲染该 user 行）。
 
 ## 测试要求
 

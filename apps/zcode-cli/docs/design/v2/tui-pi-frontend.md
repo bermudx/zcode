@@ -193,7 +193,13 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   `submitPrompt`；`busy`→`sendInput`（Enter 缺省 `delivery:"steer"`，
   Ctrl+Q 显式 `delivery:"queue"`），queued → 队列区（`TurnSteerQueued`/
   `Drained`/`Discarded` 同步；steer 项来自 core 真实事件、follow-up 项
-  来自 attach 本地合成事件，按 `pendingInputId` 幂等），rejected →
+  来自 attach 本地合成事件，按 `pendingInputId` 幂等；行首按 lane 标注
+  `Steering:`/`Follow-up:`，pi-mono 对齐；busy Enter 的 status 报
+  "Steering active turn."、Ctrl+Q 报 "Input queued."，两条 lane 的
+  反馈不混同），`Drained` 按 payload `drainedInputs`（含原文）把已注入
+  输入补成 transcript user row（队列区行同步移除——user 行只由本地乐观
+  追加与 drained 事件产生，steer/重放输入在屏幕上永远可见，见
+  turn-steering.md TUI/GUI 行为节），rejected →
   status 提示。本地 user row 乐观追加，
   `/login *-api-key` 文本在 transcript 中脱敏；`/compact` 渲染为
   compact-timeline row 且不回显 response。

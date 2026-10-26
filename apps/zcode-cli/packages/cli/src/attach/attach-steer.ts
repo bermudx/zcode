@@ -125,6 +125,25 @@ export function queueFollowUpInput(
 }
 
 /**
+ * follow-up 重放（settle 后 flush）的合成 turn_steer_drained payload：携带
+ * drainedInputs 的 pendingInputId+text 子集——重放的新回合没有本地乐观 user
+ * row，transcript 行与 steer lane 一样由 drained payload 补出（渲染合同见
+ * turn-steering.md attach lane 节）。
+ */
+export function localFollowUpDrainedPayload(item: QueuedLocalInput): Record<string, unknown> {
+  return {
+    drainedInputs: [
+      {
+        pendingInputId: item.pendingInputId,
+        text: typeof item.input === "string" ? item.input : item.input.text,
+      },
+    ],
+    pendingInputIds: [item.pendingInputId],
+    ...(item.targetTurnId ? { targetTurnId: item.targetTurnId } : {}),
+  };
+}
+
+/**
  * Alt+Up 撤回（TuiRemoveQueuedInputs 端口）：本地队列项就地摘除并合成
  * turn_steer_discarded；其余 id（core pendingInputs 里的 steer 项）经
  * session/discardPendingInputs，由 core 发真实 discarded 事件。返回实际

@@ -115,6 +115,8 @@ export type DraftAttachment = DraftFileAttachment | DraftImageAttachment;
 
 export type QueuedInput = {
   id: string;
+  /** 排队 lane：steer=注入当前 turn（"Steering:"），queue=settle 后重放新回合（"Follow-up:"）。 */
+  lane?: "steer" | "queue";
   text: string;
 };
 
