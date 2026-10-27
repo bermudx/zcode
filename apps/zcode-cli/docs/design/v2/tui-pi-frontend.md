@@ -200,7 +200,12 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   输入补成 transcript user row（队列区行同步移除——user 行只由本地乐观
   追加与 drained 事件产生，steer/重放输入在屏幕上永远可见，见
   turn-steering.md TUI/GUI 行为节），rejected →
-  status 提示。本地 user row 乐观追加，
+  status 提示。`queue` lane 只在 attach（v4 bridge 的 auto-drain 提升
+  器）真实存在；进程内宿主对 `delivery:"queue"` 显式回
+  `queue_unavailable`（TuiSendInputResult 变体），UI 提示
+  "Follow-up queuing is unavailable in this mode; input restored to the
+  composer." 并恢复草稿——不显示"已排队"（core 队列 lane 进程内无人
+  消费，会随回合收尾静默丢失，2026-10-26 追踪）。本地 user row 乐观追加，
   `/login *-api-key` 文本在 transcript 中脱敏；`/compact` 渲染为
   compact-timeline row 且不回显 response。
 - `requestPermission`：CreateWorkflow/AmendWorkflow 沿用 CLI 自动放行例外；
@@ -218,9 +223,12 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - workflow：镜像 setter 走共享 `applyWorkflowProgressToMirror`；挂载后先
   `replayWorkflowRuns` 冷回放再 `listWorkflowRuns` 补 label 与 interrupted
   notice（`workflowRunSeedFromSummary` / `interruptedWorkflowNotices` /
-  `appendWorkflowInterruptedNotices`）。`WorkflowCard` 内联渲染在转写与交互区
-  之间：每 run 一行（状态 | label | settled/used | actors），空草稿 `+`/`-`
-  切换展开 actors、reports 预览与 log tail。
+  `appendWorkflowInterruptedNotices`）。回放/列举失败不阻断启动，但每次
+  失败写单行 `options.stderr` 诊断（不污染协议 stdout）。`WorkflowCard`
+  内联渲染在转写与交互区之间：每 run 一行（状态 | label | settled/used |
+  actors），空草稿 `+`/`-` 切换展开 actors、reports 预览与 log tail；
+  全部行经宽度感知截断（`truncateToWidth`，CJK/ANSI 安全）并按面板宽度
+  硬截——超宽行会让 pi-tui doRender 抛错崩客户端。
 - 信息面板：`Ctrl+O` 直开/关（`Ctrl+X` leader 已退役，见上节），
   `SessionInfoPanel` 经 `tui.showOverlay` 右栏呈现：mode/model/thought、ctx、
   token 用量、最近事件、todos、修改文件、subagents（running/ended）、MCP

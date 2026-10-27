@@ -5,7 +5,7 @@
 // panel renders store.state.subagents and only triggers a refresh), and a
 // one-shot listMcpServers port read (MCP has no event source).
 
-import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { TuiOptions } from "@zcode/tui/internals";
 import type { McpServerStatus } from "@zcode/contracts";
 import type { AppStore } from "./store.js";
@@ -14,8 +14,11 @@ import type { PiTheme } from "./theme.js";
 const MAX_SECTION_ITEMS = 8;
 const MAX_STATUS_DETAILS = 2;
 
+// 旧的 `truncate` 按 UTF-16 length 切：CJK 标题/路径会超预算两倍宽度、预算
+// ≤1 时干脆不截；overlay 行同样受 doRender 超宽即抛错的约束。改用 pi-tui
+// 的宽度感知截断（grapheme + ANSI 安全）。
 const truncate = (text: string, width: number): string =>
-  text.length > width && width > 1 ? `${text.slice(0, width - 1)}…` : text;
+  truncateToWidth(text, Math.max(0, width), "…");
 
 const sectionHeader = (theme: PiTheme, title: string): string =>
   `  ${theme.accent("─")} ${theme.accent(title)}`;
@@ -141,6 +144,11 @@ export class SessionInfoPanel implements Component, Focusable {
       lines.push(`  ${theme.muted("(subagent / MCP data unavailable)")}`);
     }
     lines.push(`  ${theme.muted("Ctrl+O or Esc to close")}`);
-    return lines;
+    // 兜底（同 rows.ts clampLines）：overlay 行不受 MessageRow 的截断保护，
+    // 任何一行超过面板宽度都会让 doRender 抛错崩掉客户端。
+    const lineWidth = Math.max(1, width);
+    return lines.map((line) =>
+      visibleWidth(line) <= lineWidth ? line : truncateToWidth(line, lineWidth, "…"),
+    );
   }
 }

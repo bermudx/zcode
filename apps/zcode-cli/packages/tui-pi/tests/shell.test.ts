@@ -222,7 +222,13 @@ test("`!cmd` runs locally, prints a row, and feeds the next prompt", async () =>
   try {
     h.feed("!echo hello-from-shell");
     h.feed(ENTER);
-    await h.flush();
+    // `!cmd` 跨进程边界（spawn bash 子进程）：固定预算必然偶发不足，
+    // 按「转写行出现」这一终态条件等待（P003-F1）。
+    await h.flush(() =>
+      h.store.state.messages.some(
+        (message) => message.role === "system" && message.content.startsWith("!echo"),
+      ),
+    );
     // A shell escape is not a model turn.
     assert.equal(prompts.length, 0);
     assert.equal(h.draftText(), "");
@@ -261,7 +267,11 @@ test("`!!cmd` prints a row but keeps output out of the next prompt", async () =>
   try {
     h.feed("!!echo local-only");
     h.feed(ENTER);
-    await h.flush();
+    await h.flush(() =>
+      h.store.state.messages.some(
+        (message) => message.role === "system" && message.content.startsWith("!!echo"),
+      ),
+    );
     const shellRow = h.store.state.messages.find(
       (message) => message.role === "system" && message.content.startsWith("!!echo"),
     );
@@ -292,7 +302,11 @@ test("slash commands do not swallow buffered shell output", async () => {
   try {
     h.feed("!printf buffered");
     h.feed(ENTER);
-    await h.flush();
+    await h.flush(() =>
+      h.store.state.messages.some(
+        (message) => message.role === "system" && message.content.startsWith("!printf"),
+      ),
+    );
     await h.app.submitValue("/model provider/model");
     assert.equal(promptText(prompts[0]!), "/model provider/model");
     await h.app.submitValue("real prompt");

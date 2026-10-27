@@ -277,3 +277,36 @@ test("QueuedInputsRow labels steer/follow-up lanes plus the Alt+Up restore hint"
   assert.ok(lines.includes("Steering: unlabeled defaults to steering"));
   assert.match(lines, /Alt\+Up restores queued inputs/);
 });
+
+test("SessionInfoPanel clamps CJK-heavy rows to the panel width", async () => {
+  // P003-F2 回归：旧 truncate 按 UTF-16 length 切，长 CJK todo/事件名在窄
+  // overlay 里超出面板宽度——overlay 行不受 MessageRow 的 clampLines 保护，
+  // doRender 对超宽行抛错会崩掉整个客户端。
+  const { SessionInfoPanel } = await import("../src/info-panel.js");
+  const { visibleWidth } = await import("@earendil-works/pi-tui");
+  const store = new AppStore();
+  store.set("todos", [
+    {
+      content: "审查工作流运行状态并汇报".repeat(4),
+      priority: "high",
+      status: "in_progress",
+    },
+  ]);
+  store.set("lastEvent", "事件构建工作流完成".repeat(6));
+  const panel = new SessionInfoPanel(
+    { requestRender: () => {} } as never,
+    store,
+    theme(),
+    {} as never,
+    () => {},
+    () => {},
+  );
+  for (const width of [24, 16]) {
+    for (const line of panel.render(width)) {
+      assert.ok(
+        visibleWidth(line) <= width,
+        `width ${width}: visible ${visibleWidth(line)} — over-width lines crash TuiMainScreen`,
+      );
+    }
+  }
+});

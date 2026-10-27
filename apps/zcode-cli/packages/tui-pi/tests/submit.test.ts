@@ -159,6 +159,28 @@ test("busy submit with delivery queue keeps the follow-up lane", async () => {
   await h.stop();
 });
 
+test("queue_unavailable surfaces a status and restores the draft, never a queue row", async () => {
+  // P003-F3 / A6：进程内宿主（zcode tui）没有 follow-up 队列消费通道，宿主
+  // 显式回 queue_unavailable；UI 必须提示不可排队并恢复草稿——不得显示
+  // "已排队"后在回合收尾静默丢失输入。try/finally 保证断言失败也停掉 busy
+  // spinner 的 interval（否则进程被定时器拖住不退出）。
+  const h = createHarness({
+    sendInput: async () => ({ kind: "queue_unavailable" }) as TuiSendInputResult,
+    submitPrompt: async () => ({ response: "unused" }),
+  });
+  try {
+    h.store.set("busy", true);
+    h.store.set("activeTurnId", "turn-1" as never);
+    const result = await h.app.submitValue("follow-up please", { delivery: "queue" });
+    assert.equal(result, undefined);
+    assert.equal(h.store.state.queuedInputs.length, 0);
+    assert.equal(h.draftText(), "follow-up please");
+    assert.match(h.store.state.status, /Follow-up queuing is unavailable/);
+  } finally {
+    await h.stop();
+  }
+});
+
 test("rejected steer restores the draft and reports the reason", async () => {
   const h = createHarness({
     sendInput: async () => ({ kind: "rejected", reason: "turn_finished" }) as TuiSendInputResult,

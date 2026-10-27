@@ -2039,6 +2039,47 @@ test("wires TUI sendInput approval requests into the runtime permission broker",
   assert.equal(approvalSeen, true);
 });
 
+test("in-process TUI sendInput rejects queue delivery without touching the runtime", async () => {
+  // P003-F3 / A6：busy Ctrl+Q 发 delivery:"queue"。进程内 runtime 会把该输入
+  // 以无 delivery 的 pendingInput 落进 core 队列 lane（行内 drain 只消费 guide
+  // lane，队列 lane 的 auto-drain 提升器只在 v4 bridge），回合收尾转 held 后
+  // 无人消费，UI 又在 applyResult 清空队列区——用户被告知"已排队"后输入
+  // 静默丢失。宿主必须显式回 queue_unavailable 且不把文本送进 runtime。
+  const ctx = createContext(["tui"]);
+  const sendInputCalls: Array<{ input: unknown; delivery: unknown }> = [];
+  const exitCode = await run(ctx, {
+    ...createPromptDeps(),
+    createZCodeApp: () =>
+      ({
+        sessionId: "session-test",
+        traceId: "trace-test",
+        runtime: {} as never,
+        sendInput: async (input: unknown, options?: { delivery?: unknown }) => {
+          sendInputCalls.push({ delivery: options?.delivery, input });
+          // 旧路径的回执形状：delivery 被剥掉后 runtime 回 queued（正是会被
+          // 静默丢失的那条 lane）。
+          return {
+            kind: "queued",
+            pendingInputId: "pending-1",
+            queueLength: 1,
+            turnId: "turn-test",
+          };
+        },
+        submitPrompt: async () => {
+          throw new Error("queue delivery must not fall through to submitPrompt");
+        },
+      }) as never,
+    runTui: async (options) => {
+      const result = await options.sendInput!("follow-up while busy", { delivery: "queue" });
+      assert.deepEqual(result, { kind: "queue_unavailable" });
+      return 0;
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(sendInputCalls.length, 0, "queue delivery must not reach the in-process runtime");
+});
+
 test("wires TUI mode display and switching into runtime config", async () => {
   const ctx = createContext(["--mode", "plan", "tui"]);
   let appMode: "plan" | "build" | "edit" | "yolo" | "auto" = "build";
