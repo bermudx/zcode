@@ -9,6 +9,7 @@ import {
   readProviderHeader,
   requiresClientRequestSigning,
 } from "./signing-policy.js";
+import { signingError } from "./signing-protocol.js";
 import type { ClientSigningObservationEvent } from "./signing-protocol.js";
 
 const APP_VERSION_HEADER = "X-ZCode-App-Version";
@@ -45,7 +46,14 @@ class OfficialRequestSecurity implements ModelRequestSecurityPort {
   ): typeof globalThis.fetch {
     const { providerId, providerConfig, transport } = input;
     if (requiresClientRequestSigning(providerConfig)) {
-      if (!providerConfig.baseURL) return transport;
+      // 需签名的 Provider 缺少 baseURL 属于配置错误：静默退回未签名会把 Coding Plan
+      // 凭据未签名、未归因地发往错误端点，必须 fail-closed（区别于下方 fail-open 降级）。
+      if (!providerConfig.baseURL) {
+        throw signingError(
+          "invalid-config",
+          "Client request signing requires a provider baseURL.",
+        );
+      }
       return this.#signing.createFetch(
         {
           apiKey: providerConfig.apiKey ?? "",

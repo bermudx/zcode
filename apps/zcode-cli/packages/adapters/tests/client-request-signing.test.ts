@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createModelRequestSecurityState } from "../src/model/request-security-edition/index.js";
+import { ClientRequestSigningError } from "../src/model/request-security-edition/signing-protocol.js";
 import type { ModelRequestSecurityPort } from "../src/model/request-security.js";
 
 const API_KEY_ID = "kid-123";
@@ -181,6 +182,28 @@ describe("client request signing: policy", () => {
     expect(execution.take("req-offpeak")).toEqual([
       { kind: "unsigned_sent", reason: "access_mode" },
     ]);
+  });
+
+  // 回归（P001-F2）：需签名的 Provider 缺少 baseURL 时不能静默退回未签名发送。
+  it("fails closed with invalid-config when a signing-required provider has no baseURL", () => {
+    const execution = createExecution();
+    const transport = vi.fn<typeof fetch>(async () => new Response("ok"));
+    for (const baseURL of [undefined, ""]) {
+      let caught: unknown;
+      try {
+        execution.protectTransport({
+          providerId: "coding-plan",
+          providerConfig: signingPolicyProvider({ baseURL }),
+          transport,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ClientRequestSigningError);
+      expect(caught).toMatchObject({ kind: "invalid-config" });
+      expect((caught as ClientRequestSigningError).message).toMatch(/baseURL/u);
+    }
+    expect(transport).not.toHaveBeenCalled();
   });
 });
 
