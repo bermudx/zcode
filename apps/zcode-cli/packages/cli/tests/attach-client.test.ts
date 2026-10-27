@@ -155,6 +155,28 @@ test("server 反向请求由 handler 应答", async () => {
   });
 });
 
+// 回归证据（P004-F6，2026-10-26 评审）：对端长时间不发换行时，入站 NDJSON
+// buffer 曾无上限增长——卡死的 core 可以把瘦客户端 RSS 撑爆。超上限必须
+// 显式失败连接（closed 带 error、pending 全拒），而不是无声挂着继续膨胀。
+test("超长无换行流触发行上限显式失败", async () => {
+  await withFakeServer(async (fake, client) => {
+    // 5MB 无换行：超过 4MB 上限；socket 保持打开，模拟卡死但不关流的 core。
+    for (const socket of fake.connections()) {
+      socket.write("x".repeat(5 * 1024 * 1024));
+    }
+    const settled = await Promise.race([
+      client.closed.then((error) => error),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
+    ]);
+    assert.ok(
+      settled instanceof Error,
+      "connection must fail with an explicit error once the line cap is exceeded",
+    );
+    assert.match(settled.message, /exceeded/);
+    await assert.rejects(client.request("session/send", {}), /closed|exceeded/i);
+  });
+});
+
 // P004-F4：注入 logger 时传输级诊断（丢畸形行等）必须产生 warn，且连接继续。
 test("malformed line 产生 logger.warn 诊断且连接继续", async () => {
   const warnings: string[] = [];
