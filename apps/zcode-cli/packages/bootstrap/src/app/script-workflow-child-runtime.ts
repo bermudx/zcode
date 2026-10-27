@@ -237,6 +237,8 @@ function createRuntimeDeps(
     executionPort:
       deps.appOptions.executionPort ??
       createNodeExecutionAdapter({
+        // exec 侧诊断（shell init snapshot 失败回退）与父 app 同一 logger。
+        logger: deps.logger,
         onToolExecResource: deps.appOptions.onToolExecResource,
         network: {
           httpProxy: deps.configResult.config.network.httpProxy,

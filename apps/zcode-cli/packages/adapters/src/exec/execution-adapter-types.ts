@@ -1,6 +1,7 @@
 import type { SpawnOptions } from "node:child_process";
 import type { BashFileOutput } from "./bash-file-output.js";
 import type { ZCodeToolExecResource } from "@zcode/shared";
+import type { Logger } from "@zcode/contracts";
 import type { NetworkEgressEnvPolicy } from "../network/subprocess-env.js";
 import type { ResolvedSpawnCommand } from "./execution-command.js";
 import type {
@@ -81,6 +82,9 @@ export interface ActiveExecutionRecord {
 }
 
 export interface NodeExecutionAdapterOptions {
+  /** exec 侧诊断出口（如 shell init snapshot 创建失败回退 login shell 的
+   *  debug 留痕）；沿用包内注入 Logger 的约定，未注入时保持安静。 */
+  logger?: Logger;
   onToolExecResource?: (sample: ZCodeToolExecResource) => void;
   outputRootDir?: string;
   /** 仅 Bash 输出优先使用的临时父目录；不可用时复用 outputRootDir。 */

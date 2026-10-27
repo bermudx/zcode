@@ -431,6 +431,9 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     const executionPort =
       options.executionPort ??
       createNodeExecutionAdapter({
+        // exec 侧诊断（如 shell init snapshot 失败回退 login shell 的 debug
+        // 留痕）走同一个 logger，与 MCP 适配器同一约定。
+        logger,
         onToolExecResource: options.onToolExecResource,
         network: {
           httpProxy: configResult.config.network.httpProxy,
