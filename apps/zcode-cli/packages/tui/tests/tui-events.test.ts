@@ -330,7 +330,50 @@ test("drained queued inputs render as transcript user rows", () => {
   assert.equal(state.messages.length, 1);
 });
 
-test("drained compact inputs do not render a user row", () => {
+// 行 id 必须跨重复投递稳定：缺 messageId 时退到必填且稳定的 pendingInputId，
+// 而不是每次投递生成新的一次性 id（那会让去重窗之外的重复投递叠出重复行）。
+// messageId/pendingInputId 两者都缺即畸形 payload，与缺 text 同样跳过。
+test("drained rows without messageId fall back to a stable pendingInputId id", () => {
+  const state = createSessionEventState();
+  const drained = {
+    drainedInputs: [{ pendingInputId: "pending-9", text: "stable id please" }],
+    injectedMessageIds: [],
+    pendingInputIds: ["pending-9"],
+    targetTurnId: "turn-1",
+  };
+
+  state.apply(sessionEvent(SessionEventType.TurnSteerDrained, drained));
+  state.apply(sessionEvent(SessionEventType.TurnSteerDrained, drained));
+
+  assert.deepEqual(
+    state.messages.map((message) => ({ content: message.content, id: message.id })),
+    [{ content: "stable id please", id: "pending-9" }],
+    "redelivery outside the dedup window must not append a duplicate row",
+  );
+
+  state.apply(
+    sessionEvent(SessionEventType.TurnSteerDrained, {
+      drainedInputs: [
+        { text: "malformed: no ids at all" },
+        { messageId: "message-11", text: "well-formed sibling still lands" },
+      ],
+      injectedMessageIds: [],
+      pendingInputIds: [],
+      targetTurnId: "turn-1",
+    }),
+  );
+  assert.deepEqual(
+    state.messages.map((message) => message.content),
+    ["stable id please", "well-formed sibling still lands"],
+  );
+});
+
+// 可见性与 resume 权威对齐：product projection 的 onTurnSteerDrained 对每条
+// drained item 无条件 row.appended（compact 只抑制 canonical-target 注册），
+// 冷 hydration 对带显式 visibility/semantics 的消息一律原样下发。live 不按
+// intent/text 猜测跳过，否则同类输入 live 不显示而 resume 显示。（当前 core
+// 的 guide drain 根本不会 drain compact，这里钉的是“如果发生”时的一致行为。）
+test("drained compact-intent inputs render like resume does", () => {
   const state = createSessionEventState();
 
   state.apply(
@@ -347,11 +390,11 @@ test("drained compact inputs do not render a user row", () => {
 
   assert.deepEqual(
     state.messages.map((message) => message.content),
-    ["real follow-up"],
+    ["/compact", "real follow-up"],
   );
 });
 
-// 可见性只看 typed intent，不按 `/compact` 文本重抽：drain 事实里带 messageId 的
+// 可见性不按 `/compact` 文本重抽：drain 事实里带 messageId 的
 // 输入就是持久 user message，resume 侧（product projection 的 onTurnSteerDrained）
 // 对同一条输入一律落 realUser 行。按文本跳过会让 live 与 resume 不一致。
 test("a drained input whose text merely looks like /compact still renders", () => {

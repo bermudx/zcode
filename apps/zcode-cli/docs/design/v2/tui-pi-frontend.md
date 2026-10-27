@@ -209,12 +209,17 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   compact-timeline row 且不回显 response。`TurnSteerDrained` 除清队列区外，
   按 `drainedInputs`（自带文本与持久 messageId，resume 侧 product projection
   同一依据）把每条被消费的输入落成 transcript user 行——live 投影此前只清
-  队列，排队消息从转写中凭空消失；messageId 作行 id 天然幂等。只有 typed
-  intent（`intent.kind === "compact"`）跳过、不落 user 行；不按 `/compact`
-  文本二次猜可见性：drain 事实出现即表示该输入已持久成可显示 user message，
-  可见与否是 CLI 权威（与 `transcript-hydration`「UI 不得再靠文本覆盖 CLI
-  visibility authority」一致），按文本跳过会让 live 不显示而 resume 显示
-  （共享 reducer `app-events.ts`，两个 TUI 前端同享）。
+  队列，排队消息从转写中凭空消失；messageId 作行 id 天然幂等（缺
+  messageId 的畸形事件退到必填且稳定的 pendingInputId，绝不生成一次性
+  id 破坏幂等）。可见性不按 intent/text 猜测：drain 事实出现即表示该输入
+  已被 persistUserPrompt 持久成 semantics.uiVisibility=visible 的 user
+  message，可见与否是 CLI 权威（与 `transcript-hydration`「UI 不得再靠
+  文本覆盖 CLI visibility authority」一致）；两个 resume 权威同样不跳过
+  （product projection 对每条 drained item 无条件 row.appended，compact
+  只抑制 canonical-target 注册；冷 hydration 对带显式
+  visibility/semantics 的消息一律原样下发），任何 live 跳过都会造成
+  live 不显示而 resume 显示的前后不一致（共享 reducer `app-events.ts`，
+  两个 TUI 前端同享）。
 - `requestPermission`：CreateWorkflow/AmendWorkflow 沿用 CLI 自动放行例外；
   AskUserQuestion 经 `AskUserQuestionInputSchema` 校验 → 问题向导内联面板
   （选项、Other 输入、multiSelect、review 页，`decision:"modify"` 回传

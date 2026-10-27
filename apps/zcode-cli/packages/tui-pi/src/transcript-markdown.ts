@@ -26,6 +26,7 @@
 import {
   Markdown,
   visibleWidth,
+  wrapTextWithAnsi,
   type Component,
   type MarkdownTheme,
 } from "@earendil-works/pi-tui";
@@ -485,7 +486,16 @@ const renderTableSegment = (input: {
   const { table, theme } = input;
   const count = table.header.length;
   if (count === 0) return [];
-  const available = Math.max(count, input.width - COLUMN_GUTTER * (count - 1));
+  // Too narrow for count columns plus gutters: a rendered row measures
+  // count + GUTTER·(count-1) cells at best, so no column balancing can keep
+  // it inside input.width — and pi-tui's screen throws on any over-wide
+  // line, killing the client. Degrade to wrapped raw text (same fallback
+  // posture as the stock renderer's availableForCells < numCols guard).
+  if (input.width < count + COLUMN_GUTTER * (count - 1)) {
+    const raw = [table.header, ...table.rows].map((cells) => cells.join(" | "));
+    return raw.flatMap((line) => wrapTextWithAnsi(line, Math.max(1, input.width)));
+  }
+  const available = input.width - COLUMN_GUTTER * (count - 1);
 
   // One child Markdown per cell (bold default style for header cells) so
   // inline emphasis, code spans and links inside cells render exactly like

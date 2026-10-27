@@ -252,20 +252,25 @@ function applyTurnSteerFinishedEvent(
   );
 }
 
-let drainedUserMessageSequence = 0;
-
 /**
  * drain 事实自带文本与持久 messageId（`TurnSteerDrainedPayload.drainedInputs`，
  * 与 resume 侧 product projection 同一依据）：排队输入被注入模型上下文时，
  * 每条输入要落成 transcript user 行。此前 live 投影只清队列区——用户消息
  * 从 queue 消失后又不在 transcript 里，转写中凭空消失，只在上游思考文本中
- * 可见。messageId 作行 id：事件去重窗之外的重复投递按 id 幂等。
+ * 可见。messageId 作行 id：事件去重窗之外的重复投递按 id 幂等。缺
+ * messageId 的旧/畸形事件退到 pendingInputId（同样必填、同样在重投间稳定）；
+ * 两者都缺即畸形 payload，与缺 text 同样跳过——绝不生成一次性 id 破坏幂等。
  *
- * 可见性只认 typed intent（`intent.kind === "compact"` 是维护命令，不落 user 行），
- * 不再按 `/compact` 文本再猜一次：drain 事实出现即表示这条输入已被持久成可显示的
- * user message，可见与否是 CLI 的权威（见 transcript-hydration「UI 不得再靠文本
- * 覆盖 CLI visibility authority」）。按文本跳过会让同类输入 live 不显示、重开会话
- * 后 resume 又显示——两边依据不同，转写前后不一致。
+ * 可见性不再按 intent 或文本猜测：drain 事实出现即表示这条输入已被
+ * persistUserPrompt 持久成 semantics.uiVisibility=visible 的 user message，
+ * 可见与否是 CLI 的权威（见 transcript-hydration「UI 不得再靠文本覆盖 CLI
+ * visibility authority」）。两个 resume 权威同样不跳过：product projection 的
+ * onTurnSteerDrained 对每条 drained item 无条件 row.appended（compact 只抑制
+ * canonical-target 注册），冷 hydration 对带显式 visibility/semantics 的消息
+ * 一律原样下发。任何按 intent.kind/text 的 live 跳过都会让同类输入 live
+ * 不显示、重开后 resume 又显示——两边依据不同，转写前后不一致。（当前
+ * core 的唯一 drain 发射方是 guide drain，compact 因 commandKind 过滤根本
+ * 不会被 drain；跳过分支只是给未来发射方预留分歧陷阱，故不设。）
  */
 function applyTurnSteerDrainedEvent(
   payload: Record<string, unknown>,
@@ -282,14 +287,8 @@ function applyTurnSteerDrainedEvent(
     const record = asRecord(item);
     const text = stringField(record, "text");
     if (!text) continue;
-    const intent = asRecord(record.intent);
-    if (stringField(intent, "kind") === "compact") continue;
-    const id =
-      stringField(record, "messageId") ??
-      (() => {
-        drainedUserMessageSequence += 1;
-        return `drained-user-${drainedUserMessageSequence}`;
-      })();
+    const id = stringField(record, "messageId") ?? stringField(record, "pendingInputId");
+    if (!id) continue;
     rows.push({ content: redactSensitivePromptForTranscript(text), id, role: "user" });
   }
   if (rows.length === 0) return;

@@ -218,6 +218,27 @@ test("the motivating wide table stays inside width and wraps cells", () => {
   assert.ok(lastColumnWidth < 48, `Action column too wide (${lastColumnWidth})`);
 });
 
+test("narrow widths degrade to wrapped raw text instead of over-wide rows", () => {
+  // pi-tui's screen throws (killing the client) on any line wider than the
+  // terminal; 5 columns + 4 gutters cannot fit below width 13.
+  const source = "| a | b | c | d | e |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |";
+  for (let width = 1; width <= 12; width += 1) {
+    const lines = renderMarkdown(source, width);
+    assertFits(lines, width);
+  }
+  // The fallback must still deliver every cell's text, not drop it.
+  const flat = plain(renderMarkdown(source, 6)).join("\n");
+  for (const cell of ["a", "e", "1", "5"]) {
+    assert.ok(flat.includes(cell), `cell ${cell} survives the narrow fallback`);
+  }
+  // At the exact fit boundary the proper table (with its header rule) still
+  // renders — the fallback must not swallow reasonably-narrow tables.
+  assert.ok(
+    plain(renderMarkdown(source, 13)).some((line) => line.includes("─")),
+    "width 13 (5 cols + 4 gutters) renders the table proper",
+  );
+});
+
 test("wrapped rows separate with a blank line; single-line rows stay tight", () => {
   const wrapped = renderMarkdown(
     "| a | b |\n|---|---|\n| one two three four | x |\n| five six seven eight | y |",
