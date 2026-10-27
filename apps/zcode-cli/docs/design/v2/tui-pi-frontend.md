@@ -127,8 +127,29 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - 终端 markdown 主题（`piMarkdownTheme` → `theme.markdown`）按 `markdown*`
   记号组装，与 React 前端 `app-markdown-theme.ts` 映射一致：终端没有字号，
   heading/strong 用 bold 属性表达层级，inline code 叠 `backgroundPanel` 底色；
-  `underline`/`strikethrough` 只叠加属性不带色——pi-tui 在 h1 与 link 内
+  `underline`/`strikethrough` 只叠加属性不带色——pi-tui 在 h1 和 link 内
   嵌套调用 `underline()`，带 fg 会顶掉 heading/link 颜色。
+- 转写正文经 `TranscriptMarkdown`（`tui-pi/src/transcript-markdown.ts`）：
+  无表格消息走 pi-tui `Markdown` 原路径（快路径，仅多一次行扫描）；顶层
+  pipe 表格改无边框渲染——粗体表头 + 表头下每列 `─` 规线 + 列间 2 空格
+  gutter，无竖线无行间框线；列宽按列内单元格文本总量配比（每列保底最长
+  词、封顶 24 格，整体装得下用自然宽度不拉伸），出现换行单元格时行间补
+  空行、单行表格保持紧凑；对齐标记（`:-:`/`--:`）生效。表格只在列 0 起
+  始识别，缩进表格（blockquote/列表内）沿用 pi-tui 原渲染；扫描器同时跟踪
+  fence 状态（与 json 美化同一套开/闭判定），围栏代码块内的 `|---|` 属于
+  代码内容、整块交给 pi-tui 渲染，扫描失败永远退化为 prose 段，不丢内容。
+  `json` 围栏代码块渲染前做 `\/` 反转义 + ≤32KB 时 2 空格重新缩进（只重排
+  空白、字符串与数字保留源文本，`JSON.stringify(JSON.parse(x))` 会把
+  9007199254740993 打印成 …992、把 1.10 打印成 1.1、把 1e400 打印成 null），
+  流式半截 JSON 解析失败则只反转义原样保留——修复 provider 侧 Z.ai
+  built-in tool 叙事块单行转义 JSON 的可读性。
+- thought 行：`{+|-} thought · {formatTokens(n)} chars` 标签（`+`/`-` 即
+  Ctrl+T 折叠/展开状态）；收起时至多两行预览带 `▎` 引导列并剥离
+  `**`/`` ` ``/标题记号，展开时按原始行折行保全文（不剥记号）；thinking
+  期间单行 `⠋ thinking…`。tool 行：toolName 粗体，详情行 dim 字段名 +
+  正文色值（`label: value` 分层，整行不再全灰）；同一消息内
+  thought/tool/text part 之间保证恰一行呼吸位（不与 markdown 自带的段尾
+  空行叠加）。
 - Footer 恒定三行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
   `Container`）唯一 own：高度不随 busy 变化，挂载/卸载 spinner 不再把整屏
   内容顶起/落下；`update({state, status, cwdLabel})` 一行委托三行。布局
@@ -235,7 +256,20 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   composer." 并恢复草稿——不显示"已排队"（core 队列 lane 进程内无人
   消费，会随回合收尾静默丢失，2026-10-26 追踪）。本地 user row 乐观追加，
   `/login *-api-key` 文本在 transcript 中脱敏；`/compact` 渲染为
-  compact-timeline row 且不回显 response。
+  compact-timeline row 且不回显 response。`TurnSteerDrained` 除清队列区外，
+  按 `drainedInputs`（自带文本与持久 messageId，resume 侧 product projection
+  同一依据）把每条被消费的输入落成 transcript user 行——live 投影此前只清
+  队列，排队消息从转写中凭空消失；messageId 作行 id 天然幂等（缺
+  messageId 的畸形事件退到必填且稳定的 pendingInputId，绝不生成一次性
+  id 破坏幂等）。可见性不按 intent/text 猜测：drain 事实出现即表示该输入
+  已被 persistUserPrompt 持久成 semantics.uiVisibility=visible 的 user
+  message，可见与否是 CLI 权威（与 `transcript-hydration`「UI 不得再靠
+  文本覆盖 CLI visibility authority」一致）；两个 resume 权威同样不跳过
+  （product projection 对每条 drained item 无条件 row.appended，compact
+  只抑制 canonical-target 注册；冷 hydration 对带显式
+  visibility/semantics 的消息一律原样下发），任何 live 跳过都会造成
+  live 不显示而 resume 显示的前后不一致（共享 reducer `app-events.ts`，
+  两个 TUI 前端同享）。
 - `requestPermission`：CreateWorkflow/AmendWorkflow 沿用 CLI 自动放行例外；
   AskUserQuestion 经 `AskUserQuestionInputSchema` 校验 → 问题向导内联面板
   （选项、Other 输入、multiSelect、review 页，`decision:"modify"` 回传
@@ -315,6 +349,10 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   Ctrl+C 语义符合本文件键位表。
 - `--tui-frontend` 非法值报错；缺省走 opentui 行为不变（回归）。
 - `node:test` 用例：投影（事件→Message[]）、提交分支、审批结果合成、
-  选择/问题状态机、草稿命令解析、键位守卫；`VirtualTerminal` 冒烟渲染。
+  选择/问题状态机、草稿命令解析、键位守卫；`VirtualTerminal` 冒烟渲染；
+  转写渲染（`transcript-markdown.test.ts`）：表格分段/对齐/转义竖线、
+  列宽配比与保底、无边框契约、流式半截表格、围栏内表格不切分（含未闭合
+  fence）、json 围栏重新缩进与字面量保真、thought/tool 行形态与 part 间
+  呼吸位，所有行宽不超给定宽度。
 - 已知裁剪（后续按需）：子代理转写下钻浏览、workflow 卡与工具卡详情页联动、
   i18n copy 全量接线；先以英文 status 文案起步，结构预留。

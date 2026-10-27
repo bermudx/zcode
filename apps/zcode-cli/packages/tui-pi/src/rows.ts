@@ -2,7 +2,6 @@
 // Components. One component per message; composite rows render each part.
 
 import {
-  Markdown,
   Text,
   TruncatedText,
   truncateToWidth,
@@ -17,10 +16,12 @@ import type {
   TranscriptPart,
 } from "@zcode/tui/internals";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { formatTokens } from "./status-line.js";
 import type { PiTheme, Style } from "./theme.js";
 // Shell transcript rows are local-only system messages produced by shell.ts;
 // the sigil that marks them belongs to the producer.
 import { SHELL_ROW_PREFIX, collapseShellContextBlocks } from "./shell.js";
+import { TranscriptMarkdown } from "./transcript-markdown.js";
 
 const USER_PREFIX_GLYPH = ">";
 const TOOL_STATUS_GLYPHS = {
@@ -99,9 +100,28 @@ const truncateLines = (lines: string[], max: number, style: Style): string[] => 
   return [...lines.slice(0, max), style(`… ${lines.length - max} more lines`)];
 };
 
+/**
+ * 详情行：dim 的字段名 + 正文色的值。整行灰掉时，长命令/路径会把真正要
+ * 审计的内容一起压暗；分层后标签退后、值可读。
+ */
+const styleDetailLine = (detail: string, theme: PiTheme, width: number): string => {
+  const separator = detail.indexOf(": ");
+  if (separator <= 0) return theme.muted(truncateToWidth(detail, width));
+  const label = `${detail.slice(0, separator + 1)} `;
+  const value = truncateToWidth(
+    detail.slice(separator + 2),
+    Math.max(1, width - visibleWidth(label) - 1),
+  );
+  return `${theme.dim(label)}${theme.text(value)}`;
+};
+
+/** 思考预览是纯文本快照：去掉 markdown 记号，避免 `**bold**` 直出转写。 */
+const stripMarkdownNoise = (line: string): string =>
+  line.replace(/^#{1,6}\s+/u, "").replace(/\*\*|`/gu, "").trim();
+
 class ToolPartRow implements Component {
   private part: ToolTranscriptPart;
-  private markdown: Markdown | undefined;
+  private markdown: TranscriptMarkdown | undefined;
 
   constructor(
     part: ToolTranscriptPart,
@@ -128,15 +148,15 @@ class ToolPartRow implements Component {
     // 工具标题/detail/output/error/diff 行都可能超终端宽度；doRender 对超宽行
     // 抛错崩 TUI，所有行先截到可见宽度再加样式。
     const bodyWidth = Math.max(1, width - 4);
-    const header = `  ${glyphStyle(glyph)} ${theme.text(part.toolName)}${theme.muted(title)}`;
+    const header = `  ${glyphStyle(glyph)} ${theme.bold(part.toolName)}${theme.muted(title)}`;
     const lines = [truncateToWidth(header, width)];
 
     for (const detail of truncateLines(part.detailLines, MAX_TOOL_DETAIL_LINES, theme.muted)) {
-      lines.push(`    ${theme.muted(truncateToWidth(detail, bodyWidth))}`);
+      lines.push(`    ${styleDetailLine(detail, theme, bodyWidth)}`);
     }
     // plan 等正文型工具内容走 Markdown 组件，paddingX 与 detail 行的 4 格缩进对齐。
     if (part.markdown) {
-      this.markdown ??= new Markdown(part.markdown, 4, 0, this.markdownTheme);
+      this.markdown ??= new TranscriptMarkdown(part.markdown, 4, this.markdownTheme);
       this.markdown.setText(part.markdown);
       lines.push(...this.markdown.render(width));
     } else {
@@ -190,28 +210,31 @@ class ThoughtPartRow implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
+    const theme = this.theme;
     // 折叠/展开指示符沿用 +/-（折叠 + 展开 -）；Ctrl+T 全局切换。
     const expanded = this.expandThoughts();
-    const label =
-      this.part.status === "thinking"
-        ? this.theme.muted("⠋ thinking…")
-        : this.theme.muted(
-            `${expanded ? "-" : "+"} thought (${this.part.contentCharCount} chars)`,
-          );
+    if (this.part.status === "thinking") return [theme.muted("⠋ thinking…")];
+    const label = theme.muted(
+      `${expanded ? "-" : "+"} thought · ${formatTokens(this.part.contentCharCount)} chars`,
+    );
     // 流式 reasoning 单行可能远超终端宽度；doRender 对超宽行直接抛错崩 TUI。
-    // 收起时纯文本截到可见宽度再加样式；展开时折行保全文，不丢内容。
-    const bodyWidth = Math.max(1, width - 2);
+    // 收起时给两行预览（▎ 引导列占 2 格，剥离 markdown 记号）；展开时折行保
+    // 全文、原文不剥记号，不丢内容。
+    const bodyWidth = Math.max(1, width - 4);
     const source = expanded
       ? this.part.text.split(/\r\n|\r|\n/u)
       : this.part.text
-          .split("\n")
-          .filter((line) => line.trim().length > 0)
-          .slice(0, 2)
-          .map((line) => line.trim());
+          .split(/\r\n|\r|\n/u)
+          .map((line) => stripMarkdownNoise(line))
+          .filter((line) => line.length > 0)
+          .slice(0, 2);
     const body: string[] = [];
     for (const raw of source) {
-      for (const line of expanded ? wrapTextWithAnsi(raw, bodyWidth) : [raw]) {
-        body.push(`  ${this.theme.dim(truncateToWidth(line, bodyWidth))}`);
+      const lines = expanded
+        ? wrapTextWithAnsi(raw, bodyWidth)
+        : [truncateToWidth(raw, bodyWidth)];
+      for (const line of lines) {
+        body.push(`  ${theme.dim("▎")} ${theme.dim(line)}`);
       }
     }
     return [label, ...body];
@@ -219,7 +242,7 @@ class ThoughtPartRow implements Component {
 }
 
 class PartRow implements Component {
-  private child: ToolPartRow | ThoughtPartRow | Markdown | Text;
+  private child: ToolPartRow | ThoughtPartRow | TranscriptMarkdown | Text;
 
   constructor(
     part: TranscriptPart,
@@ -234,11 +257,12 @@ class PartRow implements Component {
           ? new ThoughtPartRow(part, theme, expandThoughts)
           : part.format === "plain"
             ? new Text(part.text, 2, 0)
-            : new Markdown(part.text, 0, 0, markdownTheme);
+            : new TranscriptMarkdown(part.text, 0, markdownTheme);
   }
 
   setPart(part: TranscriptPart): void {
-    if (this.child instanceof Markdown && part.type === "text") this.child.setText(part.text);
+    if (this.child instanceof TranscriptMarkdown && part.type === "text")
+      this.child.setText(part.text);
     else if (this.child instanceof Text && part.type === "text") this.child.setText(part.text);
     else if (this.child instanceof ToolPartRow && part.type === "tool") this.child.setPart(part);
     else if (this.child instanceof ThoughtPartRow && part.type === "thought")
@@ -367,13 +391,16 @@ export class MessageRow implements Component {
         const part = message.parts[index];
         const row = this.partRows[index];
         if (!part || !row) continue;
+        // part 是语义块（thought/tool/text）：块间一行呼吸位，转写不再连成
+        // 一整片；markdown 段自带的尾部空行不叠加。
+        if (index > 0 && lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
         row.setPart(part);
         lines.push(...row.render(width));
       }
     }
     if (!message.parts || message.parts.length === 0) {
       if (message.content.trim().length > 0) {
-        const markdown = new Markdown(message.content, 0, 0, this.markdownTheme);
+        const markdown = new TranscriptMarkdown(message.content, 0, this.markdownTheme);
         lines.push(...markdown.render(width));
       }
     }

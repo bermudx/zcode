@@ -27,7 +27,11 @@ import { applyTurnCompleteEvent, applyTurnCompleteFallbackResponse } from "./app
 import { applyToolTranscriptEvent } from "./app-tool-transcript.js";
 import { DEFAULT_TUI_COPY } from "./app-locale.js";
 import { removeQueuedInputs, upsertQueuedInput } from "./app-queued-inputs.js";
-import { applyCompactTimelineEvent, applyCompactTurnErrorEvent } from "./app-compact-timeline.js";
+import {
+  applyCompactTimelineEvent,
+  applyCompactTurnErrorEvent,
+} from "./app-compact-timeline.js";
+import { redactSensitivePromptForTranscript } from "./app-submit.js";
 import { applyWorkflowProgressEvent, type WorkflowMirrorSetter } from "./app-workflow-events.js";
 import { asRecord, formatNumber, numberField, stringField } from "./state.js";
 
@@ -93,7 +97,11 @@ export function applySessionEventToState(
       applyTurnSteerQueuedEvent(payload, handlers.setQueuedInputs);
       break;
     case SessionEventType.TurnSteerDrained:
-      applyTurnSteerDrainedEvent(payload, handlers.setMessages, handlers.setQueuedInputs);
+      applyTurnSteerDrainedEvent(
+        payload,
+        handlers.setQueuedInputs,
+        handlers.setMessages,
+      );
       break;
     case SessionEventType.TurnSteerDiscarded:
       applyTurnSteerFinishedEvent(payload, handlers.setQueuedInputs);
@@ -243,33 +251,6 @@ function applyTurnSteerQueuedEvent(
   );
 }
 
-/**
- * drained 输入在 core 侧已成为持久 user message，但 TUI transcript 的 user 行
- * 只由本地乐观追加产生——不在此补行，steer/重放的输入就整场不可见，模型在
- * 回答屏幕上不存在的消息（2026-10-25 live 复现）。文本取自 payload
- * drainedInputs（自带原文，不依赖内存 queue 状态），按事件顺序追加在流尾，
- * 先于下一次 model request 的流式内容。
- */
-function applyTurnSteerDrainedEvent(
-  payload: Record<string, unknown>,
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  setQueuedInputs?: React.Dispatch<React.SetStateAction<QueuedInput[]>>,
-): void {
-  const drained = payload.drainedInputs;
-  const rows = Array.isArray(drained)
-    ? drained
-        .map((item) => stringField(asRecord(item), "text"))
-        .filter((text): text is string => Boolean(text))
-        .map((text) => ({ content: text, role: "user" as const }))
-    : [];
-  if (rows.length > 0) {
-    setMessages((current) => [...current, ...rows]);
-  }
-  setQueuedInputs?.((current) =>
-    removeQueuedInputs(current, stringArrayField(payload, "pendingInputIds")),
-  );
-}
-
 function applyTurnSteerFinishedEvent(
   payload: Record<string, unknown>,
   setQueuedInputs?: React.Dispatch<React.SetStateAction<QueuedInput[]>>,
@@ -278,6 +259,53 @@ function applyTurnSteerFinishedEvent(
   setQueuedInputs((current) =>
     removeQueuedInputs(current, stringArrayField(payload, "pendingInputIds")),
   );
+}
+
+/**
+ * drain 事实自带文本与持久 messageId（`TurnSteerDrainedPayload.drainedInputs`，
+ * 与 resume 侧 product projection 同一依据）：排队输入被注入模型上下文时，
+ * 每条输入要落成 transcript user 行。此前 live 投影只清队列区——用户消息
+ * 从 queue 消失后又不在 transcript 里，转写中凭空消失，只在上游思考文本中
+ * 可见。messageId 作行 id：事件去重窗之外的重复投递按 id 幂等。缺
+ * messageId 的旧/畸形事件退到 pendingInputId（同样必填、同样在重投间稳定）；
+ * 两者都缺即畸形 payload，与缺 text 同样跳过——绝不生成一次性 id 破坏幂等。
+ *
+ * 可见性不再按 intent 或文本猜测：drain 事实出现即表示这条输入已被
+ * persistUserPrompt 持久成 semantics.uiVisibility=visible 的 user message，
+ * 可见与否是 CLI 的权威（见 transcript-hydration「UI 不得再靠文本覆盖 CLI
+ * visibility authority」）。两个 resume 权威同样不跳过：product projection 的
+ * onTurnSteerDrained 对每条 drained item 无条件 row.appended（compact 只抑制
+ * canonical-target 注册），冷 hydration 对带显式 visibility/semantics 的消息
+ * 一律原样下发。任何按 intent.kind/text 的 live 跳过都会让同类输入 live
+ * 不显示、重开后 resume 又显示——两边依据不同，转写前后不一致。（当前
+ * core 的唯一 drain 发射方是 guide drain，compact 因 commandKind 过滤根本
+ * 不会被 drain；跳过分支只是给未来发射方预留分歧陷阱，故不设。）
+ */
+function applyTurnSteerDrainedEvent(
+  payload: Record<string, unknown>,
+  setQueuedInputs: React.Dispatch<React.SetStateAction<QueuedInput[]>> | undefined,
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+): void {
+  setQueuedInputs?.((current) =>
+    removeQueuedInputs(current, stringArrayField(payload, "pendingInputIds")),
+  );
+  const drainedInputs = payload.drainedInputs;
+  if (!Array.isArray(drainedInputs)) return;
+  const rows: Message[] = [];
+  for (const item of drainedInputs) {
+    const record = asRecord(item);
+    const text = stringField(record, "text");
+    if (!text) continue;
+    const id = stringField(record, "messageId") ?? stringField(record, "pendingInputId");
+    if (!id) continue;
+    rows.push({ content: redactSensitivePromptForTranscript(text), id, role: "user" });
+  }
+  if (rows.length === 0) return;
+  setMessages((current) => {
+    const existing = new Set(current.map((message) => message.id));
+    const missing = rows.filter((row) => !existing.has(row.id));
+    return missing.length === 0 ? current : [...current, ...missing];
+  });
 }
 
 function stringArrayField(payload: Record<string, unknown>, key: string): string[] {

@@ -179,5 +179,9 @@ test("tool part markdown bodies (ExitPlanMode plan) render inside the width", ()
   assert.ok(lines[0]!.includes("ExitPlanMode"), "tool header stays first");
   assert.ok(lines.some((line) => line.includes("Ship it")), "plan heading renders");
   assert.ok(lines.some((line) => line.includes("step one")), "plan list renders");
-  assert.ok(lines.some((line) => line.includes("Bash: run tests")), "allowed prompts render");
+  // 详情行分层上色（dim 标签 + 正文色值）后 ANSI 会插在标签和值之间。
+  assert.ok(
+    lines.some((line) => stripTerminalSequences(line).includes("Bash: run tests")),
+    "allowed prompts render",
+  );
 });
