@@ -129,11 +129,12 @@ herdr pane 1..N                    每 workspace 一个
   原子锁 + detached spawn + `.pid`/`.info` 元数据 + 就绪等待。
 - 协议新增：`session/rawEvent` 通知、`eventFormat: "raw"`（subscribe/
   events）、`session/recallPreviousInput`、`session/recordInputHistory`。
-- 断线 UX：socket 断开 → pi-tui 状态行显示
-  `Connexion au core perdue — reconnexion…`；重连并按 `sequenceNumber`
-  续订成功 → `Reconnecté au core`；core 重启后会话不可冷恢复时显示
-  `Reconnecté au core — session indisponible`（先 `session/resume`
-  兜底，失败则如实提示并保持退避重试）。
+- 断线 UX：socket 断开 → pi-tui 状态行显示断线提示；重连并按 `sequenceNumber`
+  续订成功 → 重连成功提示；core 重启后会话不可冷恢复时显示"会话暂不可用、
+  继续重试"提示（先 `session/resume` 兜底，失败则如实提示并保持退避重试）。
+  三条状态文案经 `@zcode/i18n` 目录（`tui.connection.lost/reconnected/
+  reconnectedSessionUnavailable`）按 `--locale` 解析（2026-10-26 前曾硬编码
+  法语，无视 locale——P004-F3）。
 
 ### 服务端生命周期
 
