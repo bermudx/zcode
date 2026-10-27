@@ -57,7 +57,8 @@ export type Harness = {
   draftText: () => string;
   exitCode: () => number | undefined;
   feed: (data: string) => void;
-  flush: () => Promise<void>;
+  /** 等待「待渲染请求已落地 + 可选条件成立」；跨进程边界的调用方传 `until`。 */
+  flush: (until?: () => boolean, timeoutMs?: number) => Promise<void>;
   output: () => string;
   resetOutput: () => void;
   sessionEvents: ((event: SessionEvent) => void) | undefined;
@@ -71,6 +72,20 @@ type AppInternals = {
   editor: { getText(): string };
   store: AppStore;
 };
+
+/**
+ * pi-tui 渲染调度器的内部探测点（TS-private，运行时可见；仅测试 harness 使用）。
+ * requestRender 同步置 renderRequested，nextTick 里排 ≤16ms 节流定时器；两者
+ * 都空闲即「没有等待中的渲染」。
+ */
+type RenderSchedulerProbe = {
+  renderRequested?: unknown;
+  renderTimer?: unknown;
+  stopped?: unknown;
+};
+
+const FLUSH_DEFAULT_DEADLINE_MS = 5_000;
+const FLUSH_POLL_INTERVAL_MS = 5;
 
 export const createHarness = (options: Partial<TuiOptions> = {}): Harness => {
   setActiveTuiThemeMode("dark");
@@ -105,15 +120,39 @@ export const createHarness = (options: Partial<TuiOptions> = {}): Harness => {
   tui.start();
 
   const internals = app as unknown as AppInternals;
+  // flush 的轮询判据：调度器里没有等待中的渲染（busy spinner 每 80ms 主动
+  // tick，只能取单次观察，不能等「永久静默」）。
+  const scheduler = tui as unknown as RenderSchedulerProbe;
+  const renderPending = () =>
+    scheduler.stopped !== true &&
+    (scheduler.renderRequested === true || scheduler.renderTimer !== undefined);
+  const drainPendingTicks = () => new Promise<void>((resolve) => setImmediate(resolve));
   return {
     app,
     draftText: () => internals.editor.getText(),
     exitCode: () => exitCode,
     feed: (data) => terminal.inputHandler?.(data),
-    flush: async () => {
-      // requestRender is throttled at TuiBase.MIN_RENDER_INTERVAL_MS (16ms);
-      // a real timer covers both the async submit chain and the render tick.
-      await new Promise((resolve) => setTimeout(resolve, 40));
+    flush: async (until, timeoutMs = FLUSH_DEFAULT_DEADLINE_MS) => {
+      // Bug 根因（P003-F1）：旧实现是固定 40ms sleep——`!cmd` 等跨进程边界的
+      // 工作在满负载下超过预算，转写行缺席导致断言偶发失败。改为条件轮询：
+      // 微任务链与 requestRender 的 nextTick 跳在任何 macrotask 前全部清空，
+      // sleep 期间 resolve 的续体也先于下一个 setImmediate 跑完，故
+      // 「settle 后检查」不会漏掉已排队的渲染请求。跨进程调用方传 `until`
+      // 条件（如转写行出现），由轮询等到成立为止；超时 fail loud。
+      const deadline = Date.now() + timeoutMs;
+      const settled = () => !renderPending() && (until ? until() : true);
+      await drainPendingTicks();
+      while (!settled()) {
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `tui-pi harness flush() timed out after ${timeoutMs}ms ` +
+              `(renderPending: ${renderPending()}); narrow the \`until\` condition ` +
+              "or investigate the async chain under test",
+          );
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, FLUSH_POLL_INTERVAL_MS));
+        await drainPendingTicks();
+      }
     },
     output: () => terminal.output,
     resetOutput: () => terminal.resetOutput(),
