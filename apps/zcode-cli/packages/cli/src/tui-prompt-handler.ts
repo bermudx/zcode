@@ -347,13 +347,22 @@ export function createTuiSubmitPrompt(
           }),
         };
       }
+      // Ctrl+Q 的 delivery:"queue"（follow-up 排队）在进程内没有消费通道。
+      // 追踪（P003-F3，2026-10-26）：剥掉 delivery 后 input-facade 按 "auto"
+      // 进 core admitPrompt 的 busy 分支 → steerTurn 以无 delivery 字段的
+      // pendingInput 落 core 队列 lane（行内 drain 只消费 guide lane；队列
+      // lane 的 sendQueuedNow auto-drain 提升器只在 v4 bridge，进程内不建）；
+      // 回合正常收尾时该项转 held 无人消费，UI 又在 applyResult 清空队列区
+      // ——用户被告知"已排队"后输入静默丢失。这里显式回 queue_unavailable，
+      // 让 UI 提示不可排队并恢复草稿。完整 queue 语义在 attach 模式（piz），
+      // 见 turn-steering.md attach lane 节。
+      if (options?.delivery === "queue") {
+        return { kind: "queue_unavailable" };
+      }
       const activeApp = await getApp();
       if (activeApp.sendInput) {
         // TUI 语义 → InputDelivery：steer=steer_active_turn（busy 注入当前
-        // turn，idle 与 auto 同开新回合）。queue 刻意不映射：进程内没有客户端
-        // follow-up 队列，runtime deferred queue 的 auto-drain 提升器只在
-        // v4 bridge 存在，排队输入会随回合静默丢失；完整 queue 语义在
-        // attach 模式（piz），见 turn-steering.md attach lane 节。
+        // turn，idle 与 auto 同开新回合）；queue 已在上方显式拒绝。
         const { delivery, ...restOptions } = options ?? {};
         const result = await activeApp.sendInput(input, {
           ...restOptions,

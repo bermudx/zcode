@@ -196,6 +196,14 @@ export type TuiSendInputResult =
       kind: "command_result";
       result: TuiSubmitPromptResult;
     }
+  | {
+      /**
+       * 宿主没有 follow-up 队列的消费通道（进程内 runtime 的 queue lane 无
+       * 提升器，见 tui-prompt-handler 与 turn-steering.md）：UI 必须提示不可
+       * 排队并恢复草稿，不能显示"已排队"后静默丢失。
+       */
+      kind: "queue_unavailable";
+    }
   | TurnSteerResult;
 
 export type TuiSendInput = (

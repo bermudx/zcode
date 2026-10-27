@@ -203,6 +203,13 @@ export async function submitDuringActiveTurn(input: {
       );
       return undefined;
     }
+    if (result.kind === "queue_unavailable") {
+      // 宿主（进程内 zcode tui）没有 follow-up 队列的消费通道：core 的 queue
+      // lane 提升器只在 v4 bridge（attach）。明确告知不可排队、草稿已恢复，
+      // 而不是显示"已排队"后在回合收尾静默丢失（P003-F3）。
+      input.setStatus("Follow-up queuing is unavailable in this mode; input restored to the composer.");
+      return undefined;
+    }
     input.setStatus(`Input not queued: ${result.reason}.`);
     return undefined;
   } catch (error) {
