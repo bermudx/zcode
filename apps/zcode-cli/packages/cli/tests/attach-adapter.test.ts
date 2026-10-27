@@ -4,7 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { ZCODE_PROTOCOL_VERSION } from "@zcode/shared";
+import { ZCODE_PROTOCOL_VERSION, zcodeProtocolErrorCodes } from "@zcode/shared";
+import { getZCodeCopy } from "@zcode/i18n";
 import { connectAttachClient } from "../src/attach/attach-client.js";
 import { AttachSessionHandle } from "../src/attach/attach-session.js";
 import {
@@ -101,6 +102,8 @@ type FakeCore = {
   socketPath: string;
   notify: (params: unknown) => void;
   sendRequest: (id: string, method: string, params: unknown) => void;
+  /** 原样写一行（不套 JSON 帧）：注入畸形行等传输级垃圾。 */
+  raw: (line: string) => void;
   kill: () => Promise<void>;
   close: () => Promise<void>;
 };
@@ -108,7 +111,7 @@ type FakeCore = {
 /** 假 core：按 method 路由到应答表；rawEvent 通过注入的 sender 回放。 */
 async function startFakeCore(
   socketPath: string,
-  responder: (request: Captured, notify: (params: unknown) => void) => unknown,
+  responder: (request: Captured, notify: (params: unknown) => void, raw: (line: string) => void) => unknown,
 ): Promise<FakeCore> {
   const requests: Captured[] = [];
   const responses: CapturedResponse[] = [];
@@ -122,6 +125,9 @@ async function startFakeCore(
     for (const socket of sockets) {
       socket.write(`${JSON.stringify({ id, method, params })}\n`);
     }
+  };
+  const raw = (line: string): void => {
+    for (const socket of sockets) socket.write(line);
   };
   const server: Server = createServer((socket) => {
     sockets.add(socket);
@@ -157,7 +163,7 @@ async function startFakeCore(
           params: message.params ?? {},
         };
         requests.push(request);
-        const result = responder(request, notify);
+        const result = responder(request, notify, raw);
         Promise.resolve(result)
           .then((value) =>
             socket.write(`${JSON.stringify({ id: message.id, result: value ?? {} })}\n`),
@@ -194,6 +200,7 @@ async function startFakeCore(
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
     notify,
+    raw,
     requests,
     responses,
     sendRequest,
@@ -303,6 +310,115 @@ test("submitPrompt → session/send，turn_complete 事件解析出响应", asyn
   }
 });
 
+// 回归证据（P004-F1，2026-10-26 评审）：submitPrompt 曾把 per-turn onEvent
+// 挂进常驻 sinks 且从不摘除——每回合泄漏一个闭包，后续每条事件都扇出到全部
+// 陈旧 onEvent（O(turns)/事件，直到句柄被 /new //resume 换掉）。与 monolith
+// 对齐（prompt-command.ts 的 finally 摘除）：回合 settle / 发送失败即摘除
+// 本轮 onEvent；回合外事件只属于常驻订阅（subscribeSessionEvents）。
+test("submitPrompt 的 per-turn onEvent 回合结束即摘除：不随回合累积、无陈旧回调", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let turn = 0;
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      const inputId = request.params.inputId as string;
+      turn += 1;
+      const turnId = `turn-${turn}`;
+      queueMicrotask(() => {
+        notify(
+          rawEvent({
+            inputId,
+            payload: { inputId, input: `p-${turn}`, turnNumber: turn },
+            seq: turn * 2 - 1,
+            turnId,
+            type: "turn_started",
+          }),
+        );
+        notify(
+          rawEvent({
+            payload: { response: `r-${turn}`, resultType: "completed" },
+            seq: turn * 2,
+            turnId,
+            type: "turn_complete",
+          }),
+        );
+      });
+      return { accepted: true, sessionId: SID, stateRevision: turn };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  const firstEvents: string[] = [];
+  const secondEvents: string[] = [];
+  try {
+    const first = await handle.submitPrompt("one", {
+      onEvent: (event) => {
+        firstEvents.push(event.type);
+      },
+    });
+    const second = await handle.submitPrompt("two", {
+      onEvent: (event) => {
+        secondEvents.push(event.type);
+      },
+    });
+    assert.equal(first.response, "r-1");
+    assert.equal(second.response, "r-2");
+    // 第二回合的事件只到达第二回合的 onEvent：第一回合的陈旧回调不得再触发。
+    assert.deepEqual(
+      firstEvents,
+      ["turn_started", "turn_complete"],
+      "first-turn onEvent must not observe the second turn",
+    );
+    assert.deepEqual(secondEvents, ["turn_started", "turn_complete"]);
+    // 回合外事件：per-turn onEvent 都已摘除，一个都不触发（常驻订阅另有其主）。
+    handle.ingestRawEvent(rawEvent({ seq: 9, type: "session_created" }));
+    assert.equal(firstEvents.length, 2, "stale first-turn onEvent must not fire after its turn");
+    assert.equal(
+      secondEvents.length,
+      2,
+      "per-turn onEvent must not outlive its turn (monolith finally semantics)",
+    );
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// P004-F1 的发送失败路径：session/send 被拒时 per-turn onEvent 同样要摘除。
+test("submitPrompt 发送失败后 per-turn onEvent 即摘除", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      // 拒绝以 rejected promise 返回：同步 throw 会逃出 socket data handler。
+      return Promise.reject(Object.assign(new Error("core rejected"), { code: -32000 }));
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  const events: string[] = [];
+  try {
+    await assert.rejects(handle.submitPrompt("boom", {
+      onEvent: (event) => {
+        events.push(event.type);
+      },
+    }), /core rejected/);
+    handle.ingestRawEvent(rawEvent({ seq: 9, type: "session_created" }));
+    assert.equal(events.length, 0, "onEvent must be detached after session/send failure");
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 test("recallPreviousInput → session/recallPreviousInput", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
@@ -322,6 +438,94 @@ test("recallPreviousInput → session/recallPreviousInput", async () => {
     assert.equal(entry?.text, "previous prompt");
   } finally {
     client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 回归证据（P004-F3，2026-10-26 评审）：断线状态行曾硬编码法语（无视
+// --locale）。状态文案必须走 i18n 目录：tui.connection.* 三键在全部 locale
+// 文件里都有，且不同 locale 解析出各自文案。
+test("断线状态文案三键在 en-US/zh-CN 目录齐全且按 locale 区分", () => {
+  const en = getZCodeCopy("en-US").tui.connection;
+  const zh = getZCodeCopy("zh-CN").tui.connection;
+  assert.equal(en.lost, "Connection to shared core lost — reconnecting…");
+  assert.equal(en.reconnected, "Reconnected to shared core");
+  assert.equal(
+    en.reconnectedSessionUnavailable,
+    "Reconnected to shared core — session unavailable, retrying…",
+  );
+  assert.equal(zh.lost, "与共享 core 的连接已断开——正在重连…");
+  assert.equal(zh.reconnected, "已重新连接共享 core");
+  assert.equal(
+    zh.reconnectedSessionUnavailable,
+    "已重新连接共享 core——会话暂不可用，正在重试…",
+  );
+  // 键互不相同：不是同一份硬编码穿两层。
+  assert.notEqual(en.lost, zh.lost);
+  assert.notEqual(en.reconnected, zh.reconnected);
+  assert.notEqual(en.reconnectedSessionUnavailable, zh.reconnectedSessionUnavailable);
+});
+
+// P004-F3 的发射路径：AttachRuntime 按 options.locale 从目录取状态行——
+// 断线 / 重连成功 / 重连但会话不可恢复三个状态都不得再出现硬编码法语。
+test("AttachRuntime 断线状态行按 locale 走 i18n 目录", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-status-locale-"));
+  const socketPath = join(dir, "core.sock");
+  const goodResponder = (request: Captured): unknown => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    return {};
+  };
+  // 冷 core：subscribe/resume 都回 sessionUnavailable → 会话不可恢复。
+  const coldResponder = (request: Captured): unknown => {
+    if (request.method === "session/subscribe") {
+      return Promise.reject(
+        Object.assign(new Error("session unavailable"), {
+          code: zcodeProtocolErrorCodes.sessionUnavailable,
+        }),
+      );
+    }
+    if (request.method === "session/resume") {
+      return Promise.reject(
+        Object.assign(new Error("no such session"), {
+          code: zcodeProtocolErrorCodes.sessionUnavailable,
+        }),
+      );
+    }
+    return {};
+  };
+  let core = await startFakeCore(socketPath, goodResponder);
+  const runtime = new AttachRuntime({
+    locale: "zh-CN",
+    socketPath,
+    workspace: { workspaceIdentity: undefined, workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+  });
+  const statuses: string[] = [];
+  runtime.onConnectionStatus((status) => statuses.push(status));
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const firstClient = await runtime.connect();
+  try {
+    await core.kill();
+    await firstClient.closed;
+    assert.equal(statuses.at(-1), "与共享 core 的连接已断开——正在重连…");
+    core = await startFakeCore(socketPath, goodResponder);
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    assert.equal(statuses.at(-1), "已重新连接共享 core");
+    await core.kill();
+    await runtime.currentClient().closed;
+    assert.equal(statuses.at(-1), "与共享 core 的连接已断开——正在重连…");
+    core = await startFakeCore(socketPath, coldResponder);
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    assert.equal(statuses.at(-1), "已重新连接共享 core——会话暂不可用，正在重试…");
+  } finally {
+    await runtime.close();
     await core.close();
     await rm(dir, { force: true, recursive: true });
   }
@@ -404,6 +608,66 @@ test("协议版本不匹配 → 退出码 2 与可操作错误", async () => {
     const exitCode = await runAttachCommand(ctx, {} as never, deps, "0.0.0-test");
     assert.equal(exitCode, 2);
     assert.match(stderrChunks.join(""), /Shared core protocol v999/);
+  } finally {
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 回归证据（P004-F4，2026-10-26 评审）：生产路径曾不给 connectAttachClient /
+// AttachRuntime 传 logger——传输内建诊断（丢畸形行、坏协议消息、socket 错误）
+// 全部 optional-chain 成 no-op，坏流静默降级。runAttachCommand 必须把（节流的）
+// stderr 诊断 logger 接进两条路径。
+test("runAttachCommand 给传输接 stderr 诊断：畸形行有日志、连接继续", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-transport-log-"));
+  const workspace = join(dir, "workspace");
+  const { resolveSocketPath } = await import("../src/app-server-spawn.js");
+  const socketPath = resolveSocketPath(
+    { workspacePath: workspace },
+    { env: { ZCODE_DATA_BASE_DIR: dir } },
+  );
+  await (await import("node:fs/promises")).mkdir(
+    (await import("node:path")).dirname(socketPath),
+    { recursive: true },
+  );
+  // 第一条到达的写往连接注入一行畸形 NDJSON；正式 create 响应随后照发。
+  const core = await startFakeCore(socketPath, (request, _notify, raw) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/create") {
+      raw("{{{not json\n");
+      return makeSnapshot();
+    }
+    return {};
+  });
+  const { runAttachCommand } = await import("../src/attach/attach-command.js");
+  const stderrChunks: string[] = [];
+  const ctx = {
+    argv: [],
+    stderr: {
+      write: (chunk: string) => {
+        stderrChunks.push(chunk);
+        return true;
+      },
+    } as never,
+    stdin: process.stdin,
+    stdout: process.stdout,
+  };
+  const deps = {
+    cwd: () => workspace,
+    env: { ...process.env, ZCODE_DATA_BASE_DIR: dir },
+    runTui: async () => 0,
+  } as never;
+  try {
+    const exitCode = await runAttachCommand(ctx, {} as never, deps, "0.0.0-test");
+    assert.equal(exitCode, 0);
+    assert.match(
+      stderrChunks.join(""),
+      /attach transport: attach client dropped malformed line/,
+      "malformed transport line must surface a stderr diagnostic",
+    );
+    // 连接继续：runTui 正常拿到控制权（exitCode 0），create 流程未被坏行打断。
   } finally {
     await core.close();
     await rm(dir, { force: true, recursive: true });
@@ -1873,3 +2137,105 @@ test("createAttachPromptHandler 暴露 removeQueuedInputs 端口并随句柄生�
     await rm(dir, { force: true, recursive: true });
   }
 });
+
+// 回归证据（P004-F2，2026-10-26 评审）：TUI 内裸 /resume 曾用 sessions.at(-1)
+// 取“最近会话”——server 的 session/list 返回顺序不保证（实测创建序/任意序
+// 混排，attach-command 的入口路径因此改过显式排序），会静默恢复陈旧会话。
+// TUI 内必须走同一裁决：按 updatedAt（退化 createdAt）显式取最大。
+test("TUI 裸 /resume 按 updatedAt 取最近会话，而不是列表末位", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-latest-"));
+  const socketPath = join(dir, "core.sock");
+  // 故意混排：陈旧会话不在末位、最新会话在中间。
+  const listed = [
+    { id: "sess-middle", updatedAt: 200 },
+    { id: "sess-newest", updatedAt: 300 },
+    { id: "sess-stale", updatedAt: 100 },
+  ];
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/list") {
+      return { sessions: listed };
+    }
+    if (request.method === "session/resume") {
+      return { sessionId: request.params.sessionId };
+    }
+    if (request.method === "session/messages") {
+      return { messages: [] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = (await handler("/resume", {})) as { response?: string };
+    const resumeCall = core.requests.find((r) => r.method === "session/resume");
+    assert.ok(resumeCall, "expected session/resume request");
+    assert.equal(resumeCall.params.sessionId, "sess-newest");
+    assert.match(result.response ?? "", /Resumed session sess-newest/);
+    assert.ok(
+      !core.requests.some((r) => r.method === "session/create"),
+      "bare /resume must not silently create a new session",
+    );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// P004-F2 的空列表分支：显式报错（与入口 -c 的 “No resumable session found”
+// 同语义），不再静默留在当前会话装作成功。
+test("TUI 裸 /resume 空列表显式报错", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-empty-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/list") {
+      return { sessions: [] };
+    }
+    if (request.method === "session/messages") {
+      return { messages: [] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    await assert.rejects(handler("/resume", {}), /No resumable session found for \/tmp\/ws/);
+    assert.ok(!core.requests.some((r) => r.method === "session/resume"));
+    assert.ok(!core.requests.some((r) => r.method === "session/create"));
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+

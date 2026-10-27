@@ -320,7 +320,12 @@ export class AttachSessionHandle {
     const text = typeof prompt === "string" ? prompt : prompt.text;
     const modelSelection =
       typeof prompt === "string" ? undefined : prompt.modelSelection;
-    if (options?.onEvent) this.sinks.add((event) => void options.onEvent?.(event));
+    // per-turn onEvent 挂上就要摘：回合 settle / 发送失败时摘除（与 monolith
+    // prompt-command 的 finally 语义对齐）。曾只挂不摘——TUI 每次提交都带
+    // onEvent，sinks 每回合净增一个闭包，后续每条事件扇出到全部陈旧回调。
+    const unsubscribeOnEvent = options?.onEvent
+      ? this.addSink((event) => void options.onEvent?.(event))
+      : undefined;
     if (options?.requestPermission) {
       this.activeRequestPermission = options.requestPermission as (
         request: unknown,
@@ -352,6 +357,7 @@ export class AttachSessionHandle {
       });
     } catch (error) {
       this.pendingTurns.delete(inputId);
+      unsubscribeOnEvent?.();
       this.activeRequestPermission = undefined;
       this.activeTurnAbortSignal = undefined;
       throw error;
@@ -359,6 +365,7 @@ export class AttachSessionHandle {
     try {
       return await turnPromise;
     } finally {
+      unsubscribeOnEvent?.();
       this.activeRequestPermission = undefined;
       this.activeTurnAbortSignal = undefined;
     }

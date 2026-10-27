@@ -8,6 +8,7 @@ import {
   AttachProtocolError,
   connectAttachClient,
   type AttachClient,
+  type AttachClientLogger,
 } from "../src/attach/attach-client.js";
 
 type FakeServer = {
@@ -77,10 +78,11 @@ async function startFakeServer(dir: string): Promise<FakeServer> {
 
 async function withFakeServer(
   run: (fake: FakeServer, client: AttachClient) => Promise<void>,
+  clientOptions: { logger?: AttachClientLogger } = {},
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "attach-client-test-"));
   const fake = await startFakeServer(dir);
-  const client = await connectAttachClient(fake.socketPath);
+  const client = await connectAttachClient(fake.socketPath, clientOptions);
   try {
     await run(fake, client);
   } finally {
@@ -151,6 +153,53 @@ test("server 反向请求由 handler 应答", async () => {
     });
     assert.deepEqual(answered.result, { nativeSearchEnhancementsEnabled: false });
   });
+});
+
+// 回归证据（P004-F6，2026-10-26 评审）：对端长时间不发换行时，入站 NDJSON
+// buffer 曾无上限增长——卡死的 core 可以把瘦客户端 RSS 撑爆。超上限必须
+// 显式失败连接（closed 带 error、pending 全拒），而不是无声挂着继续膨胀。
+test("超长无换行流触发行上限显式失败", async () => {
+  await withFakeServer(async (fake, client) => {
+    // 5MB 无换行：超过 4MB 上限；socket 保持打开，模拟卡死但不关流的 core。
+    for (const socket of fake.connections()) {
+      socket.write("x".repeat(5 * 1024 * 1024));
+    }
+    const settled = await Promise.race([
+      client.closed.then((error) => error),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
+    ]);
+    assert.ok(
+      settled instanceof Error,
+      "connection must fail with an explicit error once the line cap is exceeded",
+    );
+    assert.match(settled.message, /exceeded/);
+    await assert.rejects(client.request("session/send", {}), /closed|exceeded/i);
+  });
+});
+
+// P004-F4：注入 logger 时传输级诊断（丢畸形行等）必须产生 warn，且连接继续。
+test("malformed line 产生 logger.warn 诊断且连接继续", async () => {
+  const warnings: string[] = [];
+  await withFakeServer(
+    async (fake, client) => {
+      const received: string[] = [];
+      client.onNotification((method) => received.push(method));
+      for (const socket of fake.connections()) {
+        socket.write("{{{not json\n");
+        socket.write(`${JSON.stringify({ method: "session/rawEvent", params: {} })}\n`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.deepEqual(warnings, ["attach client dropped malformed line"]);
+      assert.deepEqual(received, ["session/rawEvent"], "connection must continue after a dropped line");
+    },
+    {
+      logger: {
+        warn: (message) => {
+          warnings.push(message);
+        },
+      },
+    },
+  );
 });
 
 test("socket 关闭拒绝 pending 并 settle closed", async () => {

@@ -297,6 +297,14 @@ test("zcode-attach --model 缺值报错", () => {
   assert.throws(() => parseAttachEntryArgs(["--model", ""]), /--model requires a value/);
 });
 
+// 回归证据（P004-F5，2026-10-26 评审）：--resume 缺值曾静默置
+// resumeSessionId=undefined → 降级为开新会话——正是 9b46915f 在别处清除的
+// 静默回退形态。与 --model 同判：显式报错。
+test("zcode-attach --resume 缺值报错，不静默降级为新会话", () => {
+  assert.throws(() => parseAttachEntryArgs(["--resume"]), /--resume requires a value/);
+  assert.throws(() => parseAttachEntryArgs(["--resume", ""]), /--resume requires a value/);
+});
+
 // ── runAttachCommand：启动期 setModel 应用 ──
 
 test("create 路径：--model 完整 ref 触发 session/setModel 且目录校验默认档位", async () => {

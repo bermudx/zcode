@@ -18,7 +18,7 @@ import { createNodeClipboardImageReader } from "../clipboard-image.js";
 import { createNodeClipboardTextWriter } from "../clipboard-text.js";
 import { listSlashCommandSuggestions } from "../command-center.js";
 import { ensureServer } from "../app-server-spawn.js";
-import type { AttachClient } from "./attach-client.js";
+import { connectAttachClient } from "./attach-client.js";
 import { resolveLocale } from "@zcode/i18n";
 import { resolveWorkspaceGitBranch } from "../tui-workspace-git.js";
 import { loadPiTuiRuntime } from "../tui-pi-runtime-loader.js";
@@ -34,6 +34,7 @@ import {
   AttachProtocolVersionError,
   AttachRuntime,
   createAttachPromptHandler,
+  resolveAttachResumeTarget,
 } from "./attach-tui-options.js";
 import { createAttachHerdrReporter } from "./herdr-reporter.js";
 
@@ -53,99 +54,30 @@ const createHerdrDiagnosticWriter = (
   };
 };
 
-/**
- * 解析 attach 入口的会话选择目标：
- *   - 无 resume 意图 → undefined（调用方走 session/create，开新会话）
- *   - --resume <id>   → 完整 id；或本 workspace 内唯一匹配的 id 前缀
- *   - -c/--continue   → 本 workspace 最近一次会话
- *
- * “最近”按 updatedAt（退化 createdAt）显式取最大：server 的 session/list 返回
- * 顺序不保证（实测创建序/任意序混排），取末位会恢复到陈旧会话。
- *
- * 显式意图不静默降级：--resume 解析出多个候选、-c 列不出会话、或
- * session/list 本身失败，都直接抛错（stderr + exit 1），不再无声开新会话
- * ——操作者截断 id 恢复时曾因此进到空会话而毫无提示。
- */
-interface ListedResumeSession {
-  createdAt?: number;
-  sessionId?: string;
-  id?: string;
-  updatedAt?: number;
-}
-
-const toListedResumeSessions = (listed: unknown): ListedResumeSession[] => {
-  const wrapped = (listed ?? {}) as { sessions?: unknown };
-  return Array.isArray(wrapped.sessions) ? (wrapped.sessions as ListedResumeSession[]) : [];
-};
-
-const listedResumeSessionId = (session: ListedResumeSession): string | undefined =>
-  session.sessionId ?? session.id;
-
-const listWorkspaceSessionsForResume = async (
-  client: AttachClient,
-  workspace: { workspacePath: string; workspaceIdentity?: string; workspaceKey: string },
-): Promise<ListedResumeSession[]> => {
-  const listed = await client.request(zcodeProtocolMethods.sessionList, { workspace });
-  return toListedResumeSessions(listed);
-};
-
-export const resolveAttachResumeTarget = async ({
-  client,
-  continueSession,
-  resumeSessionId,
-  workspace,
-}: {
-  client: AttachClient;
-  continueSession: boolean;
-  resumeSessionId?: string;
-  workspace: { workspacePath: string; workspaceIdentity?: string; workspaceKey: string };
-}): Promise<string | undefined> => {
-  if (!continueSession && !resumeSessionId) return undefined;
-  if (resumeSessionId) {
-    // --resume 支持本 workspace 内唯一匹配的 id 前缀（截断 id 是真实使用形
-    // 态：sess_99f180d5 这样的短前缀曾被静默换成新会话）。列表失败不阻断：
-    // 原样透传，由 session/resume 的错误浮出真相（可能是跨 workspace 完整 id）。
-    const sessions = await listWorkspaceSessionsForResume(client, workspace).catch(
-      () => undefined,
-    );
-    if (sessions !== undefined) {
-      const ids = sessions
-        .map(listedResumeSessionId)
-        .filter((id): id is string => typeof id === "string");
-      if (ids.includes(resumeSessionId)) return resumeSessionId;
-      const prefixed = ids.filter((id) => id.startsWith(resumeSessionId));
-      if (prefixed.length === 1) return prefixed[0];
-      if (prefixed.length > 1) {
-        throw new Error(
-          `--resume "${resumeSessionId}" is ambiguous: matches ${prefixed.length} sessions (${prefixed
-            .slice(0, 5)
-            .join(", ")}${prefixed.length > 5 ? ", …" : ""}). Use a longer prefix or the full id.`,
-        );
-      }
-    }
-    return resumeSessionId;
-  }
-  // -c：显式继续意图。列表失败或空列表都报错，与主 CLI 的
-  // “No resumable session found” 同语义，不再静默开新会话。
-  const sessions = await listWorkspaceSessionsForResume(client, workspace).catch(
-    (error: unknown) => {
-      throw new Error(
-        `--continue could not list sessions for ${workspace.workspacePath}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+/** attach 传输诊断：与 herdr 同款 ≥60s 节流的 stderr writer。传输内建信号
+ *  （丢畸形行、坏协议消息、socket 错误、resubscribe 失败）若不接 logger 就
+ *  全部静默成 no-op——坏流静默降级违背“跑了就要有信号”。诊断走 stderr，
+ *  绝不进协议 stdout。 */
+const createAttachTransportLogger = (
+  stderr: { write(chunk: string): unknown },
+): { warn: (message: string, context?: Record<string, unknown>) => void } => {
+  let lastWrittenAt = 0;
+  return {
+    warn: (message, context) => {
+      const now = Date.now();
+      if (now - lastWrittenAt < 60_000) return;
+      lastWrittenAt = now;
+      const detail = context === undefined ? "" : ` ${JSON.stringify(context)}`;
+      stderr.write(`attach transport: ${message}${detail}\n`);
     },
-  );
-  const byRecency = [...sessions].sort(
-    (a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0),
-  );
-  const last = byRecency[0];
-  const lastId = last === undefined ? undefined : listedResumeSessionId(last);
-  if (lastId === undefined) {
-    throw new Error(`No resumable session found for ${workspace.workspacePath}`);
-  }
-  return lastId;
+  };
 };
+
+/**
+ * 解析 attach 入口的会话选择目标（-c/--resume/默认新会话）：实现与 TUI 内
+ * 裸 /resume 共用，见 attach-tui-options.ts 的 resolveAttachResumeTarget。
+ */
+export { resolveAttachResumeTarget } from "./attach-tui-options.js";
 
 /**
  * attach 入口：瘦客户端只负责传输与呈现，core 承载会话/运行时/存储。
@@ -172,14 +104,23 @@ export const runAttachCommand = async (
       workspaceIdentity: env[ZCODE_WORKSPACE_IDENTITY_ENV]?.trim() || undefined,
       workspacePath: workspaceDirectory,
     };
-    // session/create exige le ref complet : workspaceKey = identité résolue
-    // (workspaceIdentity || workspacePath), même helper que resolveSocketPath.
+    // session/create 需要完整 ref：workspaceKey = 解析出的身份
+    // （workspaceIdentity || workspacePath），与 resolveSocketPath 同一 helper。
     const workspaceRef = {
       workspacePath: workspace.workspacePath,
       workspaceIdentity: workspace.workspaceIdentity,
       workspaceKey: resolveWorkspaceKey(workspace),
     };
+    // 瘦客户端（zcode-attach）不带 config 适配器：locale 用轻量路径；
+    // monolith 经 deps.resolveAttachStartupLocale 注入完整 createConfig 实现。
+    // 在 AttachRuntime 构造前解析：断线状态行（tui.connection.*）按同一 locale。
+    const startupLocale =
+      deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
+      resolveLocale(options.locale, options.detectedLocale);
     const { socketPath } = await ensureServer({ env, version, workspace });
+    // 传输诊断（丢畸形行/socket 错误等）经节流 stderr logger 接进客户端连接
+    // 与 runtime 自身；不传则传输层全部 optional-chain 成静默 no-op。
+    const transportLogger = createAttachTransportLogger(ctx.stderr);
     const runtime = new AttachRuntime({
       socketPath,
       workspace: workspaceRef,
@@ -188,6 +129,9 @@ export const runAttachCommand = async (
       ensureConnected: async () => ({
         socketPath: (await ensureServer({ env, version, workspace })).socketPath,
       }),
+      connect: (path) => connectAttachClient(path, { logger: transportLogger }),
+      logger: transportLogger,
+      locale: startupLocale,
     });
     // herdr reporter：必须在 createAttachPromptHandler 注册首个句柄前挂好
     // onSessionBound，才能收到初始绑定（否则 pane 无 session/resume 元数据）。
@@ -204,11 +148,6 @@ export const runAttachCommand = async (
       runtime.onSessionBound((handle) => herdrReporter.bind(handle));
     }
     const client = await runtime.connect();
-    // 瘦客户端（zcode-attach）不带 config 适配器：locale 用轻量路径；
-    // monolith 经 deps.resolveAttachStartupLocale 注入完整 createConfig 实现。
-    const startupLocale =
-      deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
-      resolveLocale(options.locale, options.detectedLocale);
     try {
       // 会话选择与主 CLI 语义一致（不再默认 resume）：
       //   默认          → session/create（开新会话）
@@ -371,8 +310,8 @@ export const runAttachCommand = async (
         stdin: ctx.stdin,
         stdout: ctx.stdout,
         submitPrompt: promptHandler,
-        // tui-attach : la ligne de status pi-tui lit ce port de niveau options,
-        // pas une propriété du handler — l'émission vient de runtime (reconnect).
+        // tui-attach：pi-tui 状态行从 options 层的这个端口读连接状态（不是
+        // handler 的属性）——发射方是 runtime（重连）。
         subscribeConnectionStatus: (listener) => runtime.onConnectionStatus(listener),
         subscribeSessionEvents: promptHandler.subscribeSessionEvents,
         version,

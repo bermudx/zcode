@@ -29,7 +29,12 @@ export function parseAttachEntryArgs(argv: readonly string[]): AttachEntryArgs {
     } else if (arg === "-c" || arg === "--continue") {
       resume.continueSession = true;
     } else if (arg === "--resume") {
-      resume.resumeSessionId = argv[++i];
+      const value = argv[++i];
+      // 缺值若静默置 undefined 会降级成开新会话——显式意图必须显式失败（同 --model）。
+      if (value === undefined || value === "") {
+        throw new Error("--resume requires a value: --resume <sessionId>");
+      }
+      resume.resumeSessionId = value;
     } else if (arg === "--model") {
       const value = argv[++i];
       if (value === undefined || value === "") {

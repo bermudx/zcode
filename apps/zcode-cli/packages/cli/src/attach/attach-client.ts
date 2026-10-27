@@ -43,6 +43,12 @@ export interface AttachClient {
 
 const ATTACH_REQUEST_PREFIX = "attach";
 
+/** 单行 NDJSON 上限（utf8 解码后的字符数，是线上字节数的有界投影）：
+ *  core 半写/卡死时可能长时间不发换行，无上限的残留 buffer 会让瘦客户端
+ *  RSS 随坏流膨胀。取 4MB——远超最大的合法快照行，同时把“永远等不到换行”
+ *  的坏流判成显式失败：拒绝全部 pending、closed 带 error，不让连接无声挂着。 */
+const ATTACH_MAX_LINE_CHARS = 4 * 1024 * 1024;
+
 export async function connectAttachClient(
   socketPath: string,
   options: { logger?: AttachClientLogger } = {},
@@ -164,14 +170,32 @@ export async function connectAttachClient(
     }
   };
 
+  const failLineCap = (): void => {
+    const error = new Error(
+      `attach protocol line exceeded ${ATTACH_MAX_LINE_CHARS}-char cap (peer never sent a newline)`,
+    );
+    options.logger?.warn?.("attach client line cap exceeded", {
+      bufferLength: buffer.length,
+    });
+    finish(error);
+    socket.destroy();
+  };
+
   socket.on("data", (chunk: string) => {
     buffer += chunk;
     for (;;) {
       const newlineIndex = buffer.indexOf("\n");
       if (newlineIndex < 0) break;
+      if (newlineIndex > ATTACH_MAX_LINE_CHARS) {
+        failLineCap();
+        return;
+      }
       const line = buffer.slice(0, newlineIndex);
       buffer = buffer.slice(newlineIndex + 1);
       dispatchLine(line);
+    }
+    if (buffer.length > ATTACH_MAX_LINE_CHARS) {
+      failLineCap();
     }
   });
   socket.on("error", (error: Error) => {
