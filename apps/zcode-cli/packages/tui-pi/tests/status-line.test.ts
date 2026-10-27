@@ -1,31 +1,53 @@
-// Footer stats 行：左区用量簇（↑in ↓out R… CH%）+ ctx 仪表，右区
-// `(provider) model · thought · mode · agents:N`；pwd 行 `~/cwd (branch)`。
-// 覆盖纯 formatter 与事件 → UsageTotalsAccumulator → stats 行的端到端路径。
+// Footer stats 行：左区用量簇（↑in ↓out R… [W…] [CH%] [$cost]）+ ctx 仪表，
+// 右区 `(provider) model • thought • mode • agents:N`；pwd 行 `~/cwd (branch)`
+// + 可选右对齐额度簇。覆盖纯 formatter、定价折算与事件 →
+// UsageTotalsAccumulator → stats 行的端到端路径（pi footer 同构）。
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   formatContextSegment,
+  formatCostSegment,
   formatCwdLabel,
   formatIdentityCluster,
   formatModelLabel,
   formatPwdLine,
+  formatPwdRow,
   formatStatsLine,
   formatTokens,
   formatUsageCluster,
 } from "../src/status-line.js";
+import type { PiTheme } from "../src/theme.js";
+import {
+  bareModelId,
+  cacheExclusiveInputTokens,
+  lookupModelRates,
+  requestCostUsd,
+} from "../src/pricing.js";
 import type { AppStore } from "../src/store.js";
 import { createHarness, sessionEvent } from "./harness.js";
 
 const totals = (inputTokens: number, outputTokens: number, cacheReadTokens: number) => ({
   cacheReadTokens,
+  cacheWriteTokens: 0,
+  costUsd: 0,
   inputTokens,
   outputTokens,
 });
 
 const state = (over: Partial<AppStore["state"]>): AppStore["state"] =>
   ({ contextUsage: {}, ...over }) as AppStore["state"];
+
+// 真 ANSI 包装：pi-tui visibleWidth/truncateToWidth 按可见宽度计算，零宽。
+const testTheme = {
+  danger: (text: string) => `\x1b[31m${text}\x1b[0m`,
+  dim: (text: string) => `\x1b[2m${text}\x1b[0m`,
+  warning: (text: string) => `\x1b[33m${text}\x1b[0m`,
+} as unknown as PiTheme;
+
+/** formatter 输出内嵌着色段：内容断言前剥掉 SGR。 */
+const strip = (text: string): string => text.replace(/\x1b\[[0-9;:]*m/g, "");
 
 test("formatTokens matches pi-mono boundaries", () => {
   assert.equal(formatTokens(0), "0");
@@ -37,26 +59,49 @@ test("formatTokens matches pi-mono boundaries", () => {
   assert.equal(formatTokens(12_300_000), "12M");
 });
 
-test("usage cluster mirrors pi footer segments", () => {
-  const line = formatUsageCluster({
-    usageTotals: totals(1_900_000, 43_000, 1_800_000),
-    cacheHitRate: 0.995,
-  });
-  assert.equal(line, "↑1.9M ↓43k R1.8M CH99.5%");
-});
-
-test("cache hit falls back to the session aggregate formula", () => {
-  assert.equal(formatUsageCluster({ usageTotals: totals(1_000, 10, 995) }), "↑1.0k ↓10 R995 CH99.5%");
+test("usage cluster gates every segment on a positive count (pi footer 同门)", () => {
+  assert.equal(
+    formatUsageCluster({ usageTotals: totals(1_900_000, 43_000, 1_800_000), cacheHitRate: 0.995 }),
+    "↑1.9M ↓43k R1.8M CH99.5%",
+  );
+  // pi: `if (usageTotals.input)` —— 零计数不出段，R0 不再出现。
+  assert.equal(formatUsageCluster({ usageTotals: totals(500, 5, 0) }), "↑500 ↓5");
+  assert.equal(formatUsageCluster({ usageTotals: totals(0, 0, 0) }), undefined);
   assert.equal(formatUsageCluster({}), undefined);
 });
 
-test("ctx segment degrades without a window and hides without data", () => {
+test("W segment appears only with cache-write traffic", () => {
+  const withWrite = { ...totals(1_000, 10, 800), cacheWriteTokens: 200 };
+  assert.equal(
+    formatUsageCluster({ usageTotals: withWrite, cacheHitRate: 0.8 }),
+    "↑1.0k ↓10 R800 W200 CH80.0%",
+  );
+});
+
+test("CH requires the latest request hit rate; the session-aggregate fallback is gone", () => {
+  // cache 流量在但最近命中率缺 → 不出段（pi 无累计回退）。
+  assert.equal(formatUsageCluster({ usageTotals: totals(1_000, 10, 995) }), "↑1.0k ↓10 R995");
+  // 命中率出界属于 provider 数据异常：隐藏，不伪造 100%+。
+  assert.equal(
+    formatUsageCluster({ usageTotals: totals(1_000, 10, 995), cacheHitRate: 1.5 }),
+    "↑1.0k ↓10 R995",
+  );
+});
+
+test("ctx segment: ? without used, (auto) suffix, degrade and hide", () => {
   assert.equal(formatContextSegment({}), undefined);
   assert.equal(formatContextSegment({ contextUsed: 5_000 }), "ctx 5.0k");
   assert.equal(
     formatContextSegment({ contextUsed: 103_000, contextWindow: 255_000 }),
     "40.4%/255k",
   );
+  // pi：percent 缺失为 `?`（非 –）；(auto) 直接拼段尾。
+  assert.equal(formatContextSegment({ contextWindow: 255_000 }), "?/255k");
+  assert.equal(
+    formatContextSegment({ contextUsed: 103_000, contextWindow: 255_000 }, { autoCompact: true }),
+    "40.4%/255k (auto)",
+  );
+  assert.equal(formatContextSegment({ contextUsed: 5_000 }, { autoCompact: true }), "ctx 5.0k (auto)");
 });
 
 test("model label splits provider/ into the pi form", () => {
@@ -66,29 +111,40 @@ test("model label splits provider/ into the pi form", () => {
   assert.equal(formatModelLabel(""), undefined);
 });
 
-test("identity cluster joins model · thought · mode (ctx gauge lives on the left)", () => {
-  const line = formatIdentityCluster(
-    state({
-      mode: "yolo",
-      model: "prov/model",
-      thoughtLevel: "max",
-    }),
+test("identity cluster: provider prefix only with >1 available providers", () => {
+  // 单 provider：无前缀（pi getAvailableProviderCount()>1 同规约）。
+  assert.equal(
+    formatIdentityCluster(state({ mode: "yolo", model: "zai/glm-5.3-flash", thoughtLevel: "max" })),
+    "glm-5.3-flash • max • yolo",
   );
-  assert.equal(line, "(prov) model · max · yolo");
+  // 两个 provider：前缀进场。
+  const multi = state({
+    mode: "yolo",
+    model: "zai/glm-5.3-flash",
+    modelOptions: [
+      { ref: { modelId: "glm-5.3-flash", providerId: "zai" } },
+      { ref: { modelId: "m", providerId: "other" } },
+    ] as unknown as AppStore["state"]["modelOptions"],
+    thoughtLevel: "max",
+  });
+  assert.equal(formatIdentityCluster(multi), "(zai) glm-5.3-flash • max • yolo");
 });
 
-test("agents segment appears only while running", () => {
-  const base = { mode: "yolo", model: "m" };
-  assert.equal(formatIdentityCluster(state(base)), "m · yolo");
-  assert.match(
+test("identity cluster: thinking off, agents segment", () => {
+  assert.equal(
+    formatIdentityCluster(state({ model: "m", thoughtLevel: "off" })),
+    "m • thinking off",
+  );
+  assert.equal(
     formatIdentityCluster(
       state({
-        ...base,
+        model: "m",
         subagents: { ended: { total: 0 }, running: [{}, {}] },
       } as unknown as AppStore["state"]),
-    ) ?? "",
-    /agents:2/,
+    ),
+    "m • agents:2",
   );
+  assert.equal(formatIdentityCluster(state({})), "no-model");
 });
 
 test("cwd label folds the home prefix to ~", () => {
@@ -101,7 +157,7 @@ test("cwd label folds the home prefix to ~", () => {
   assert.equal(formatCwdLabel({ cwd: "/opt/piz", home: "/home/daniel" }), "/opt/piz");
 });
 
-test("pwd line appends the branch and truncates the tail", () => {
+test("pwd line appends the branch and truncates the tail with ...", () => {
   assert.equal(formatPwdLine({ branch: "main", cwdLabel: "~/piz", width: 100 }), "~/piz (main)");
   assert.equal(formatPwdLine({ cwdLabel: "~/piz", width: 100 }), "~/piz");
   assert.equal(formatPwdLine({ branch: "main", cwdLabel: "~/piz", width: 0 }), "");
@@ -110,73 +166,134 @@ test("pwd line appends the branch and truncates the tail", () => {
   assert.ok(truncated.startsWith("~/build"), truncated);
 });
 
-test("stats line lays out left cluster + ctx gauge and right identity", () => {
+test("pwd row right-aligns the quota cluster with >=2 columns between", () => {
+  const base = { cwdLabel: "~/piz", theme: testTheme };
+  // pi addBalanceToWorkingDirectoryLine：右对齐，padding 下限 1（间距含
+  // 分隔语义 ≥2 由宽度充足时的 max(1, …)+左行未截断保证，与 pi 同式）。
+  const line = formatPwdRow({ ...base, quotaText: "5h: 99% ↻4h", width: 40 });
+  assert.ok(strip(line).endsWith("5h: 99% ↻4h"), line);
+  assert.ok(strip(line).startsWith("~/piz"), line);
+  assert.equal(visibleWidth(line), 40);
+  // 右半 ≥ 全宽：只渲染右半（截断无标记）。
+  const narrow = formatPwdRow({ ...base, quotaText: "7d: 32% ↻5d9h", width: 8 });
+  assert.equal(visibleWidth(narrow), 8);
+  // 左半按余宽 ... 截断。
+  const clipped = formatPwdRow({ ...base, branch: "main", quotaText: "5h: 99% ↻4h", width: 12 });
+  assert.equal(visibleWidth(clipped), 12);
+  // 无额度读数：退化为普通 pwd 行（含 dim 包裹）。
+  assert.equal(visibleWidth(formatPwdRow({ ...base, width: 20 })), 5);
+});
+
+test("stats line lays out left cluster + ctx gauge and right identity (pi separators)", () => {
   const s = state({
     cacheHitRate: 0.995,
     contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
     mode: "yolo",
+    model: "zai/glm-5.3-flash",
+    thoughtLevel: "max",
+    usageTotals: totals(1_900_000, 43_000, 1_800_000),
+  });
+  const left = "↑1.9M ↓43k R1.8M CH99.5% 40.4%/255k";
+  const right = "glm-5.3-flash • max • yolo";
+  assert.equal(
+    visibleWidth(formatStatsLine({ state: s, theme: testTheme, width: 100 })),
+    visibleWidth(left) + visibleWidth(right) + (100 - visibleWidth(left) - visibleWidth(right)),
+  );
+  const line = formatStatsLine({ state: s, theme: testTheme, width: 100 });
+  assert.ok(strip(line).includes(left), line);
+  assert.ok(strip(line).trimEnd().endsWith(right), line);
+});
+
+test("stats line ctx percent colors by pi thresholds inside the dim line", () => {
+  const base = {
+    contextUsage: { contextWindow: 1_000 },
+    model: "m",
+    usageTotals: totals(10, 1, 0),
+  };
+  const at = (used: number) =>
+    formatStatsLine(
+      { state: state({ ...base, contextUsage: { contextUsed: used, contextWindow: 1_000 } }), theme: testTheme, width: 200 },
+    );
+  // >90 danger、>70 warning、其余随行 dim（无独立色）。
+  assert.ok(at(950).includes("\x1b[31m95.0%/1.0k\x1b[0m"), at(950));
+  assert.ok(at(800).includes("\x1b[33m80.0%/1.0k\x1b[0m"), at(800));
+  assert.ok(at(100).includes("\x1b[2m10.0%/1.0k\x1b[0m"), at(100));
+  // (auto) 一起着色（pi 拼段后统一上色）。
+  const auto = formatStatsLine(
+    { state: state({ ...base, autoCompact: true, contextUsage: { contextUsed: 950, contextWindow: 1_000 } }), theme: testTheme, width: 200 },
+  );
+  assert.ok(strip(auto).includes("95.0%/1.0k (auto)"), auto);
+});
+
+test("cost segment renders totals-estimated dollars with a 3-decimal fixed form", () => {
+  assert.equal(formatCostSegment(undefined), undefined);
+  assert.equal(formatCostSegment(0), undefined);
+  assert.equal(formatCostSegment(0.0193), "$0.019");
+});
+
+test("stats line shows the $ segment between CH and the ctx gauge", () => {
+  const s = state({
+    contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
+    model: "zai/glm-5.3-flash",
+    usageTotals: { ...totals(34_000, 9_400, 318_000), costUsd: 0.0193 },
+  });
+  const line = formatStatsLine({ state: s, theme: testTheme, width: 200 });
+  assert.ok(strip(line).includes("↑34k ↓9.4k R318k $0.019 40.4%/255k"), line);
+});
+
+test("stats line truncates left first, then right, as the width shrinks (pi behavior)", () => {
+  const s = state({
+    cacheHitRate: 0.995,
+    contextUsage: { contextWindow: 255_000, contextUsed: 103_000 },
+    mode: "yolo",
     model: "prov/model",
     thoughtLevel: "max",
     usageTotals: totals(1_900_000, 43_000, 1_800_000),
   });
   const left = "↑1.9M ↓43k R1.8M CH99.5% 40.4%/255k";
-  const right = "(prov) model · max · yolo";
+  // 50 列：左区放得下，右区压到剩余宽度（≥2 空格间距保住；截断无标记）。
+  const mid = formatStatsLine({ state: s, theme: testTheme, width: 50 });
+  assert.equal(visibleWidth(mid), 50);
+  assert.ok(strip(mid).includes(left), mid);
+  assert.doesNotMatch(strip(mid), /yolo$/);
+  // 30 列：左区放不下 → 行尾 "..." 截断，右区退场。
+  const tiny = formatStatsLine({ state: s, theme: testTheme, width: 30 });
+  assert.equal(visibleWidth(tiny), 30);
+  assert.match(strip(tiny), /^↑1\.9M/);
+  // pi 行为：窄窗下右区可以剩 1–3 列碎片（早期 <4 列整体退场守卫已移除）。
+  const fragment = formatStatsLine({ state: s, theme: testTheme, width: 39 });
+  const stripped = strip(fragment);
+  assert.ok(stripped.startsWith(left), stripped);
+  assert.ok(visibleWidth(fragment) <= 39, fragment);
+});
+
+test("pricing: bare ids, rate lookup, cache-exclusive input basis", () => {
+  assert.equal(bareModelId("zai/glm-5.3-flash"), "glm-5.3-flash");
+  assert.equal(bareModelId("GLM-5.3-Flash"), "glm-5.3-flash");
+  assert.equal(lookupModelRates("zai/glm-5.3-flash")?.input, 0.15);
+  assert.equal(lookupModelRates("unknown-model"), undefined);
+  // AI SDK v6 inputTokens 已含 cache：成本基座去掉 cache 两项，下限 0。
   assert.equal(
-    formatStatsLine({ state: s, width: 100 }),
-    `${left}${" ".repeat(100 - visibleWidth(left) - visibleWidth(right))}${right}`,
+    cacheExclusiveInputTokens({ cacheReadTokens: 318_000, cacheWriteTokens: 0, inputWindowTokens: 352_000 }),
+    34_000,
+  );
+  assert.equal(
+    cacheExclusiveInputTokens({ cacheReadTokens: 400_000, cacheWriteTokens: 0, inputWindowTokens: 352_000 }),
+    0,
   );
 });
 
-test("stats line truncates left first, then right, as the width shrinks", () => {
-  const s = state({
-    cacheHitRate: 0.995,
-    contextUsage: { contextWindow: 255_000, contextUsed: 103_000 },
-    mode: "yolo",
-    model: "prov/model",
-    thoughtLevel: "max",
-    usageTotals: totals(1_900_000, 43_000, 1_800_000),
+test("pricing: glm-5.3-flash session math reproduces the pi footer dollar figure", () => {
+  const rates = lookupModelRates("zai/glm-5.3-flash");
+  assert.ok(rates);
+  const cost = requestCostUsd(rates!, {
+    cacheReadTokens: 318_000,
+    cacheWriteTokens: 0,
+    inputTokens: 34_000,
+    outputTokens: 9_400,
   });
-  const left = "↑1.9M ↓43k R1.8M CH99.5% 40.4%/255k";
-  // 50 列：左区 36 列放得下，右区压到剩余 12 列（≥2 空格间距保住；
-  // truncateToWidth 的截断标记带零宽 ANSI，按可见宽度断言）。
-  const mid = formatStatsLine({ state: s, width: 50 });
-  assert.equal(visibleWidth(mid), 50);
-  assert.ok(mid.startsWith(`${left}  (prov) model`), mid);
-  assert.doesNotMatch(mid, /max/);
-  // 30 列：左区放不下 → 行尾 "…" 截断，右区退场。
-  const tiny = formatStatsLine({ state: s, width: 30 });
-  assert.equal(visibleWidth(tiny), 30);
-  assert.match(tiny, /^↑1\.9M/);
-});
-
-test("right zone drops out below a 4-column window instead of leaving a fragment", () => {
-  const s = state({
-    cacheHitRate: 0.995,
-    contextUsage: { contextWindow: 255_000, contextUsed: 103_000 },
-    mode: "yolo",
-    model: "prov/model",
-    thoughtLevel: "max",
-    usageTotals: totals(1_900_000, 43_000, 1_800_000),
-  });
-  const left = "↑1.9M ↓43k R1.8M CH99.5% 40.4%/255k";
-  // 左区 35 列：38–40 列时右区余窗仅 1–3 列（`(`/`(p`/`(pr` 碎片带）→
-  // 右区整体退场，不留可见毛刺。
-  for (const width of [38, 39, 40]) {
-    assert.equal(formatStatsLine({ state: s, width }), left, `width=${width}`);
-  }
-  // 41 列：余窗回到 4 列，右区以 ≥4 列前缀重新进场，≥2 空格间距保持。
-  const back = formatStatsLine({ state: s, width: 41 });
-  assert.equal(visibleWidth(back), 41);
-  assert.ok(back.startsWith(`${left}  (pro`), back);
-  // 整段收缩谱不变式（35–100 列）：右区要么退场，要么以 ≥4 列在场。
-  for (let width = 35; width <= 100; width++) {
-    const line = formatStatsLine({ state: s, width });
-    assert.ok(visibleWidth(line) <= width, `width=${width}: ${line}`);
-    if (line === left) continue;
-    assert.ok(line.startsWith(`${left}  `), `width=${width}: ${line}`);
-    const rest = line.slice(left.length + 2);
-    assert.ok(visibleWidth(rest) >= 4, `width=${width}: ${JSON.stringify(rest)}`);
-  }
+  // ↑34k×0.15 + ↓9.4k×0.5 + R318k×0.03 (per 1M) = 0.01934 → `$0.019`。
+  assert.equal(cost.toFixed(3), "0.019");
 });
 
 test("model_complete accumulates per-request usage + latestHitRate", async () => {
@@ -247,6 +364,8 @@ test("usage accumulates across turns; per-turn summary is not adopted", async ()
     await h.flush();
     assert.deepEqual(h.store.state.usageTotals, {
       cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
       inputTokens: 1_500,
       outputTokens: 15,
     });
@@ -260,7 +379,8 @@ test("usage accumulates across turns; per-turn summary is not adopted", async ()
       }),
     );
     await h.flush();
-    assert.match(h.output(), /↑2\.0k ↓20 R0/);
+    // 零 cache 段不出（pi 门）；R0 不再出现。
+    assert.match(h.output(), /↑2\.0k ↓20(?! R)/);
   } finally {
     await h.stop();
   }
@@ -280,6 +400,8 @@ test("the same event id folds exactly once across both delivery paths", async ()
     await h.flush();
     assert.deepEqual(h.store.state.usageTotals, {
       cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
       inputTokens: 1_000,
       outputTokens: 10,
     });
@@ -313,9 +435,57 @@ test("failed model requests fold usage the same as completions", async () => {
     await h.flush();
     assert.deepEqual(h.store.state.usageTotals, {
       cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
       inputTokens: 1_200,
       outputTokens: 10,
     });
+  } finally {
+    await h.stop();
+  }
+});
+
+test("cost folds per request with the current model's catalog rates", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    h.app.applyEvent(
+      sessionEvent("model_selected", { modelSelection: { modelId: "glm-5.3-flash", providerId: "zai" } }),
+    );
+    // pi 粘贴样本复算：inputWindow 352k（含 cache 318k）→ 非 cache 34k。
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "chunk",
+        stopReason: "stop",
+        usage: {
+          cacheReadTokens: 318_000,
+          cacheWriteTokens: 0,
+          inputTokens: 352_000,
+          outputTokens: 9_400,
+        },
+      }),
+    );
+    await h.flush();
+    assert.equal(h.store.state.usageTotals?.costUsd.toFixed(3), "0.019");
+  } finally {
+    await h.stop();
+  }
+});
+
+test("unknown model keeps cost at zero and hides the segment", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    h.app.applyEvent(
+      sessionEvent("model_selected", { modelSelection: { modelId: "mystery", providerId: "acme" } }),
+    );
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "chunk",
+        stopReason: "stop",
+        usage: { inputTokens: 1_000, outputTokens: 10 },
+      }),
+    );
+    await h.flush();
+    assert.equal(h.store.state.usageTotals?.costUsd, 0);
   } finally {
     await h.stop();
   }
@@ -395,14 +565,16 @@ test("child-session usage events never reach the main footer", async () => {
     // 字符串断言分不清「未渲染」与「渲染后又消失」）。
     assert.deepEqual(h.store.state.usageTotals, {
       cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
       inputTokens: 500,
       outputTokens: 5,
     });
     h.resetOutput();
     h.app.applyEvent(sessionEvent("session_created", { contextWindow: 255_000 }));
     await h.flush();
-    assert.match(h.output(), /↑500 ↓5 R0/);
-    assert.doesNotMatch(h.output(), /↑9\.0M|9\.9M/);
+    assert.match(h.output(), /↑500 ↓5/);
+    assert.doesNotMatch(h.output(), /↑9\.0M|9\.9M|R0/);
   } finally {
     await h.stop();
   }

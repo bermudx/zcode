@@ -18,9 +18,10 @@ import {
 } from "@zcode/contracts";
 import { isMainSessionEvent, type TuiOptions } from "@zcode/tui/internals";
 import type { AppStore, UsageTotals } from "./store.js";
+import { cacheExclusiveInputTokens, lookupModelRates, requestCostUsd } from "./pricing.js";
 
 export class UsageTotalsAccumulator {
-  private totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  private totals: UsageTotals = { cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, inputTokens: 0, outputTokens: 0 };
 
   constructor(
     private readonly store: AppStore,
@@ -50,7 +51,7 @@ export class UsageTotalsAccumulator {
   }
 
   reset(): void {
-    this.totals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+    this.totals = { cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, inputTokens: 0, outputTokens: 0 };
     this.store.set("usageTotals", undefined);
     this.store.set("cacheHitRate", undefined);
   }
@@ -58,11 +59,32 @@ export class UsageTotalsAccumulator {
   private fold(usage: ModelUsage): void {
     // TokenUsage 分支只有 cacheTokens 聚合值，没有 read/write 拆分。
     const cacheRead = "cacheReadTokens" in usage ? usage.cacheReadTokens : undefined;
+    const cacheWrite = usage.cacheWriteTokens;
+    const inputWindowTokens = getModelUsageInputWindowTokens(usage) ?? 0;
+    const cacheReadTokens = Math.max(0, cacheRead ?? 0);
+    const cacheWriteTokens = Math.max(0, cacheWrite ?? 0);
+    // 契约无成本字段：按折叠时刻当前模型的目录价计价（pi 按条目模型计价，
+    // 中途换模型时这里有一次请求的归界误差，契约带模型 id 后可消除）；
+    // 未知模型成本贡献为 0。input 基座去掉 cache 两项，防重复计费。
+    const rates = lookupModelRates(this.store.state.model);
+    const costUsd = rates
+      ? requestCostUsd(rates, {
+          cacheReadTokens,
+          cacheWriteTokens,
+          inputTokens: cacheExclusiveInputTokens({
+            cacheReadTokens,
+            cacheWriteTokens,
+            inputWindowTokens,
+          }),
+          outputTokens: Math.max(0, usage.outputTokens ?? 0),
+        })
+      : 0;
     this.totals = {
-      inputTokens:
-        this.totals.inputTokens + (getModelUsageInputWindowTokens(usage) ?? 0),
+      cacheReadTokens: this.totals.cacheReadTokens + cacheReadTokens,
+      cacheWriteTokens: this.totals.cacheWriteTokens + cacheWriteTokens,
+      costUsd: this.totals.costUsd + costUsd,
+      inputTokens: this.totals.inputTokens + inputWindowTokens,
       outputTokens: this.totals.outputTokens + Math.max(0, usage.outputTokens ?? 0),
-      cacheReadTokens: this.totals.cacheReadTokens + Math.max(0, cacheRead ?? 0),
     };
     this.publish();
   }

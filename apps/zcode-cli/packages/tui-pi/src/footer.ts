@@ -5,7 +5,7 @@
 // 截断，窄终端/长 status 也不会撑高 footer）。
 
 import { Container, Loader, type Component, type TUI } from "@earendil-works/pi-tui";
-import { formatPwdLine, formatStatsLine } from "./status-line.js";
+import { formatPwdRow, formatStatsLine } from "./status-line.js";
 import type { AppStore } from "./store.js";
 import type { PiTheme } from "./theme.js";
 
@@ -23,29 +23,38 @@ export class ActivityLine extends Loader {
   }
 }
 
-/** pwd 行：`~/cwd (branch)` 单行；branch 是 CLI 启动快照，无 live watcher。 */
+/** pwd 行：`~/cwd (branch)` + 可选右对齐额度簇（provider-balance 同构），恒单行。 */
 export class PwdLine implements Component {
   private branch: string | undefined;
   private cwdLabel = "";
+  private quotaText: string | undefined;
 
   constructor(private readonly theme: PiTheme) {}
 
-  setState(cwdLabel: string, branch: string | undefined): void {
+  setState(cwdLabel: string, branch: string | undefined, quotaText?: string): void {
     this.cwdLabel = cwdLabel;
     this.branch = branch;
+    this.quotaText = quotaText;
   }
 
   invalidate(): void {}
 
   render(width: number): string[] {
-    const line = formatPwdLine({ branch: this.branch, cwdLabel: this.cwdLabel, width });
-    return [this.theme.muted(line)];
+    const line = formatPwdRow({
+      branch: this.branch,
+      cwdLabel: this.cwdLabel,
+      quotaText: this.quotaText,
+      theme: this.theme,
+      width,
+    });
+    return [line];
   }
 }
 
 /**
- * stats 行：左区用量簇 + ctx 仪表，右区身份簇。持有最新 state 在
- * render(width) 时按需收缩（formatStatsLine），恒为单行。
+ * stats 行：左区用量簇 + $ + ctx 仪表，右区身份簇。着色在
+ * formatStatsLine 内按 pi 阈值完成（整行 dim、ctx 按占用分档），持有
+ * 最新 state 在 render(width) 时按需收缩，恒为单行。
  */
 export class StatsLine implements Component {
   private state: AppStore["state"] | undefined;
@@ -59,8 +68,10 @@ export class StatsLine implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
-    const line = this.state ? formatStatsLine({ state: this.state, width }) : "";
-    return [this.theme.muted(line)];
+    const line = this.state
+      ? formatStatsLine({ state: this.state, theme: this.theme, width })
+      : "";
+    return [line];
   }
 }
 

@@ -142,18 +142,30 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   - pwd 行（`PwdLine`）：`~/cwd (branch)`，`$HOME` 折叠为 `~`。branch 取
     `TuiStartupOptions.workspaceGitBranch`（CLI 组合层启动快照，与 React
     sidebar 同一来源；无 live watcher，会话内切分支不刷新）。非 git 目录
-    只显示 cwd；行尾 "…" 截断（pi 同款）。
+    只显示 cwd；行尾 "..." 截断（pi footer 同款三连点）。
+    有额度读数时右对齐额度簇（pi goodies provider-balance
+    `addBalanceToWorkingDirectoryLine` 同构移植，`tui-pi/src/footer.ts`）：
+    右半 `theme.dim`，两区间距 ≥2 空格（padding 下限 1）；右半 ≥ 全宽时
+    只渲染右半截断；左半按余宽 "..." 截断。
   - stats 行（`StatsLine` + `status-line.ts` 纯格式化）：左区
-    `↑{in} ↓{out} R{cacheRead} CH{hit}% {ctxPct}%/{ctxWindow}`（ctx 仪表
-    紧贴用量簇，pi footer 同构；窗口缺失降级 `ctx {compact(used)}`），右区
-    `(provider) model · thought · mode · agents:N`，两区间距 ≥2 空格。
-    宽度收缩顺序：左区行尾 "…" 截断 → 右区按剩余宽度截断（pi footer 同序）；
-    右区余窗不足 4 列时整体退场——1–3 列只够渲染 `(` 级碎片，留了毛刺窗。
+    `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}] [CH{hit}%] [$cost]
+    {ctxPct}%/{ctxWindow}(auto)`（pi footer 同构同序；窗口缺失降级
+    `ctx {compact(used)}`；`W` 仅 cacheWrite>0 时显示），右区
+    `(provider) model • thought • mode • agents:N`（pi 用 `•` 分隔；
+    provider 前缀仅当可用 provider 数 >1 时显示，与 pi
+    `getAvailableProviderCount()>1` 同规约；mode/agents 为 piz 扩展段，
+    附着在 pi 段之后），两区间距 ≥2 空格。宽度收缩顺序：左区行尾 "..."
+    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）。
+    早期「右区余窗 <4 列整体退场」的防碎片守卫已移除，以 pi 行为为准。
+  - ctx 百分比按 pi 阈值着色：>90% `theme.danger`、>70% `theme.warning`、
+    其余随行 `theme.muted`；`(auto)` 直接拼在窗口紧凑计数之后
+    （`{pct}%/{win} (auto)`）。
   - 三行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
     status 也不会把 footer 撑过三行。
-  - pi footer 的 `(auto)`（auto-compact 开关）与 5h/7d 额度窗口（用户 pi 侧
-    provider-balance 扩展）在 TUI 契约均无客户端可见数据源——core 只在
-    compact 结果事件携带 `autoCompactThreshold`，非设置快照——不伪造。
+  - `(auto)`：core `AutoCompactPolicyConfig.enabled` 目前不在客户端事件面
+    暴露（compact 事件只带 `autoCompactThreshold` 结果值）。计划经 additive
+    契约字段把设置态带到 `ContextUsage`；字段落地前 footer 不显示 `(auto)`，
+    不按默认值伪造。
   - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
     维护的 session 累计。契约没有 session 级权威用量源——`turn_complete`
     / `submitPrompt` 结果的 `usage` 都是 `createModelUsageSummaryFromEvents`
@@ -167,13 +179,29 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   - `R` 为累计 `cacheReadTokens`（与 pi-mono footer 同字段语义）。
   - `CH` 取 `ModelComplete.payload.cacheHit.latestHitRate`（最近一次请求的
     命中口径，即 pi 的 `latestCacheHitRate`；0–1 小数，渲染成一位小数百分比）。
-    事件缺 `cacheHit` 时回退 session 累计口径 `cacheRead/input`（与 React
-    sidebar `cacheHitLabel` 同一公式），两者皆缺则不显示该段。
+    pi footer 同款门：`cacheRead>0 || cacheWrite>0` 且最近命中率在时才显示；
+    早期的 session 累计回退公式已删除（pi 无此回退，累计口径会把历史命中率
+    伪装成当前命中率）。
   - `ctx` 段为 `contextUsage.contextUsed / contextWindow`：窗口在时渲染
     `{pct}%/{compact(window)}`，仅有 contextUsed 时降级为 `ctx {compact}`。
   - `agents:{n}` 在 running 子代理数 > 0 时追加到右区身份簇（见下方目录段）。
-  - 不显示 `$`：契约不含模型定价来源，虚拟成本数字宁可缺省；plan 额度
-    读数属独立的 provider-balance 方向，不在本段伪造。
+  - `$cost`：契约无成本字段（core step-finish 落 `cost: 0` 占位），成本在
+    客户端按模型单价计算（pi `calculateCost` 同公式：
+    `(input·r_in + output·r_out + cacheRead·r_read + cacheWrite·r_write)/1e6`，
+    单价取 pi models-store 公开目录的 zai GLM 表，`tui-pi/src/pricing.ts`；
+    用量逐请求折叠时按折叠时刻的当前模型计价——会话中途换模型有一次请求的
+    归界误差，pi 按条目模型计价无此误差，契约带模型 id 后可消除）。单价
+    未知的模型不显示该段；累计为 $0（如 plan 内置 highspeed 档）也不显示，
+    与 pi `usageTotals.cost || usingSubscription` 门一致。
+  - 额度簇 `5h: {remaining}% ↻{countdown} · 7d: ...`：数据经共享协议
+    `usage/codingPlanQuota`（attach/additive，见 tui-attach-shared-core.md）
+    由 core 用 provider 凭据拉监控端点，返回共享 `UsageQuotaSnapshot`；
+    `tui-pi/src/quota.ts` 持有与刷新（provider-balance 同策略：空闲 60s
+    ±15s 抖动、turn 沿刷新 ≥30s 间隔、读数 30min TTL、失败保留上次读数并
+    stderr 诊断；`options.readUsageQuota` 缺席时静默）。格式化同
+    provider-balance：unit/number → 窗口标签（d/h/m）、`percentage`
+    （已用口径）翻转为剩余、`nextResetTime` 秒/毫秒双容差、窗口按秒升序、
+    倒计时 `now/m/h/d/d{h}` 空格紧凑式、百分比 0–100 收敛。
   - 紧凑计数与 pi-mono `formatTokens` 等值：<1k 原值、<10k 一位小数 `k`、
     <1M 整数 `k`、<10M 一位小数 `M`、否则整数 `M`。
   `busy`/`activeTurnId` 时活动行 spinner 转动；busy 不锁输入（steer 语义经 `sendInput`

@@ -12,6 +12,9 @@ import { createHarness } from "./harness.js";
 
 const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
 
+/** formatter 输出内嵌着色段：内容断言前剥掉 SGR。 */
+const strip = (text: string): string => text.replace(/\x1b\[[0-9;:]*m/g, "");
+
 const footerRows = (app: PiTuiApp, width = 80): string[] =>
   (app as unknown as { statusBox: { render(w: number): string[] } }).statusBox.render(
     width,
@@ -25,9 +28,11 @@ test("footer stays three rows across idle → busy → idle", async () => {
     assert.equal(rows.length, 3);
     assert.match(rows[0] ?? "", /Ready\./);
     assert.doesNotMatch(rows[0] ?? "", SPINNER);
-    // pwd 行：cwd 标签常驻（无 branch 时无括号段），stats 行是身份簇。
+    // pwd 行：cwd 标签常驻（无 branch 时无括号段），stats 行是身份簇
+    // （pi 语法：model • mode；单 provider 无前缀）。
     assert.ok((visibleWidth(rows[1] ?? "") > 0));
-    assert.match(rows[2] ?? "", /\(prov\) model · build/);
+    assert.match(strip(rows[2] ?? ""), /model • build/);
+    assert.doesNotMatch(strip(rows[2] ?? ""), /\(prov\)/);
     assert.doesNotMatch(rows[2] ?? "", /Ready\./);
 
     h.store.set("busy", true);
@@ -53,7 +58,7 @@ test("workspaceGitBranch lands in the pwd row only", async () => {
   try {
     h.store.set("workspaceGitBranch", "main");
     const rows = footerRows(h.app);
-    assert.match(rows[1] ?? "", /\(main\)$/);
+    assert.match(strip(rows[1] ?? ""), /\(main\)$/);
     assert.doesNotMatch(rows[2] ?? "", /\(main\)/);
   } finally {
     await h.stop();
@@ -65,7 +70,7 @@ test("startup options deliver the branch to the pwd row", async () => {
   try {
     await h.app.applyStartupOptions({ workspaceGitBranch: "feature/x" });
     const rows = footerRows(h.app);
-    assert.match(rows[1] ?? "", /\(feature\/x\)$/);
+    assert.match(strip(rows[1] ?? ""), /\(feature\/x\)$/);
   } finally {
     await h.stop();
   }

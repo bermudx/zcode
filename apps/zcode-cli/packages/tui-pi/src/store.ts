@@ -25,11 +25,14 @@ export type MutableRef<T> = { current: T };
 
 export const ref = <T>(initial: T): MutableRef<T> => ({ current: initial });
 
-/** Session 累计用量（pi footer ↑↓R 的累计口径），UsageTotalsAccumulator 持有。 */
+/** Session 累计用量（pi footer ↑↓R[W] 的累计口径），UsageTotalsAccumulator 持有。 */
 export type UsageTotals = {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** 客户端目录价估算（USD）；未知模型不计入，见 pricing.ts。 */
+  costUsd: number;
 };
 
 export class AppStore {
@@ -37,6 +40,8 @@ export class AppStore {
     activeTurnId: undefined as TurnId | undefined,
     approvalQueue: [] as ApprovalPrompt[],
     busy: false,
+    /** core auto-compact 设置态；契约字段落地前恒 undefined，footer 不显示 (auto)。 */
+    autoCompact: undefined as boolean | undefined,
     cacheHitRate: undefined as number | undefined,
     cacheStats: undefined as CacheStats | undefined,
     contextUsage: {} as ContextUsage,
