@@ -42,6 +42,7 @@ export type { ModelExecutionSelectionFallback } from "../model-execution.js";
 export * from "../off-peak-execution.js";
 import { modelSelectionSchema } from "../model-selection.js";
 import { APP_USAGE_RANGES, appUsageSnapshotSchema } from "../usage-stats.js";
+import type { UsageQuotaSnapshot } from "../usage-quota.js";
 import { DYNAMIC_WORKFLOW_MODES } from "../dynamic-workflow-feature.js";
 import { errorAttributionSchema } from "../zcode-protocol-v4/snapshot.js";
 // 后台详情共享精简的只读响应 schema，不携带命令或计时元数据。
@@ -2018,6 +2019,57 @@ export const zcodeSessionSubagentsParamsSchema = z
   })
   .strict();
 export type ZCodeSessionSubagentsParams = z.infer<typeof zcodeSessionSubagentsParamsSchema>;
+
+// Coding Plan 额度快照（账号级，经 session 载体访问 live app 的 Registry）。
+// 服务端用 provider 凭据拉监控端点，返回共享 UsageQuotaSnapshot 同构；
+// 展示侧（tui-pi 额度簇）负责已用→剩余翻转与窗口标签。
+export const zcodeUsageQuotaUsageDetailSchema = z
+  .object({
+    modelCode: z.string(),
+    displayName: z.string().optional(),
+    usage: z.number(),
+  })
+  .strict();
+export const zcodeUsageQuotaLimitSchema = z
+  .object({
+    type: z.string(),
+    bucketId: z.string().optional(),
+    userPlanId: z.string().optional(),
+    periodStart: z.number().optional(),
+    periodEnd: z.number().optional(),
+    period: z.string().optional(),
+    meter: z.string().optional(),
+    unitType: z.string().optional(),
+    planId: z.string().optional(),
+    unit: z.number().optional(),
+    number: z.number().optional(),
+    usage: z.number().optional(),
+    currentValue: z.number().optional(),
+    remaining: z.number().optional(),
+    percentage: z.number().optional(),
+    nextResetTime: z.number().optional(),
+    usageDetails: z.array(zcodeUsageQuotaUsageDetailSchema),
+  })
+  .strict();
+export const zcodeUsageQuotaSnapshotSchema = z
+  .object({
+    level: z.string().nullable(),
+    limits: z.array(zcodeUsageQuotaLimitSchema),
+  })
+  .strict();
+// 结构漂移门：schema 与 usage-quota.ts 的纯类型必须同步演进。漂移时此
+// 声明在编译期直接报错（true 不能赋给 false 型），运行时恒为 true。
+export const _typecheckUsageQuotaSnapshot: UsageQuotaSnapshot extends z.infer<
+  typeof zcodeUsageQuotaSnapshotSchema
+  >
+  ? true
+  : false = true;
+export type ZCodeUsageCodingPlanQuotaParams = z.infer<typeof zcodeUsageCodingPlanQuotaParamsSchema>;
+export const zcodeUsageCodingPlanQuotaParamsSchema = z
+  .object({
+    sessionId: nonEmptyString,
+  })
+  .strict();
 
 export const zcodeUsageStatsParamsSchema = z
   .object({
@@ -4255,6 +4307,7 @@ export const zcodeProtocolMethods = {
   sessionResume: "session/resume",
   sessionList: "session/list",
   sessionSubagents: "session/subagents",
+  usageCodingPlanQuota: "usage/codingPlanQuota",
   // 输入历史归 session store 所有（server 侧）；attach 客户端的 composer
   // 召回与 slash 记录都走这两个 topic，不另建 client-local 双写路径。
   sessionRecallPreviousInput: "session/recallPreviousInput",

@@ -301,6 +301,7 @@ export const runAttachCommand = async (
         readClipboardImage: deps.readClipboardImage ?? createNodeClipboardImageReader(),
         readSubagentTranscript: promptHandler.readSubagentTranscript,
         readSubagents: promptHandler.readSubagents,
+        readUsageQuota: promptHandler.readUsageQuota,
         recallPreviousInput: promptHandler.recallPreviousInput,
         removeQueuedInputs: promptHandler.removeQueuedInputs,
         requestStopActiveTurn: promptHandler.requestStopActiveTurn,

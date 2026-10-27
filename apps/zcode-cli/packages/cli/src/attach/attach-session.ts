@@ -662,15 +662,15 @@ export class AttachSessionHandle {
     });
   }
 
-  async readSubagents(input?: {
-    endedCursor?: string;
-    endedLimit?: number;
-  }): Promise<ZCodeSessionSubagentsResult> {
-    return (await this.clientOf().request(zcodeProtocolMethods.sessionSubagents, {
-      endedCursor: input?.endedCursor,
-      endedLimit: input?.endedLimit,
-      sessionId: this.sessionId,
-    })) as ZCodeSessionSubagentsResult;
+  async readSubagents(input?: { endedCursor?: string; endedLimit?: number }): Promise<ZCodeSessionSubagentsResult> {
+    const params = { endedCursor: input?.endedCursor, endedLimit: input?.endedLimit, sessionId: this.sessionId };
+    return (await this.clientOf().request(zcodeProtocolMethods.sessionSubagents, params)) as ZCodeSessionSubagentsResult;
+  }
+
+  readUsageQuota(): Promise<import("@zcode/shared").UsageQuotaSnapshot> {
+    return this.clientOf().request(zcodeProtocolMethods.usageCodingPlanQuota, { sessionId: this.sessionId }) as Promise<
+      import("@zcode/shared").UsageQuotaSnapshot
+    >;
   }
 
   async readSubagentTranscript(

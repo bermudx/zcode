@@ -75,6 +75,7 @@ import {
   zcodeSessionStopParamsSchema,
   zcodeSessionSubscribeParamsSchema,
   zcodeSessionSubagentsParamsSchema,
+  zcodeUsageCodingPlanQuotaParamsSchema,
   zcodeTaskTokenUsageParamsSchema,
   zcodeUsageStatsParamsSchema,
   zcodeWorkspaceGenerateTextParamsSchema,
@@ -1807,6 +1808,23 @@ export async function listSessions(context: ZCodeProtocolAgentServerContext, raw
     );
   }
   return { sessions };
+}
+
+/**
+ * Coding Plan 额度快照。账号级读数经 session 载体访问 live app（Registry
+ * 在 app 作用域）；无 live session 时返回 sessionUnavailable——额度簇在
+ * 客户端只在主会话绑定后接线，这条路径正常不可达。
+ */
+export async function getUsageQuota(context: ZCodeProtocolAgentServerContext, rawParams: unknown) {
+  const params = parseParams(zcodeUsageCodingPlanQuotaParamsSchema, rawParams ?? {});
+  const app = context.sessions.get(params.sessionId)?.app;
+  if (!app) {
+    throw new ProtocolRequestError(
+      zcodeProtocolErrorCodes.sessionUnavailable,
+      `Session not found: ${params.sessionId}`,
+    );
+  }
+  return await app.readCodingPlanQuota();
 }
 
 export async function listSessionSubagents(

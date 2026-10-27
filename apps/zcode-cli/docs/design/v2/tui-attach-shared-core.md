@@ -242,6 +242,23 @@ pendingInputIds}`，result `{removed: string[]}`，逐项桥
 `sessionSetThoughtLevel`，返回 `{kind:"command_result"}`；
 不会作为普通 prompt 发给模型。
 
+### Coding Plan 额度读数（usage/codingPlanQuota，2026-10-27）
+
+pi 侧 provider-balance 额度簇的 piz 对应物。数据面走协议而非客户端直连：
+
+- **新协议方法** `usage/codingPlanQuota`（params `{sessionId}`，账号级读数
+  经 session 载体访问 live app 的 Registry）：bootstrap session facade 新增
+  `readCodingPlanQuota` —— Registry 里第一个「zai-family / bigmodel-family
+  + API key 访问」的 provider 按 family 分流打监控端点（api.z.ai /
+  open.bigmodel.cn 同一路径），Bearer 凭据只进请求头；envelope
+  `success===true && code===200` 门后透传 `UsageQuotaSnapshot`（共享
+  `usage-quota.ts` 纯类型 + zod schema 双向漂移门）。zhipu-account 访问态
+  不覆盖（凭据不经 provider config 持有），无可用 provider 抛显式错误。
+- **消费面**：tui-pi 额度簇（`TuiOptions.readUsageQuota`，quota-cluster）
+  在主会话绑定后接线（attach 经 attach-tui-options，进程内经
+  tui-prompt-handler-queries），刷新策略与展示格式见 tui-pi-frontend.md
+  footer 节；`readUsageQuota` 缺席（旧 core）时簇静默。
+
 ### 自定义命令（/commands，2026-10-24）
 
 用户级（`~/.zcode/commands`）与 workspace 级（`<cwd>/.zcode/commands`）

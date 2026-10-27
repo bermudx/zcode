@@ -365,6 +365,8 @@ export interface ZCodeApp {
     endedCursor?: string;
     endedLimit?: number;
   }): Promise<import("@zcode/shared").ZCodeSessionSubagentsResult>;
+  /** Coding Plan 额度快照（账号级；Registry 里 coding plan 族 provider 的监控端点读数）。 */
+  readCodingPlanQuota(): Promise<import("@zcode/shared").UsageQuotaSnapshot>;
   readSubagentTranscript(
     childSessionId: string,
   ): Promise<import("./subagent-observation.js").SubagentTranscriptSnapshot>;

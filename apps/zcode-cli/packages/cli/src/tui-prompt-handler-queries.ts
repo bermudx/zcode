@@ -33,6 +33,11 @@ export const attachTuiAppQueries = (
       }
     );
   };
+  submitPrompt.readUsageQuota = async () => {
+    const app = await getApp();
+    if (!app.readCodingPlanQuota) throw new Error("Coding plan quota is unavailable.");
+    return app.readCodingPlanQuota();
+  };
   submitPrompt.readSubagentTranscript = async (childSessionId) => {
     const app = await getApp();
     if (!app.readSubagentTranscript) throw new Error("Subagent transcript is unavailable.");

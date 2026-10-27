@@ -582,6 +582,7 @@ export function createAttachPromptHandler(
   submitPrompt.getMainSessionId = () => current.sessionId;
   submitPrompt.listMcpServers = async () => ({});
   submitPrompt.readSubagents = (input) => current.readSubagents(input);
+  submitPrompt.readUsageQuota = () => current.readUsageQuota();
   submitPrompt.readSubagentTranscript = (childSessionId) =>
     current.readSubagentTranscript(childSessionId);
   submitPrompt.recallPreviousInput = (skip) => current.recallPreviousInputHistory(skip);

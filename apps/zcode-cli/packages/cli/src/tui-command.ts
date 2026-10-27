@@ -118,6 +118,7 @@ export const runTuiCommand = async (
         }),
         listMcpServers: promptHandler.listMcpServers,
         readSubagents: promptHandler.readSubagents,
+        readUsageQuota: promptHandler.readUsageQuota,
         readSubagentTranscript: promptHandler.readSubagentTranscript,
         listWorkflowRuns: promptHandler.listWorkflowRuns,
         replayWorkflowRuns: promptHandler.replayWorkflowRuns,

@@ -33,6 +33,7 @@ import { normalizeModelSelection, type ModelSelection } from "@zcode/provider";
 import { listMcpServerStatuses } from "../mcp-config.js";
 import { loadSessionTranscriptFromStore } from "../session-transcript.js";
 import { getLocaleConfigPath } from "./locale-selection.js";
+import { fetchCodingPlanQuota } from "./coding-plan-quota.js";
 import type { ProviderRegistryModelSource } from "./provider-registry-model-runtime.js";
 import {
   completeAuxiliaryRegistryModelSelection,
@@ -89,6 +90,7 @@ type SessionFacade = Pick<
   | "unsubscribeMcpResourceForUi"
   | "unsubscribeMcpResourcesForUi"
   | "readSubagents"
+  | "readCodingPlanQuota"
   | "readSubagentTranscript"
   | "readTodos"
   | "readTarget"
@@ -349,6 +351,8 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
         sessionStore: deps.sessionStore,
       }),
     ...createSubagentObservation(deps),
+    readCodingPlanQuota: async () =>
+      fetchCodingPlanQuota({ registry: deps.providerRegistry }),
     readTodos: async () => deps.sessionStore.readTodos({ sessionID: deps.sessionId }),
     readTarget: readTargetWithInterruptedRunRecovery,
     setCustomSessionTitle: async (input) =>

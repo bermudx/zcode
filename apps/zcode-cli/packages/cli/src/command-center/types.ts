@@ -205,6 +205,7 @@ export type CommandCenterApp = {
   getThoughtLevel?(): string | undefined;
   loadSessionTranscript?(): Promise<NonNullable<TuiSubmitPromptResult["restoredMessages"]>>;
   readSubagents?: import("@zcode/tui").TuiReadSubagents;
+  readCodingPlanQuota?: () => Promise<import("@zcode/shared").UsageQuotaSnapshot>;
   readSubagentTranscript?: import("@zcode/tui").TuiReadSubagentTranscript;
   readTarget?(): Promise<CommandCenterTarget | null>;
   setTarget?(input: {

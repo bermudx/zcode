@@ -969,3 +969,9 @@ exceptions:
       - apps/zcode-cli/packages/telemetry/src/request-security-edition/
       - packages/shared/src/request-security-edition/
     reason: coding-plan 请求签名（allowance）特性先于模块治理登记在本分支落地；三个 request-security-edition 目录自包含但模块 adopt 需单独的边界梳理，不在 tui-pi 特性范围内。
+  - id: usage-quota-seam-unmanaged-files
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/bootstrap/src/app/coding-plan-quota.ts
+      - apps/zcode-cli/packages/cli/src/tui-prompt-handler-queries.ts
+    reason: Coding Plan 额度读数（usage/codingPlanQuota，tui-pi footer 额度簇的数据面）落在上游既有的两个未接管包内——bootstrap app 层的取数模块与 cli 侧 P005 slash 转发查询面（fork 自有文件，非上游带入）；两包整包接管不在本特性范围内，处理方式照 tui-pi-frontend-seam-unmanaged-files 先例。
