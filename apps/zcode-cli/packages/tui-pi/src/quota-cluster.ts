@@ -1,7 +1,8 @@
 // 额度簇状态的唯一 owner（SubagentDirectory 同构：store 是唯一可写面，
 // 组件只读）。刷新策略与 pi goodies provider-balance 对齐：
 //   · 空闲轮询 60s ± 15s 抖动；每次刷新尝试与上一次间隔 ≥30s
-//   · turn 沿（busy 下降沿）授权刷新——用户活动值得一次真实尝试
+//   · turn 沿（busy 下降沿）授权一次刷新尝试——仍受 ≥30s 防抖（与空闲轮询
+//     同一闸门），快速连击 turn 不放大请求频率
 //   · 读数 30min TTL：超龄读数从 footer 消失，不悬挂假数据
 //   · 失败保留上次读数并写单行 stderr 诊断（诊断走 stderr，不占协议 stdout）
 // options.readUsageQuota 缺席（旧 core / 未接线）时整个簇静默。
@@ -51,16 +52,16 @@ export class QuotaCluster {
     this.refresh();
   }
 
-  /** turn 沿（busy 下降沿）调用：用户活动值得一次真实尝试。 */
+  /** turn 沿（busy 下降沿）调用：授权一次刷新尝试（仍受 ≥30s 防抖）。 */
   onTurnSettled(): void {
     if (!this.ports.readUsageQuota) return;
     this.refresh();
   }
 
   /**
-   * 拉取并落地快照。in-flight 去重；min-interval 只拦「可以再等等」的
-   * 机会性刷新，不拦启动与 turn 沿的首拍（与 provider-balance 的
-   * authoritative/opportunistic 分层同语义：这里统一为最近尝试 ≥30s）。
+   * 拉取并落地快照。in-flight 去重；min-interval 是所有路径共用的统一闸门：
+   * turn 沿与空闲轮询一并受 ≥30s 防抖（tui-pi-frontend.md「turn 沿刷新
+   * ≥30s 间隔」同语义），仅启动首拍与 reset()（lastAttemptAt 归零）绕过。
    */
   refresh(): void {
     const readUsageQuota = this.ports.readUsageQuota;
@@ -131,7 +132,6 @@ export class QuotaCluster {
 
   private scheduleIdleTimer(): void {
     const setTimer = this.ports.setTimer ?? ((callback: () => void, ms: number) => setTimeout(callback, ms));
-    const clearTimer = this.ports.clearTimer ?? ((timer: unknown) => clearTimeout(timer as never));
     const jitter = Math.floor(Math.random() * IDLE_REFRESH_JITTER_MS);
     this.clearTimer(this.idleTimer);
     this.idleTimer = setTimer(() => {

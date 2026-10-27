@@ -2057,13 +2057,19 @@ export const zcodeUsageQuotaSnapshotSchema = z
     limits: z.array(zcodeUsageQuotaLimitSchema),
   })
   .strict();
-// 结构漂移门：schema 与 usage-quota.ts 的纯类型必须同步演进。漂移时此
-// 声明在编译期直接报错（true 不能赋给 false 型），运行时恒为 true。
-export const _typecheckUsageQuotaSnapshot: UsageQuotaSnapshot extends z.infer<
-  typeof zcodeUsageQuotaSnapshotSchema
-  >
+// 结构漂移门：schema 与 usage-quota.ts 的纯类型必须同步演进，双向收敛。
+// 单向 extends 抓不住 schema 侧放松（字段转 optional、新增可选字段），所以
+// 用 Equal（同型判定）而非双向 extends；任一侧漂移此声明在编译期直接报错
+// （true 不能赋给 false 型），运行时恒为 true。
+type SchemaTypeEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B
+  ? 1
+  : 2
   ? true
-  : false = true;
+  : false;
+export const _typecheckUsageQuotaSnapshot: SchemaTypeEqual<
+  UsageQuotaSnapshot,
+  z.infer<typeof zcodeUsageQuotaSnapshotSchema>
+> = true;
 export type ZCodeUsageCodingPlanQuotaParams = z.infer<typeof zcodeUsageCodingPlanQuotaParamsSchema>;
 export const zcodeUsageCodingPlanQuotaParamsSchema = z
   .object({

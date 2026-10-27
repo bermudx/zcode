@@ -8,6 +8,7 @@ import {
   zcodeSessionEventsResultSchema,
   zcodeSessionMessagesResultSchema,
   zcodeSessionRecallPreviousInputResultSchema,
+  zcodeUsageQuotaSnapshotSchema,
   type ZCodeSessionRawEvent,
   type ZCodeSessionStateSnapshot,
   type ZCodeSessionSubagentsResult,
@@ -667,10 +668,9 @@ export class AttachSessionHandle {
     return (await this.clientOf().request(zcodeProtocolMethods.sessionSubagents, params)) as ZCodeSessionSubagentsResult;
   }
 
-  readUsageQuota(): Promise<import("@zcode/shared").UsageQuotaSnapshot> {
-    return this.clientOf().request(zcodeProtocolMethods.usageCodingPlanQuota, { sessionId: this.sessionId }) as Promise<
-      import("@zcode/shared").UsageQuotaSnapshot
-    >;
+  async readUsageQuota(): Promise<import("@zcode/shared").UsageQuotaSnapshot> {
+    // 协议面严格收（与相邻 read* 同模式）；外部 wire 的容错规整在 core 侧完成。
+    return zcodeUsageQuotaSnapshotSchema.parse(await this.clientOf().request(zcodeProtocolMethods.usageCodingPlanQuota, { sessionId: this.sessionId }));
   }
 
   async readSubagentTranscript(

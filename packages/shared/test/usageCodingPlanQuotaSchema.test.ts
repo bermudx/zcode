@@ -35,8 +35,20 @@ describe("usage/codingPlanQuota schema", () => {
     expect(zcodeUsageQuotaSnapshotSchema.parse(snapshot)).toEqual(snapshot);
   });
 
+  it("keeps usageDetails required at the protocol boundary; external wire is normalized core-side", () => {
+    // 外部监控 wire 里 usageDetails 可缺席（core 侧 parseCodingPlanQuotaEnvelope
+    // 兜底为 []），协议面不得回退成那种形状——客户端严格收。
+    expect(() =>
+      zcodeUsageQuotaSnapshotSchema.parse({
+        level: null,
+        limits: [{ type: "TOKENS_LIMIT", usage: 1 }],
+      }),
+    ).toThrow(/usageDetails/);
+  });
+
   it("keeps the zod schema structurally aligned with the pure types", () => {
-    // 编译期 Equal 门落到运行时可断言的常量；失配 = schema 与类型漂移。
+    // 编译期 Equal 门（双向同型判定）落到运行时可断言的常量；任一侧漂移
+    // （含 schema 侧放松字段）= schema 与类型漂移。
     expect(_typecheckUsageQuotaSnapshot).toBe(true);
   });
 });

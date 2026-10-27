@@ -443,6 +443,61 @@ test("recallPreviousInput → session/recallPreviousInput", async () => {
   }
 });
 
+// readUsageQuota → usage/codingPlanQuota：协议面客户端用共享 schema 严格收
+// （不再 cast）；外部监控 wire 的容错规整在 core 侧 parseCodingPlanQuotaEnvelope。
+test("readUsageQuota → usage/codingPlanQuota parses the protocol result strictly", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "usage/codingPlanQuota") {
+      return {
+        level: "glm-coding-plan",
+        limits: [
+          {
+            type: "TOKENS_LIMIT",
+            usage: 100,
+            usageDetails: [{ modelCode: "glm-5.3-flash", usage: 100 }],
+          },
+        ],
+      };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    const snapshot = await handle.readUsageQuota();
+    const quota = core.requests.find((r) => r.method === "usage/codingPlanQuota");
+    assert.equal(quota?.params.sessionId, SID);
+    assert.equal(snapshot.level, "glm-coding-plan");
+    assert.equal(snapshot.limits[0]?.type, "TOKENS_LIMIT");
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("readUsageQuota fails loudly on protocol drift instead of casting", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "usage/codingPlanQuota") {
+      // 外部 wire 的形状（usageDetails 可缺席）不允许出现在协议面：
+      // core 侧负责兜底成共享形状，客户端遇漂移必须显式失败。
+      return { level: null, limits: [{ type: "TOKENS_LIMIT" }] };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    await assert.rejects(handle.readUsageQuota(), /usageDetails/);
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 // 回归证据（P004-F3，2026-10-26 评审）：断线状态行曾硬编码法语（无视
 // --locale）。状态文案必须走 i18n 目录：tui.connection.* 三键在全部 locale
 // 文件里都有，且不同 locale 解析出各自文案。

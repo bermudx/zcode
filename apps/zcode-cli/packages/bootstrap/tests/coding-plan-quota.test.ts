@@ -73,14 +73,61 @@ describe("resolveCodingPlanQuotaProvider", () => {
 });
 
 describe("parseCodingPlanQuotaEnvelope", () => {
-  it("accepts the success/200 envelope and passes limits through", () => {
+  it("accepts the success/200 envelope and normalizes limits to the shared shape", () => {
     const snapshot = parseCodingPlanQuotaEnvelope({
       code: 200,
-      data: { level: "glm-coding-plan", limits: [{ percentage: 1, type: "TOKENS_LIMIT", usageDetails: [] }] },
+      data: {
+        level: "glm-coding-plan",
+        limits: [
+          {
+            percentage: 1,
+            serverOnlyField: "ignored",
+            type: "TOKENS_LIMIT",
+            unit: "3", // 不合型 → 字段缺席，entry 存活
+            usage: 100,
+            usageDetails: [{ modelCode: "glm-5.3-flash", note: "x", usage: 100 }],
+          },
+          { type: "", usageDetails: [] }, // 空 type → 整条丢弃
+          { usageDetails: [] }, // 无 type → 整条丢弃
+          { type: "TOKENS_LIMIT", usageDetails: "junk" }, // 非 array usageDetails → []
+        ],
+      },
       success: true,
     });
     expect(snapshot?.level).toBe("glm-coding-plan");
-    expect(snapshot?.limits).toHaveLength(1);
+    expect(snapshot?.limits).toHaveLength(2);
+    expect(snapshot?.limits[0]).toEqual({
+      percentage: 1,
+      type: "TOKENS_LIMIT",
+      usage: 100,
+      usageDetails: [{ modelCode: "glm-5.3-flash", usage: 100 }],
+    });
+    expect(snapshot?.limits[1]).toEqual({ type: "TOKENS_LIMIT", usageDetails: [] });
+  });
+
+  it("drops usageDetail entries without a modelCode and defaults their usage to 0", () => {
+    const snapshot = parseCodingPlanQuotaEnvelope({
+      code: 200,
+      data: {
+        level: null,
+        limits: [
+          {
+            type: "TOKENS_LIMIT",
+            usageDetails: [
+              { modelCode: "glm-5.3" },
+              { usage: 5 },
+              "junk",
+              { displayName: "GLM 5.3 Flash", modelCode: "glm-5.3-flash", usage: "7" },
+            ],
+          },
+        ],
+      },
+      success: true,
+    });
+    expect(snapshot?.limits[0]?.usageDetails).toEqual([
+      { modelCode: "glm-5.3", usage: 0 },
+      { displayName: "GLM 5.3 Flash", modelCode: "glm-5.3-flash", usage: 0 },
+    ]);
   });
 
   it("rejects non-success envelopes and missing limits", () => {
@@ -114,6 +161,22 @@ describe("fetchCodingPlanQuota", () => {
         registry: registry([provider({ apiKey: "secret-key", group: "zai-family", providerId: "zai" })]),
       }),
     ).rejects.toThrow(CodingPlanQuotaUnavailableError);
+  });
+
+  it("maps a non-JSON 200 body to the explicit quota-unavailable error", async () => {
+    await expect(
+      fetchCodingPlanQuota({
+        fetchImpl: async () =>
+          ({
+            json: async () => {
+              throw new SyntaxError("Unexpected token < in JSON at position 0");
+            },
+            ok: true,
+            status: 200,
+          }) as unknown as Response,
+        registry: registry([provider({ apiKey: "secret-key", group: "zai-family", providerId: "zai" })]),
+      }),
+    ).rejects.toThrow(/not valid JSON/);
   });
 
   it("fails closed when no provider carries an API key", async () => {
