@@ -45,7 +45,7 @@ Bash tool 运行时有三种名字相近但职责不同的 snapshot：
    - functions/options/aliases 的导出策略：只在用户 rc 存在时导出，过滤单下划线补全函数，options/aliases 输出最多 1000 行，并在 Git Bash/MSYS/Cygwin 下过滤 `winpty` aliases。
    - snapshot creation script 使用 adapter 侧 host path 写文件；Git Bash path 转换只发生在后续真实命令 source snapshot 时。
    - 创建成功后，后续 Bash tool command 会先 source 这个 snapshot，再用非 login shell 执行真实命令，即 spawn args 从 `-c -l <command>` 变为 `-c <command>`。
-   - 创建失败时降级为原行为，继续使用 `-c -l <command>`。
+   - 创建失败时降级为原行为，继续使用 `-c -l <command>`；失败本身经注入的 Logger 打一条 debug 诊断（`event: exec.shell_init_snapshot_failed`，含 error/shellPath/rootDir），不再无声（REM-F3，2026-10-26）。
    - hot resume 如果仍复用同一个 adapter/manager，可以继续复用当前进程内 ready snapshot。
    - cold resume 不恢复 snapshot 文件 path；恢复 session shell selection 后，第一次 Bash toolcall 重新创建 shell init snapshot。
    - cold resume 或新 adapter 不会扫描/复活旧 snapshot，也不会按 session/hash 复用同名文件；新进程会创建新的随机 snapshot 文件，旧残留只由 retention cleanup 处理。
