@@ -3,7 +3,7 @@
 // usage, reports preview, log tail. State comes from the shared
 // TuiWorkflowMirror reducer fed by replay + live progress envelopes.
 
-import type { Component } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type {
   TuiWorkflowMirror,
   TuiWorkflowRunSeed,
@@ -28,9 +28,14 @@ const ACTOR_GLYPHS: Record<string, string> = {
 const MAX_EXPANDED_ACTORS = 8;
 const MAX_LOG_LINES = 6;
 const MAX_REPORT_PREVIEW_LINES = 4;
+const RUN_FIELD_CELLS = 40;
+const ACTOR_NAME_CELLS = 24;
+const TOOL_TARGET_CELLS = 30;
 
+// 旧的 `truncate` 按 UTF-16 length 切：40 个 CJK 字符 = 80 列，且可能切进
+// ANSI 转义序列中间。改用 pi-tui 的宽度感知截断（grapheme + ANSI 安全）。
 const truncate = (text: string, width: number): string =>
-  text.length > width && width > 1 ? `${text.slice(0, width - 1)}…` : text;
+  truncateToWidth(text, Math.max(0, width), "…");
 
 export class WorkflowCard implements Component {
   private mirror: TuiWorkflowMirror;
@@ -65,14 +70,19 @@ export class WorkflowCard implements Component {
   render(width: number): string[] {
     const runs = this.mirror.state.runs;
     if (runs.length === 0) return [];
+    const lineWidth = Math.max(1, width);
     const lines: string[] = [];
     for (const run of runs) {
       const seed = this.mirror.seedByRunId[run.runId];
-      lines.push(`  ${this.runLine(run, seed, width)}`);
+      lines.push(`  ${this.runLine(run, seed, Math.max(1, lineWidth - 2))}`);
       if (!this.expanded) continue;
       lines.push(...this.expandedLines(run, width));
     }
-    return lines;
+    // 兜底（同 rows.ts clampLines）：WorkflowCard 渲染在 MessageRow 的
+    // clampLines 之外，任何一行超过终端宽度都会让 doRender 抛错崩掉客户端。
+    return lines.map((line) =>
+      visibleWidth(line) <= lineWidth ? line : truncateToWidth(line, lineWidth, "…"),
+    );
   }
 
   private runLine(
@@ -89,14 +99,17 @@ export class WorkflowCard implements Component {
       (run.usage.nodesUnlistedSettled ?? 0);
     const actors = run.actors.length;
     const parts = [
-      `${status.pick(theme)(status.glyph)} ${theme.text(truncate(label, 40))}`,
+      `${status.pick(theme)(status.glyph)} ${theme.text(truncate(label, RUN_FIELD_CELLS))}`,
       theme.muted(run.status),
       theme.muted(`${settled}/${used} nodes`),
     ];
     if (actors > 0) parts.push(theme.muted(`${actors} actors`));
-    if (run.error) parts.push(theme.danger(truncate(run.error, 40)));
+    if (run.error) parts.push(theme.danger(truncate(run.error, RUN_FIELD_CELLS)));
     if (!this.expanded) parts.push(theme.muted("(+ to expand)"));
-    return parts.join(theme.muted("  ·  ")).slice(0, Math.max(width, 40));
+    // 旧实现 `slice(0, Math.max(width, 40))` 有三个坑：按 UTF-16 单位切、
+    // 窄终端保 40 格、可能切进 ANSI 中间（悬挂转义）。改为按可见宽度截到
+    // 调用方预算（已扣除行首 2 格缩进），width 来自真实终端宽度。
+    return truncateToWidth(parts.join(theme.muted("  ·  ")), Math.max(1, width), "…");
   }
 
   private expandedLines(run: WorkflowRunState, width: number): string[] {
@@ -111,10 +124,10 @@ export class WorkflowCard implements Component {
       const active = nodes.find((n) => n.phase === "executing" || n.phase === "repairing");
       const lastTool = active?.lastTool;
       const toolText = lastTool
-        ? `  ${theme.dim(lastTool.name)}${lastTool.target ? theme.muted(` ${truncate(lastTool.target, 30)}`) : ""}`
+        ? `  ${theme.dim(lastTool.name)}${lastTool.target ? theme.muted(` ${truncate(lastTool.target, TOOL_TARGET_CELLS)}`) : ""}`
         : "";
       lines.push(
-        `    ${theme.muted(glyph)} ${theme.text(truncate(name, 24))} ${theme.muted(actor.status)}${toolText}`,
+        `    ${theme.muted(glyph)} ${theme.text(truncate(name, ACTOR_NAME_CELLS))} ${theme.muted(actor.status)}${toolText}`,
       );
     }
     if (run.actors.length > MAX_EXPANDED_ACTORS) {
