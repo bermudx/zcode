@@ -373,3 +373,138 @@ No stray processes left behind (checked after attach/bootstrap runs).
 - **A6**: P003-F3's description of what the in-process runtime does with an
   unmapped `delivery:"queue"` is ASSUMPTION (the code comment's claim was not
   traced into the runtime).
+
+## Dispositions (fix pass 2026-10-26)
+
+Fix pass on `main`: review recorded at `df2f5840`; area branches
+`patch/p001-signing-remediation` (merge `bcd8054f`),
+`patch/p004-attach-remediation` (merge `cdb9f4de`),
+`patch/p003-frontend-remediation` (merge `9697a8d5`),
+`patch/p005-remainder-remediation` (merge `43092fe1`); docs `d273d6ed`.
+Every fix landed test-first (each test observed failing for the right reason
+before its fix); P004-F1 additionally spot-checked in the main session by
+reverting the production fix (2/2 tests fail) and restoring (2/2 pass).
+Final-main battery observed by the verifier: adapters signing+bash+shell-init
+36/36, bootstrap 13/13, spawn+attach-client 18/18,
+cli.unit+attach-adapter+resume-target+model-option 263/263, shared attach
+contract 4/4, tui-pi 194/194, touched tui set 44/44; root typecheck, CLI
+typecheck 34/34, root lint 0 errors/96 upstream warnings, CLI lint
+0 errors/71 warnings/13 accepted (baseline match), architecture:check 0.
+
+- **P001-F2** — fixed `5b68acae`: fail-loud `invalid-config` chosen (sibling
+  `resolveHandshakeUrl` already throws `invalid-config`; baseURL never injected
+  later; empty baseURL would misroute credentials). Test: `fails closed with
+  invalid-config when a signing-required provider has no baseURL`
+  (client-request-signing).
+- **P001-F1** — fixed `2b6a81ae`: smallest-direction choice = hoist bypass into
+  shared `ClientSigningKeyState` (option c); a reused signer would wrap a stale
+  transport (a is wrong) and closure caching (b) widens the blast radius into
+  model-execution wiring. Test: `keeps bypass engaged across signer rebuilds
+  caused by a new transport identity`.
+- **P001-F3** — fixed `340a5346`: observer errors routed to `logger.debug`
+  (`model.client_signing.observation_failed`), request path still guarded.
+  Test: `reports observer failures to the debug log without breaking the
+  request`.
+- **P001-F4** — fixed `c60b9c16`: `timeout.unref?.()` in the handshake. Test:
+  `unrefs the abandoned handshake timeout handle`.
+- **P001-F5** — no-fix per review direction (deliberate single-user cache;
+  revisit only if account rotation becomes real).
+- **P004-F1** — fixed `8e1626f6`: per-turn onEvent sink unsubscribed in the
+  send-failure catch and the turn-promise finally (monolith-mirror). Tests:
+  `submitPrompt 的 per-turn onEvent 回合结束即摘除：不随回合累积、无陈旧回调`,
+  `submitPrompt 发送失败后 per-turn onEvent 即摘除` (attach-adapter).
+- **P004-F2** — fixed `441ffb3b`: bare in-TUI `/resume` now uses the shared
+  recency ruling (`pickMostRecentResumeSessionId`, moved with
+  `resolveAttachResumeTarget` into attach-tui-options to avoid an import
+  cycle; attach-command re-exports). Tests: `TUI 裸 /resume 按 updatedAt 取最
+  近会话，而不是列表末位`, `TUI 裸 /resume 空列表显式报错`.
+- **P004-F3** — fixed `032b9605` (+doc `e18bc56b`): three status strings now
+  `tui.connection.{lost,reconnected,reconnectedSessionUnavailable}` via
+  `getZCodeCopy`; en-US/zh-CN catalogs; French comments translated to Chinese.
+  Tests: `断线状态文案三键在 en-US/zh-CN 目录齐全且按 locale 区分`,
+  `AttachRuntime 断线状态行按 locale 走 i18n 目录`.
+- **P004-F4** — fixed `152e82a9`: `createAttachTransportLogger` (≥60s-throttled
+  stderr) wired into `connectAttachClient` and `AttachRuntime` from
+  `runAttachCommand`. Tests: `runAttachCommand 给传输接 stderr 诊断：畸形行
+  有日志、连接继续`, `malformed line 产生 logger.warn 诊断且连接继续`.
+- **P004-F5** — fixed `39b8292e`: `--resume` without a value errors, mirroring
+  `--model`. Test: `zcode-attach --resume 缺值报错，不静默降级为新会话`.
+- **P004-F6** — fixed `92dcd8d8`: 4MB named line cap; oversized/growing buffer
+  fails the connection (pending rejected, socket destroyed, warn logged).
+  Test: `超长无换行流触发行上限显式失败`.
+- **P003-F1** — fixed `e7172220`: harness `flush` is now poll+deadline (5ms
+  interval, 5s deadline, fail-loud timeout); the shell-test path contains no
+  fixed sleep (mechanism check). Tests: `tests/harness-flush.test.ts` (3
+  cases) + full shell suite green.
+- **P003-F2** — fixed `b3171184`: pi-tui `truncateToWidth`/`visibleWidth`
+  replace UTF-16 slicing in workflow.ts and info-panel.ts; run lines clamp to
+  real width minus indent plus a final clamp pass. Tests: `run line never
+  exceeds a narrow terminal with a long CJK label (noColor)`, `run line with
+  ANSI styles truncates to width without cutting mid-escape` (+ info-panel CJK
+  in panels.test.ts). Live narrow-terminal repro remains a labeled CI gap;
+  unit tests pin the same invariant pi-tui's `doRender` enforces.
+- **P003-F3** — fixed `047abbbc` (+spec `0e87b4d8`): A6 trace resolved (see
+  below) — the core parks the input on its queue lane with no in-process
+  consumer; explicit reject chosen (local replay fails the triviality bar: no
+  settle signal in-process without a new state machine). In-process handler
+  returns `queue_unavailable`; shared app-submit surfaces "Follow-up queuing
+  is unavailable…" and keeps the draft. Tests: `in-process TUI sendInput
+  rejects queue delivery without touching the runtime` (cli.unit),
+  `queue_unavailable surfaces a status and restores the draft, never a queue
+  row` (tui-pi submit).
+- **P003-F4** — fixed `f53126ce` (+refactor `ef948dc2` to stay under the
+  800-line gate): single-line stderr diagnostic per replay/list failure,
+  startup resilient. Test: `workflow seed failures surface a stderr diagnostic
+  and keep the TUI alive`.
+- **P003-F6** — no-fix per review direction (documented tradeoffs).
+- **P002-F5** — no-fix per review direction (respects the internals contract;
+  React-edge removal is optional future work).
+- **P005-F1** — fixed `ff7bf885` (test-only; production wiring was present):
+  `TUI submit prompt handler forwards an unresolvable slash input to the app
+  verbatim` (cli.unit) — verified to fail when the flag is dropped.
+- **P005-F2** — fixed (docs) `d273d6ed`: FORK.md P005 coverage cell now states
+  the real coverage incl. the new TUI-lane pin; remaining gap (attach
+  unresolved-slash with attachments over a real socket) named.
+- **REM-F1** — no-fix per review direction (fork always ships the pair; noted
+  for build-breakage triage).
+- **REM-F3** — fixed `fc7cde07` (+doc `9e91afdc`): injected-`Logger` debug
+  diagnostic (`exec.shell_init_snapshot_failed`) on snapshot-creation failure;
+  login-shell fallback unchanged; wired at all three construction sites.
+  Tests: `diagnoses failed snapshot creation via the injected logger while
+  keeping the fallback` (shell-init-snapshot), `diagnoses shell init snapshot
+  failure and falls back to a login shell` (exec).
+- **REM-F4** — no-fix per review direction (informational; the cache lifetime
+  is the patch's point).
+- **INV-1** — fixed (docs) `d273d6ed`: FORK.md inventory refreshed — P003 row
+  gains the `!` shell escape with corrected HEAD semantics (deterministic
+  non-interactive `/bin/bash -c`, superseding the interactive-shell variant),
+  plus a "Later carried behavior" appendix covering all twelve uncited areas
+  with SHAs.
+
+### A6 resolution (P003-F3 trace, 2026-10-26)
+
+Traced end-to-end and re-verified in the main session by reading each cited
+line: the in-process handler strips `delivery`; input-facade defaults to
+`"auto"` (`bootstrap/src/app/input-facade.ts:197`); the busy steerable branch
+admits it via `steerTurn` with no delivery field
+(`core/src/runtime/methods/prompt-admission.ts:52-84`); the item lands on the
+core queue lane (`pendingInputDelivery` undefined → "queue",
+`core/src/runtime/methods/steering.ts:472-475`) which inline drain never
+consumes (guide lane only, `:1199-1207` comment "普通 queue 只能由 bootstrap
+在 session-ready + goal gate 后提升"); the only promoter (`sendQueuedNow`
+auto-drain) is constructed solely by the v4 bridge
+(`bootstrap/src/zcode-protocol-v4/`), never in-process. At settle the UI
+clears the queue area and the input is silently lost — the review's claim
+holds, mechanism now pinned. Explicit reject implemented (above).
+
+### Assumption outcomes after the fix pass
+
+- A1/A2 (scope) — untouched; the fix pass targeted the same base..HEAD set.
+- A3 (subagent evidence) — superseded for fixes: the verifier re-ran every
+  cited suite itself on each branch and on final main (counts above).
+- A4 (P001-F1 frequency inferred) — mechanism now pinned by a regression test
+  through the real execution/key-cache path; live-gateway frequency still
+  unobserved, by design (no model calls in this pass).
+- A5 (P003-F2 crash not reproduced live) — unchanged; unit tests pin the
+  invariant, live narrow-terminal repro remains a labeled gap.
+- A6 — resolved, see above.
