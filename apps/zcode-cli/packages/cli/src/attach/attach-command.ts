@@ -18,6 +18,7 @@ import { createNodeClipboardImageReader } from "../clipboard-image.js";
 import { createNodeClipboardTextWriter } from "../clipboard-text.js";
 import { listSlashCommandSuggestions } from "../command-center.js";
 import { ensureServer } from "../app-server-spawn.js";
+import { connectAttachClient } from "./attach-client.js";
 import { resolveLocale } from "@zcode/i18n";
 import { resolveWorkspaceGitBranch } from "../tui-workspace-git.js";
 import { loadPiTuiRuntime } from "../tui-pi-runtime-loader.js";
@@ -50,6 +51,25 @@ const createHerdrDiagnosticWriter = (
     stderr.write(
       `herdr report failed: ${error instanceof Error ? error.message : String(error)}\n`,
     );
+  };
+};
+
+/** attach 传输诊断：与 herdr 同款 ≥60s 节流的 stderr writer。传输内建信号
+ *  （丢畸形行、坏协议消息、socket 错误、resubscribe 失败）若不接 logger 就
+ *  全部静默成 no-op——坏流静默降级违背“跑了就要有信号”。诊断走 stderr，
+ *  绝不进协议 stdout。 */
+const createAttachTransportLogger = (
+  stderr: { write(chunk: string): unknown },
+): { warn: (message: string, context?: Record<string, unknown>) => void } => {
+  let lastWrittenAt = 0;
+  return {
+    warn: (message, context) => {
+      const now = Date.now();
+      if (now - lastWrittenAt < 60_000) return;
+      lastWrittenAt = now;
+      const detail = context === undefined ? "" : ` ${JSON.stringify(context)}`;
+      stderr.write(`attach transport: ${message}${detail}\n`);
+    },
   };
 };
 
@@ -98,6 +118,9 @@ export const runAttachCommand = async (
       deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
       resolveLocale(options.locale, options.detectedLocale);
     const { socketPath } = await ensureServer({ env, version, workspace });
+    // 传输诊断（丢畸形行/socket 错误等）经节流 stderr logger 接进客户端连接
+    // 与 runtime 自身；不传则传输层全部 optional-chain 成静默 no-op。
+    const transportLogger = createAttachTransportLogger(ctx.stderr);
     const runtime = new AttachRuntime({
       socketPath,
       workspace: workspaceRef,
@@ -106,6 +129,8 @@ export const runAttachCommand = async (
       ensureConnected: async () => ({
         socketPath: (await ensureServer({ env, version, workspace })).socketPath,
       }),
+      connect: (path) => connectAttachClient(path, { logger: transportLogger }),
+      logger: transportLogger,
       locale: startupLocale,
     });
     // herdr reporter：必须在 createAttachPromptHandler 注册首个句柄前挂好

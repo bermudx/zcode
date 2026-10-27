@@ -8,6 +8,7 @@ import {
   AttachProtocolError,
   connectAttachClient,
   type AttachClient,
+  type AttachClientLogger,
 } from "../src/attach/attach-client.js";
 
 type FakeServer = {
@@ -77,10 +78,11 @@ async function startFakeServer(dir: string): Promise<FakeServer> {
 
 async function withFakeServer(
   run: (fake: FakeServer, client: AttachClient) => Promise<void>,
+  clientOptions: { logger?: AttachClientLogger } = {},
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "attach-client-test-"));
   const fake = await startFakeServer(dir);
-  const client = await connectAttachClient(fake.socketPath);
+  const client = await connectAttachClient(fake.socketPath, clientOptions);
   try {
     await run(fake, client);
   } finally {
@@ -151,6 +153,31 @@ test("server 反向请求由 handler 应答", async () => {
     });
     assert.deepEqual(answered.result, { nativeSearchEnhancementsEnabled: false });
   });
+});
+
+// P004-F4：注入 logger 时传输级诊断（丢畸形行等）必须产生 warn，且连接继续。
+test("malformed line 产生 logger.warn 诊断且连接继续", async () => {
+  const warnings: string[] = [];
+  await withFakeServer(
+    async (fake, client) => {
+      const received: string[] = [];
+      client.onNotification((method) => received.push(method));
+      for (const socket of fake.connections()) {
+        socket.write("{{{not json\n");
+        socket.write(`${JSON.stringify({ method: "session/rawEvent", params: {} })}\n`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.deepEqual(warnings, ["attach client dropped malformed line"]);
+      assert.deepEqual(received, ["session/rawEvent"], "connection must continue after a dropped line");
+    },
+    {
+      logger: {
+        warn: (message) => {
+          warnings.push(message);
+        },
+      },
+    },
+  );
 });
 
 test("socket 关闭拒绝 pending 并 settle closed", async () => {

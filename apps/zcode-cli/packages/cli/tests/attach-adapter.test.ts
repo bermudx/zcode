@@ -102,6 +102,8 @@ type FakeCore = {
   socketPath: string;
   notify: (params: unknown) => void;
   sendRequest: (id: string, method: string, params: unknown) => void;
+  /** 原样写一行（不套 JSON 帧）：注入畸形行等传输级垃圾。 */
+  raw: (line: string) => void;
   kill: () => Promise<void>;
   close: () => Promise<void>;
 };
@@ -109,7 +111,7 @@ type FakeCore = {
 /** 假 core：按 method 路由到应答表；rawEvent 通过注入的 sender 回放。 */
 async function startFakeCore(
   socketPath: string,
-  responder: (request: Captured, notify: (params: unknown) => void) => unknown,
+  responder: (request: Captured, notify: (params: unknown) => void, raw: (line: string) => void) => unknown,
 ): Promise<FakeCore> {
   const requests: Captured[] = [];
   const responses: CapturedResponse[] = [];
@@ -123,6 +125,9 @@ async function startFakeCore(
     for (const socket of sockets) {
       socket.write(`${JSON.stringify({ id, method, params })}\n`);
     }
+  };
+  const raw = (line: string): void => {
+    for (const socket of sockets) socket.write(line);
   };
   const server: Server = createServer((socket) => {
     sockets.add(socket);
@@ -158,7 +163,7 @@ async function startFakeCore(
           params: message.params ?? {},
         };
         requests.push(request);
-        const result = responder(request, notify);
+        const result = responder(request, notify, raw);
         Promise.resolve(result)
           .then((value) =>
             socket.write(`${JSON.stringify({ id: message.id, result: value ?? {} })}\n`),
@@ -195,6 +200,7 @@ async function startFakeCore(
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
     notify,
+    raw,
     requests,
     responses,
     sendRequest,
@@ -602,6 +608,66 @@ test("协议版本不匹配 → 退出码 2 与可操作错误", async () => {
     const exitCode = await runAttachCommand(ctx, {} as never, deps, "0.0.0-test");
     assert.equal(exitCode, 2);
     assert.match(stderrChunks.join(""), /Shared core protocol v999/);
+  } finally {
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 回归证据（P004-F4，2026-10-26 评审）：生产路径曾不给 connectAttachClient /
+// AttachRuntime 传 logger——传输内建诊断（丢畸形行、坏协议消息、socket 错误）
+// 全部 optional-chain 成 no-op，坏流静默降级。runAttachCommand 必须把（节流的）
+// stderr 诊断 logger 接进两条路径。
+test("runAttachCommand 给传输接 stderr 诊断：畸形行有日志、连接继续", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-transport-log-"));
+  const workspace = join(dir, "workspace");
+  const { resolveSocketPath } = await import("../src/app-server-spawn.js");
+  const socketPath = resolveSocketPath(
+    { workspacePath: workspace },
+    { env: { ZCODE_DATA_BASE_DIR: dir } },
+  );
+  await (await import("node:fs/promises")).mkdir(
+    (await import("node:path")).dirname(socketPath),
+    { recursive: true },
+  );
+  // 第一条到达的写往连接注入一行畸形 NDJSON；正式 create 响应随后照发。
+  const core = await startFakeCore(socketPath, (request, _notify, raw) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/create") {
+      raw("{{{not json\n");
+      return makeSnapshot();
+    }
+    return {};
+  });
+  const { runAttachCommand } = await import("../src/attach/attach-command.js");
+  const stderrChunks: string[] = [];
+  const ctx = {
+    argv: [],
+    stderr: {
+      write: (chunk: string) => {
+        stderrChunks.push(chunk);
+        return true;
+      },
+    } as never,
+    stdin: process.stdin,
+    stdout: process.stdout,
+  };
+  const deps = {
+    cwd: () => workspace,
+    env: { ...process.env, ZCODE_DATA_BASE_DIR: dir },
+    runTui: async () => 0,
+  } as never;
+  try {
+    const exitCode = await runAttachCommand(ctx, {} as never, deps, "0.0.0-test");
+    assert.equal(exitCode, 0);
+    assert.match(
+      stderrChunks.join(""),
+      /attach transport: attach client dropped malformed line/,
+      "malformed transport line must surface a stderr diagnostic",
+    );
+    // 连接继续：runTui 正常拿到控制权（exitCode 0），create 流程未被坏行打断。
   } finally {
     await core.close();
     await rm(dir, { force: true, recursive: true });
