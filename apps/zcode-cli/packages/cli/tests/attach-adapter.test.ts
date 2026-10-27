@@ -303,6 +303,115 @@ test("submitPrompt → session/send，turn_complete 事件解析出响应", asyn
   }
 });
 
+// 回归证据（P004-F1，2026-10-26 评审）：submitPrompt 曾把 per-turn onEvent
+// 挂进常驻 sinks 且从不摘除——每回合泄漏一个闭包，后续每条事件都扇出到全部
+// 陈旧 onEvent（O(turns)/事件，直到句柄被 /new //resume 换掉）。与 monolith
+// 对齐（prompt-command.ts 的 finally 摘除）：回合 settle / 发送失败即摘除
+// 本轮 onEvent；回合外事件只属于常驻订阅（subscribeSessionEvents）。
+test("submitPrompt 的 per-turn onEvent 回合结束即摘除：不随回合累积、无陈旧回调", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let turn = 0;
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      const inputId = request.params.inputId as string;
+      turn += 1;
+      const turnId = `turn-${turn}`;
+      queueMicrotask(() => {
+        notify(
+          rawEvent({
+            inputId,
+            payload: { inputId, input: `p-${turn}`, turnNumber: turn },
+            seq: turn * 2 - 1,
+            turnId,
+            type: "turn_started",
+          }),
+        );
+        notify(
+          rawEvent({
+            payload: { response: `r-${turn}`, resultType: "completed" },
+            seq: turn * 2,
+            turnId,
+            type: "turn_complete",
+          }),
+        );
+      });
+      return { accepted: true, sessionId: SID, stateRevision: turn };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  const firstEvents: string[] = [];
+  const secondEvents: string[] = [];
+  try {
+    const first = await handle.submitPrompt("one", {
+      onEvent: (event) => {
+        firstEvents.push(event.type);
+      },
+    });
+    const second = await handle.submitPrompt("two", {
+      onEvent: (event) => {
+        secondEvents.push(event.type);
+      },
+    });
+    assert.equal(first.response, "r-1");
+    assert.equal(second.response, "r-2");
+    // 第二回合的事件只到达第二回合的 onEvent：第一回合的陈旧回调不得再触发。
+    assert.deepEqual(
+      firstEvents,
+      ["turn_started", "turn_complete"],
+      "first-turn onEvent must not observe the second turn",
+    );
+    assert.deepEqual(secondEvents, ["turn_started", "turn_complete"]);
+    // 回合外事件：per-turn onEvent 都已摘除，一个都不触发（常驻订阅另有其主）。
+    handle.ingestRawEvent(rawEvent({ seq: 9, type: "session_created" }));
+    assert.equal(firstEvents.length, 2, "stale first-turn onEvent must not fire after its turn");
+    assert.equal(
+      secondEvents.length,
+      2,
+      "per-turn onEvent must not outlive its turn (monolith finally semantics)",
+    );
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// P004-F1 的发送失败路径：session/send 被拒时 per-turn onEvent 同样要摘除。
+test("submitPrompt 发送失败后 per-turn onEvent 即摘除", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/send") {
+      // 拒绝以 rejected promise 返回：同步 throw 会逃出 socket data handler。
+      return Promise.reject(Object.assign(new Error("core rejected"), { code: -32000 }));
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  const events: string[] = [];
+  try {
+    await assert.rejects(handle.submitPrompt("boom", {
+      onEvent: (event) => {
+        events.push(event.type);
+      },
+    }), /core rejected/);
+    handle.ingestRawEvent(rawEvent({ seq: 9, type: "session_created" }));
+    assert.equal(events.length, 0, "onEvent must be detached after session/send failure");
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 test("recallPreviousInput → session/recallPreviousInput", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
