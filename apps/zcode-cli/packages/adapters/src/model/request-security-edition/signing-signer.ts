@@ -96,7 +96,11 @@ export class ClientRequestSigningV4Signer {
       if (new URL(buffered.url).origin !== this.#businessOrigin) {
         return this.sendUnsigned(buffered, "origin_mismatch");
       }
-      if (this.#bypassSigning) return this.sendUnsigned(buffered, "bypass");
+      // BYPASS 读取共享 key state：transport 身份变化会重建签名器，但同一把 key
+      // 已经被网关拒绝的事实不随签名器代消亡。
+      if (this.#bypassSigning || this.#keyState.bypassed) {
+        return this.sendUnsigned(buffered, "bypass");
+      }
       // 没有 session 就没有签名载荷的可变因子：不要先握手再失败，直接按未签名发送。
       if (!buffered.headers.get(SESSION_HEADER)?.trim()) {
         return this.sendUnsigned(buffered, "missing_session");
@@ -120,7 +124,10 @@ export class ClientRequestSigningV4Signer {
 
       this.observe(buffered, { kind: "verify_rejected", reason: secondReason, signedAttempt: 2 });
       this.invalidatePrivateKey(privateKey);
+      // 同时写入签名器代与共享 key state：前者约束本代，后者让后续重建的签名器
+      // （每次请求的 routing fetch 闭包都是新 transport 身份）不再重复握手打转。
       this.#bypassSigning = true;
+      this.#keyState.bypassed = true;
       this.observe(buffered, { kind: "bypass_entered" });
       return this.sendUnsigned(buffered, "verify_refresh_exhausted");
     } catch (error) {

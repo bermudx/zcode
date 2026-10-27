@@ -36,14 +36,18 @@ async function deriveKey(secret: string, info: string): Promise<Uint8Array> {
   );
 }
 
-async function createPrivateCipher(privateKey: CryptoKey): Promise<string> {
+async function createPrivateCipher(
+  privateKey: CryptoKey,
+  apiKeyId: string = API_KEY_ID,
+  secret: string = API_SECRET,
+): Promise<string> {
   const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", privateKey));
-  const keyBytes = await deriveKey(API_SECRET, "ed25519_priv");
+  const keyBytes = await deriveKey(secret, "ed25519_priv");
   const aesKey = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt(
-      { additionalData: utf8(API_KEY_ID), iv, name: "AES-GCM", tagLength: 128 },
+      { additionalData: utf8(apiKeyId), iv, name: "AES-GCM", tagLength: 128 },
       aesKey,
       utf8(toBase64(pkcs8)),
     ),
@@ -56,9 +60,12 @@ interface HandshakeFixture {
   respond: () => Response;
 }
 
-async function createHandshakeFixture(): Promise<HandshakeFixture> {
+async function createHandshakeFixture(
+  apiKeyId: string = API_KEY_ID,
+  secret: string = API_SECRET,
+): Promise<HandshakeFixture> {
   const keyPair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-  const privateCipher = await createPrivateCipher(keyPair.privateKey);
+  const privateCipher = await createPrivateCipher(keyPair.privateKey, apiKeyId, secret);
   return {
     publicKey: keyPair.publicKey,
     respond: () =>
@@ -340,6 +347,62 @@ describe("client request signing: recovery and fail-open", () => {
     expect(execution.take("req-bypass-2")).toEqual([
       { kind: "unsigned_sent", reason: "bypass" },
     ]);
+  });
+
+  // 回归（P001-F1）：装配层每次 factory 重建都会传入新的 endpoint routing fetch 闭包，
+  // 签名器因此重建；BYPASS 必须挂在共享 key state 上跨代存活，否则每个请求都会
+  // 重复“握手 + 两次签名 + 未签名回退”打转。
+  it("keeps bypass engaged across signer rebuilds caused by a new transport identity", async () => {
+    const fixture = await createHandshakeFixture();
+    const secondKeyFixture = await createHandshakeFixture("kid-456", "other-secret");
+    const handshakeCalls: Request[] = [];
+    const makeTransport = (respond: () => Response) =>
+      vi.fn<typeof fetch>(async (input, init) => {
+        const request = new Request(input, init);
+        if (new URL(request.url).pathname === HANDSHAKE_PATH) {
+          handshakeCalls.push(request);
+          return respond();
+        }
+        return Response.json({ code: 401, msg: "VERIFY_APIKEY_EXPIRED" }, { status: 401 });
+      });
+    const execution = createExecution();
+
+    const wrappedFirst = execution.protectTransport({
+      providerId: "coding-plan",
+      providerConfig: signingPolicyProvider(),
+      transport: makeTransport(fixture.respond),
+    });
+    await wrappedFirst(requestFor("req-rebuild-1"));
+    expect(handshakeCalls).toHaveLength(2);
+
+    // 同 provider 同凭据、新 transport 身份：模拟下一次请求新建的 routing fetch 闭包。
+    const wrappedSecond = execution.protectTransport({
+      providerId: "coding-plan",
+      providerConfig: signingPolicyProvider(),
+      transport: makeTransport(fixture.respond),
+    });
+    await wrappedSecond(requestFor("req-rebuild-2"));
+    expect(execution.take("req-rebuild-2")).toEqual([
+      { kind: "unsigned_sent", reason: "bypass" },
+    ]);
+    expect(handshakeCalls).toHaveLength(2);
+
+    // 换 key（账号变更）必须走出 BYPASS：新 key state 对应新签名器代，重新尝试签名。
+    const wrappedThird = execution.protectTransport({
+      providerId: "coding-plan",
+      providerConfig: signingPolicyProvider({ apiKey: "kid-456.other-secret" }),
+      transport: makeTransport(secondKeyFixture.respond),
+    });
+    await wrappedThird(requestFor("req-rebuild-3"));
+    expect(execution.take("req-rebuild-3")).toEqual([
+      { kind: "signed_sent", signedAttempt: 1 },
+      { kind: "verify_rejected", reason: "VERIFY_APIKEY_EXPIRED", signedAttempt: 1 },
+      { kind: "signed_sent", signedAttempt: 2 },
+      { kind: "verify_rejected", reason: "VERIFY_APIKEY_EXPIRED", signedAttempt: 2 },
+      { kind: "bypass_entered" },
+      { kind: "unsigned_sent", reason: "verify_refresh_exhausted" },
+    ]);
+    expect(handshakeCalls).toHaveLength(4);
   });
 
   it("sends unsigned when the handshake fails", async () => {

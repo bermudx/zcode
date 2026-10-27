@@ -3,9 +3,14 @@
  *
  * 私钥由服务端在握手时下发，按 `apiKey + origin` 进程内缓存复用；
  * `epoch` 用于丢弃“握手进行中被失效”的过期结果。
+ *
+ * `bypassed` 属于同一把 key 的跨签名器事实：装配层每次请求都会因 transport 身份
+ * 变化重建签名器，BYPASS 若只记在签名器实例上会被反复遗忘，导致对已拒绝网关
+ * 无限重复握手；挂在共享 key state 上，账号/key 变更换新 state 时自然重置。
  */
 export interface ClientSigningKeyState {
   epoch: number;
+  bypassed?: boolean;
   privateKey?: CryptoKey;
   handshakePromise?: Promise<CryptoKey>;
 }
