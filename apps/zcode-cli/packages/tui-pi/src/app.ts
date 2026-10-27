@@ -62,6 +62,7 @@ import { cycleCollaborationMode } from "./mode-switch.js";
 import { formatCwdLabel } from "./status-line.js";
 import { AppStore } from "./store.js";
 import { SubagentDirectory } from "./subagents.js";
+import { QuotaCluster } from "./quota-cluster.js";
 import { UsageTotalsAccumulator } from "./usage-totals.js";
 import type { PiTheme } from "./theme.js";
 import { WorkflowCard, seedWorkflowRunsFromPorts } from "./workflow.js";
@@ -122,6 +123,7 @@ export class PiTuiApp {
   private readonly history: PiInputHistory;
   /** 子代理目录唯一 owner；组件只读 store。 */
   private readonly subagents: SubagentDirectory;
+  private readonly quota: QuotaCluster;
   /** 状态行 ↑↓R 的 session 累计用量 owner（turn 内 state.usage 是单请求口径）。 */
   private readonly usageTotals: UsageTotalsAccumulator;
   /** `!cmd` 执行器：本地跑命令、打印结果、把输出缓到下一条 prompt。 */
@@ -227,6 +229,12 @@ export class PiTuiApp {
     // 事件消费者先于订阅构造：同步回放型端口注册即推事件时 handleEvent 不能空转。
     this.subagents = new SubagentDirectory(this.store, this.options);
     this.usageTotals = new UsageTotalsAccumulator(this.store, this.options);
+    this.quota = new QuotaCluster(this.store, {
+      readUsageQuota: this.options.readUsageQuota,
+      requestRender: () => this.tui.requestRender(),
+      stderr: this.options.stderr,
+    });
+    this.quota.start();
     this.unsubscribeSession = this.options.subscribeSessionEvents?.((event) =>
       this.applyEvent(event),
     );
@@ -399,6 +407,7 @@ export class PiTuiApp {
       store.set("modifiedFiles", []);
       store.modifiedFileToolCallIds.clear();
       this.subagents.reset();
+      this.quota.reset();
       this.usageTotals.reset();
     }
     store.set("selection", createSelectionState(result.selection));
@@ -690,6 +699,8 @@ export class PiTuiApp {
     if (key === "messages") this.syncTranscript();
     if (key === "approvalQueue" || key === "selection" || key === "queuedInputs")
       this.refreshPanels();
+    // busy 下降沿 = turn 落地：额度刷新的授权触发点（用户活动值得一次真实尝试）。
+    if (key === "busy" && !this.store.state.busy) this.quota.onTurnSettled();
     this.updateFooter();
     this.tui.requestRender();
   }
@@ -745,6 +756,7 @@ export class PiTuiApp {
     this.statusBox.update({
       cwdLabel: this.cwdLabel,
       idleHint: this.copy.input.activeStatusHint,
+      quotaText: this.quota.renderQuotaText(Date.now()),
       state: this.store.state,
     });
   }
@@ -755,6 +767,7 @@ export class PiTuiApp {
     this.removeInputListener();
     this.unsubscribeSession?.();
     this.subagents.dispose();
+    this.quota.dispose();
     this.unsubscribeConnectionStatus?.();
     this.statusBox.stop();
     for (const approval of this.store.state.approvalQueue) {

@@ -1,5 +1,5 @@
 import type { WorkflowRunProgressEnvelope } from "@zcode/shared/zcode-protocol-v4";
-import type { ModelSelection, ZCodeModelOption } from "@zcode/shared";
+import type { ModelSelection, UsageQuotaSnapshot, ZCodeModelOption } from "@zcode/shared";
 import type {
   CollaborationMode,
   ModelUsageSummary,
@@ -346,6 +346,8 @@ export type TuiOptions = {
   stdout: NodeJS.WriteStream;
   cancelBackgroundTask?: TuiCancelBackgroundTask;
   readSubagents?: TuiReadSubagents;
+  /** Coding Plan 额度快照（attach 协议 usage/codingPlanQuota）；缺席时额度簇静默。 */
+  readUsageQuota?: () => Promise<UsageQuotaSnapshot>;
   readSubagentTranscript?: TuiReadSubagentTranscript;
   listWorkspacePathSuggestions?: TuiListWorkspacePathSuggestions;
   listMcpServers?: TuiListMcpServers;

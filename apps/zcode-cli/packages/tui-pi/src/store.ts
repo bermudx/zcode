@@ -4,6 +4,7 @@
 
 import type { ModelUsageSummary, SessionEvent, TodoItem, TurnId } from "@zcode/contracts";
 import type { ZCodeSessionSubagentsResult } from "@zcode/shared";
+import type { Balance } from "./quota.js";
 import type {
   ApprovalPrompt,
   CacheStats,
@@ -73,6 +74,9 @@ export class AppStore {
     usageTotals: undefined as UsageTotals | undefined,
     /** CLI 启动快照（`TuiStartupOptions.workspaceGitBranch`），无 live watcher。 */
     workspaceGitBranch: undefined as string | undefined,
+    /** Coding Plan 额度簇（quota-cluster 唯一写入）。 */
+    quotaBalance: undefined as Balance | undefined,
+    quotaFetchedAt: undefined as number | undefined,
   };
 
   /** Maps used by the shared projection; stable identity matters. */

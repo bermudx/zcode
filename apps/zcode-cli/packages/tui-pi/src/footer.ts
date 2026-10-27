@@ -104,6 +104,7 @@ export class StatusFooter extends Container {
   update(input: {
     cwdLabel: string;
     idleHint: string;
+    quotaText?: string;
     state: AppStore["state"];
   }): void {
     const { state } = input;
@@ -113,7 +114,7 @@ export class StatusFooter extends Container {
       this.activity.setIndicator(active ? undefined : ACTIVITY_IDLE_INDICATOR);
     }
     this.activity.setMessage(state.status || (active ? input.idleHint : ""));
-    this.pwd.setState(input.cwdLabel, state.workspaceGitBranch);
+    this.pwd.setState(input.cwdLabel, state.workspaceGitBranch, input.quotaText);
     this.stats.setState(state);
   }
 
