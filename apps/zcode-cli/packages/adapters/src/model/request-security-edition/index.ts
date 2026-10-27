@@ -34,6 +34,7 @@ class OfficialRequestSecurity implements ModelRequestSecurityPort {
     this.#signing = new ClientRequestSigningManager({
       keyCache,
       observer: (event) => this.observeClientSigning(event),
+      observerError: (error) => this.logClientSigningObservationFailure(error),
     });
   }
 
@@ -102,6 +103,14 @@ class OfficialRequestSecurity implements ModelRequestSecurityPort {
       case "request_failed_closed":
         this.#logger?.warn("Client signing failed closed", context);
     }
+  }
+
+  /** 观测回调自身抛错时的诊断出口：走 debug 日志，且绝不能再影响请求主路径。 */
+  private logClientSigningObservationFailure(error: unknown): void {
+    this.#logger?.debug("Client signing observation failed", {
+      event: "model.client_signing.observation_failed",
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   private createAccessModeUnsignedFetch(

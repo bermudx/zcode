@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Logger } from "@zcode/contracts";
 import { createModelRequestSecurityState } from "../src/model/request-security-edition/index.js";
 import { ClientRequestSigningError } from "../src/model/request-security-edition/signing-protocol.js";
 import type { ModelRequestSecurityPort } from "../src/model/request-security.js";
@@ -106,9 +107,9 @@ function hasLeadingZeroBits(bytes: Uint8Array, bits: number): boolean {
   return ((bytes[whole] ?? 255) & mask) === 0;
 }
 
-function createExecution() {
+function createExecution(options: { logger?: Logger } = {}) {
   const state = createModelRequestSecurityState();
-  return state.createExecution({});
+  return state.createExecution(options);
 }
 
 function createTransport(handlers: {
@@ -467,5 +468,36 @@ describe("client request signing: recovery and fail-open", () => {
     await wrapped(new Request("https://other.example.test/v1/messages", { method: "POST" }));
     expect(transport).toHaveBeenCalledOnce();
     expect(wrapped).not.toBe(transport);
+  });
+});
+
+describe("client request signing: observation diagnostics", () => {
+  // 回归（P001-F3）：观测回调抛错不能无声消失——诊断走 debug 日志，主路径不受影响。
+  it("reports observer failures to the debug log without breaking the request", async () => {
+    const debug = vi.fn();
+    const logger: Logger = {
+      child: () => logger,
+      debug,
+      error: vi.fn(),
+      info: () => {
+        throw new Error("broken info sink");
+      },
+      warn: vi.fn(),
+    };
+    const execution = createExecution({ logger });
+    const { transport } = createTransport({});
+    const wrapped = execution.protectTransport({
+      providerId: "coding-plan",
+      providerConfig: signingPolicyProvider(),
+      transport,
+    });
+
+    const response = await wrapped(requestFor("req-observer-throw", null));
+    expect(response.ok).toBe(true);
+    expect(debug).toHaveBeenCalledTimes(1);
+    expect(debug).toHaveBeenCalledWith("Client signing observation failed", {
+      event: "model.client_signing.observation_failed",
+      error: "broken info sink",
+    });
   });
 });

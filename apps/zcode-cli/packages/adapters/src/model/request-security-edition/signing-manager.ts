@@ -20,6 +20,7 @@ export interface ClientSigningManagerOptions {
   allowInsecureHttp?: boolean;
   keyCache?: ClientRequestSigningKeyCache;
   observer?: (event: ClientSigningObservationEvent) => void;
+  observerError?: (error: unknown) => void;
 }
 
 /**
@@ -33,11 +34,13 @@ export class ClientRequestSigningManager {
   readonly #scopes = new Map<string, SignerScope>();
   readonly #keyCache?: ClientRequestSigningKeyCache;
   readonly #observer?: (event: ClientSigningObservationEvent) => void;
+  readonly #observerError?: (error: unknown) => void;
   readonly #allowInsecureHttp: boolean;
 
   constructor(options: ClientSigningManagerOptions = {}) {
     this.#keyCache = options.keyCache;
     this.#observer = options.observer;
+    this.#observerError = options.observerError;
     this.#allowInsecureHttp = options.allowInsecureHttp ?? false;
   }
 
@@ -103,6 +106,7 @@ export class ClientRequestSigningManager {
         allowInsecureHttp: this.#allowInsecureHttp,
         ...(keyState ? { keyState } : {}),
         ...(this.#observer ? { observer: this.#observer } : {}),
+        ...(this.#observerError ? { observerError: this.#observerError } : {}),
       },
     );
     scope.entry = {

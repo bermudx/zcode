@@ -41,6 +41,8 @@ export interface ClientSigningSignerOptions {
   allowInsecureHttp?: boolean;
   keyState?: ClientSigningKeyState;
   observer?: (event: ClientSigningObservationEvent) => void;
+  /** 观测回调抛错时的诊断出口；该出口自身失败仍保持静默，不影响请求主路径。 */
+  observerError?: (error: unknown) => void;
 }
 
 type SigningTransport = typeof globalThis.fetch;
@@ -60,6 +62,7 @@ export class ClientRequestSigningV4Signer {
   readonly #ownsKeyState: boolean;
   readonly #transport: SigningTransport;
   readonly #observer?: (event: ClientSigningObservationEvent) => void;
+  readonly #observerError?: (error: unknown) => void;
 
   #credential?: ClientSigningCredential;
   #activeRequestCount = 0;
@@ -80,6 +83,7 @@ export class ClientRequestSigningV4Signer {
     this.#ownsKeyState = !options.keyState;
     this.#transport = transport;
     this.#observer = options.observer;
+    this.#observerError = options.observerError;
   }
 
   dispose(): void {
@@ -175,8 +179,13 @@ export class ClientRequestSigningV4Signer {
         ...(requestId ? { requestId } : {}),
         ...(sessionId ? { sessionId } : {}),
       });
-    } catch {
-      // 观测失败不能影响请求主路径。
+    } catch (error) {
+      // 观测失败不能影响请求主路径，但也不能无声消失：交给诊断出口（其自身失败仍静默）。
+      try {
+        this.#observerError?.(error);
+      } catch {
+        // 诊断出口失败同样不能影响请求主路径。
+      }
     }
   }
 
