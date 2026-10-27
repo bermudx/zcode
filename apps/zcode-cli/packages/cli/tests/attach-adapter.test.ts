@@ -1982,3 +1982,105 @@ test("createAttachPromptHandler 暴露 removeQueuedInputs 端口并随句柄生�
     await rm(dir, { force: true, recursive: true });
   }
 });
+
+// 回归证据（P004-F2，2026-10-26 评审）：TUI 内裸 /resume 曾用 sessions.at(-1)
+// 取“最近会话”——server 的 session/list 返回顺序不保证（实测创建序/任意序
+// 混排，attach-command 的入口路径因此改过显式排序），会静默恢复陈旧会话。
+// TUI 内必须走同一裁决：按 updatedAt（退化 createdAt）显式取最大。
+test("TUI 裸 /resume 按 updatedAt 取最近会话，而不是列表末位", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-latest-"));
+  const socketPath = join(dir, "core.sock");
+  // 故意混排：陈旧会话不在末位、最新会话在中间。
+  const listed = [
+    { id: "sess-middle", updatedAt: 200 },
+    { id: "sess-newest", updatedAt: 300 },
+    { id: "sess-stale", updatedAt: 100 },
+  ];
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/list") {
+      return { sessions: listed };
+    }
+    if (request.method === "session/resume") {
+      return { sessionId: request.params.sessionId };
+    }
+    if (request.method === "session/messages") {
+      return { messages: [] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = (await handler("/resume", {})) as { response?: string };
+    const resumeCall = core.requests.find((r) => r.method === "session/resume");
+    assert.ok(resumeCall, "expected session/resume request");
+    assert.equal(resumeCall.params.sessionId, "sess-newest");
+    assert.match(result.response ?? "", /Resumed session sess-newest/);
+    assert.ok(
+      !core.requests.some((r) => r.method === "session/create"),
+      "bare /resume must not silently create a new session",
+    );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// P004-F2 的空列表分支：显式报错（与入口 -c 的 “No resumable session found”
+// 同语义），不再静默留在当前会话装作成功。
+test("TUI 裸 /resume 空列表显式报错", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-empty-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/list") {
+      return { sessions: [] };
+    }
+    if (request.method === "session/messages") {
+      return { messages: [] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    await assert.rejects(handler("/resume", {}), /No resumable session found for \/tmp\/ws/);
+    assert.ok(!core.requests.some((r) => r.method === "session/resume"));
+    assert.ok(!core.requests.some((r) => r.method === "session/create"));
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
