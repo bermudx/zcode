@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "@zcode/contracts";
 import { createModelRequestSecurityState } from "../src/model/request-security-edition/index.js";
+import { parseClientSigningCredential } from "../src/model/request-security-edition/signing-credential.js";
+import { performClientSigningHandshake } from "../src/model/request-security-edition/signing-handshake.js";
 import { ClientRequestSigningError } from "../src/model/request-security-edition/signing-protocol.js";
 import type { ModelRequestSecurityPort } from "../src/model/request-security.js";
 
@@ -499,5 +501,51 @@ describe("client request signing: observation diagnostics", () => {
       event: "model.client_signing.observation_failed",
       error: "broken info sink",
     });
+  });
+});
+
+describe("client request signing: handshake timer hygiene", () => {
+  // 回归（P001-F4）：被遗弃的握手不能靠 10s 超时定时器拖住 CLI 事件循环——句柄必须 unref。
+  it("unrefs the abandoned handshake timeout handle", async () => {
+    const originalSetTimeout = globalThis.setTimeout.bind(globalThis);
+    type HandshakeTimer = ReturnType<typeof setTimeout>;
+    type MaybeUnrefHandle = { unref?: () => void };
+    // 只看 >=1s 的定时器：vi.waitFor 的轮询定时器同样经过被 spy 的 setTimeout。
+    const timedHandles: Array<{ handle: HandshakeTimer; ms: number | undefined }> = [];
+    const isHandshakeTimeout = (ms: number | undefined) => (ms ?? 0) >= 1_000;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      ((handler: TimerHandler, ms?: number, ...rest: unknown[]) => {
+        const handle = (
+          originalSetTimeout as unknown as (...args: unknown[]) => HandshakeTimer
+        )(handler, ms, ...rest);
+        timedHandles.push({ handle, ms });
+        const maybeUnref = handle as unknown as MaybeUnrefHandle;
+        if (isHandshakeTimeout(ms) && typeof maybeUnref.unref === "function") {
+          vi.spyOn(maybeUnref, "unref");
+        }
+        return handle;
+      }) as unknown as typeof setTimeout,
+    );
+
+    try {
+      const credential = parseClientSigningCredential(API_KEY);
+      if (!credential) throw new Error("credential fixture failed to parse");
+      // 永不完成的握手：唯一长挂起的就是 10s 超时定时器。
+      const pending = performClientSigningHandshake({
+        credential,
+        handshakeUrl: `${new URL(BASE_URL).origin}${HANDSHAKE_PATH}`,
+        transport: () => new Promise<Response>(() => {}),
+      });
+      pending.catch(() => {});
+
+      await vi.waitFor(() =>
+        expect(timedHandles.filter((entry) => isHandshakeTimeout(entry.ms))).toHaveLength(1),
+      );
+      const handshakeTimer = timedHandles.find((entry) => isHandshakeTimeout(entry.ms))?.handle;
+      expect((handshakeTimer as unknown as MaybeUnrefHandle).unref).toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      for (const { handle } of timedHandles) clearTimeout(handle);
+    }
   });
 });

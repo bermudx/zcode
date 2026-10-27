@@ -41,6 +41,8 @@ export async function performClientSigningHandshake(input: {
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CLIENT_SIGNING_HANDSHAKE_TIMEOUT_MS);
+  // 请求可能先于超时结束（或被遗弃）：unref 让孤儿握手不拖住 CLI 事件循环整整 10s。
+  timeout.unref?.();
   try {
     let response: Response;
     try {
