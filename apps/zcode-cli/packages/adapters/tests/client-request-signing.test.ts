@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Logger } from "@zcode/contracts";
 import { createModelRequestSecurityState } from "../src/model/request-security-edition/index.js";
+import { parseClientSigningCredential } from "../src/model/request-security-edition/signing-credential.js";
+import { performClientSigningHandshake } from "../src/model/request-security-edition/signing-handshake.js";
+import { ClientRequestSigningError } from "../src/model/request-security-edition/signing-protocol.js";
 import type { ModelRequestSecurityPort } from "../src/model/request-security.js";
 
 const API_KEY_ID = "kid-123";
@@ -35,14 +39,18 @@ async function deriveKey(secret: string, info: string): Promise<Uint8Array> {
   );
 }
 
-async function createPrivateCipher(privateKey: CryptoKey): Promise<string> {
+async function createPrivateCipher(
+  privateKey: CryptoKey,
+  apiKeyId: string = API_KEY_ID,
+  secret: string = API_SECRET,
+): Promise<string> {
   const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", privateKey));
-  const keyBytes = await deriveKey(API_SECRET, "ed25519_priv");
+  const keyBytes = await deriveKey(secret, "ed25519_priv");
   const aesKey = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt(
-      { additionalData: utf8(API_KEY_ID), iv, name: "AES-GCM", tagLength: 128 },
+      { additionalData: utf8(apiKeyId), iv, name: "AES-GCM", tagLength: 128 },
       aesKey,
       utf8(toBase64(pkcs8)),
     ),
@@ -55,9 +63,12 @@ interface HandshakeFixture {
   respond: () => Response;
 }
 
-async function createHandshakeFixture(): Promise<HandshakeFixture> {
+async function createHandshakeFixture(
+  apiKeyId: string = API_KEY_ID,
+  secret: string = API_SECRET,
+): Promise<HandshakeFixture> {
   const keyPair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-  const privateCipher = await createPrivateCipher(keyPair.privateKey);
+  const privateCipher = await createPrivateCipher(keyPair.privateKey, apiKeyId, secret);
   return {
     publicKey: keyPair.publicKey,
     respond: () =>
@@ -98,9 +109,9 @@ function hasLeadingZeroBits(bytes: Uint8Array, bits: number): boolean {
   return ((bytes[whole] ?? 255) & mask) === 0;
 }
 
-function createExecution() {
+function createExecution(options: { logger?: Logger } = {}) {
   const state = createModelRequestSecurityState();
-  return state.createExecution({});
+  return state.createExecution(options);
 }
 
 function createTransport(handlers: {
@@ -181,6 +192,28 @@ describe("client request signing: policy", () => {
     expect(execution.take("req-offpeak")).toEqual([
       { kind: "unsigned_sent", reason: "access_mode" },
     ]);
+  });
+
+  // 回归（P001-F2）：需签名的 Provider 缺少 baseURL 时不能静默退回未签名发送。
+  it("fails closed with invalid-config when a signing-required provider has no baseURL", () => {
+    const execution = createExecution();
+    const transport = vi.fn<typeof fetch>(async () => new Response("ok"));
+    for (const baseURL of [undefined, ""]) {
+      let caught: unknown;
+      try {
+        execution.protectTransport({
+          providerId: "coding-plan",
+          providerConfig: signingPolicyProvider({ baseURL }),
+          transport,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ClientRequestSigningError);
+      expect(caught).toMatchObject({ kind: "invalid-config" });
+      expect((caught as ClientRequestSigningError).message).toMatch(/baseURL/u);
+    }
+    expect(transport).not.toHaveBeenCalled();
   });
 });
 
@@ -319,6 +352,62 @@ describe("client request signing: recovery and fail-open", () => {
     ]);
   });
 
+  // 回归（P001-F1）：装配层每次 factory 重建都会传入新的 endpoint routing fetch 闭包，
+  // 签名器因此重建；BYPASS 必须挂在共享 key state 上跨代存活，否则每个请求都会
+  // 重复“握手 + 两次签名 + 未签名回退”打转。
+  it("keeps bypass engaged across signer rebuilds caused by a new transport identity", async () => {
+    const fixture = await createHandshakeFixture();
+    const secondKeyFixture = await createHandshakeFixture("kid-456", "other-secret");
+    const handshakeCalls: Request[] = [];
+    const makeTransport = (respond: () => Response) =>
+      vi.fn<typeof fetch>(async (input, init) => {
+        const request = new Request(input, init);
+        if (new URL(request.url).pathname === HANDSHAKE_PATH) {
+          handshakeCalls.push(request);
+          return respond();
+        }
+        return Response.json({ code: 401, msg: "VERIFY_APIKEY_EXPIRED" }, { status: 401 });
+      });
+    const execution = createExecution();
+
+    const wrappedFirst = execution.protectTransport({
+      providerId: "coding-plan",
+      providerConfig: signingPolicyProvider(),
+      transport: makeTransport(fixture.respond),
+    });
+    await wrappedFirst(requestFor("req-rebuild-1"));
+    expect(handshakeCalls).toHaveLength(2);
+
+    // 同 provider 同凭据、新 transport 身份：模拟下一次请求新建的 routing fetch 闭包。
+    const wrappedSecond = execution.protectTransport({
+      providerId: "coding-plan",
+      providerConfig: signingPolicyProvider(),
+      transport: makeTransport(fixture.respond),
+    });
+    await wrappedSecond(requestFor("req-rebuild-2"));
+    expect(execution.take("req-rebuild-2")).toEqual([
+      { kind: "unsigned_sent", reason: "bypass" },
+    ]);
+    expect(handshakeCalls).toHaveLength(2);
+
+    // 换 key（账号变更）必须走出 BYPASS：新 key state 对应新签名器代，重新尝试签名。
+    const wrappedThird = execution.protectTransport({
+      providerId: "coding-plan",
+      providerConfig: signingPolicyProvider({ apiKey: "kid-456.other-secret" }),
+      transport: makeTransport(secondKeyFixture.respond),
+    });
+    await wrappedThird(requestFor("req-rebuild-3"));
+    expect(execution.take("req-rebuild-3")).toEqual([
+      { kind: "signed_sent", signedAttempt: 1 },
+      { kind: "verify_rejected", reason: "VERIFY_APIKEY_EXPIRED", signedAttempt: 1 },
+      { kind: "signed_sent", signedAttempt: 2 },
+      { kind: "verify_rejected", reason: "VERIFY_APIKEY_EXPIRED", signedAttempt: 2 },
+      { kind: "bypass_entered" },
+      { kind: "unsigned_sent", reason: "verify_refresh_exhausted" },
+    ]);
+    expect(handshakeCalls).toHaveLength(4);
+  });
+
   it("sends unsigned when the handshake fails", async () => {
     const { transport } = createTransport({
       handshake: () => {
@@ -381,5 +470,82 @@ describe("client request signing: recovery and fail-open", () => {
     await wrapped(new Request("https://other.example.test/v1/messages", { method: "POST" }));
     expect(transport).toHaveBeenCalledOnce();
     expect(wrapped).not.toBe(transport);
+  });
+});
+
+describe("client request signing: observation diagnostics", () => {
+  // 回归（P001-F3）：观测回调抛错不能无声消失——诊断走 debug 日志，主路径不受影响。
+  it("reports observer failures to the debug log without breaking the request", async () => {
+    const debug = vi.fn();
+    const logger: Logger = {
+      child: () => logger,
+      debug,
+      error: vi.fn(),
+      info: () => {
+        throw new Error("broken info sink");
+      },
+      warn: vi.fn(),
+    };
+    const execution = createExecution({ logger });
+    const { transport } = createTransport({});
+    const wrapped = execution.protectTransport({
+      providerId: "coding-plan",
+      providerConfig: signingPolicyProvider(),
+      transport,
+    });
+
+    const response = await wrapped(requestFor("req-observer-throw", null));
+    expect(response.ok).toBe(true);
+    expect(debug).toHaveBeenCalledTimes(1);
+    expect(debug).toHaveBeenCalledWith("Client signing observation failed", {
+      event: "model.client_signing.observation_failed",
+      error: "broken info sink",
+    });
+  });
+});
+
+describe("client request signing: handshake timer hygiene", () => {
+  // 回归（P001-F4）：被遗弃的握手不能靠 10s 超时定时器拖住 CLI 事件循环——句柄必须 unref。
+  it("unrefs the abandoned handshake timeout handle", async () => {
+    const originalSetTimeout = globalThis.setTimeout.bind(globalThis);
+    type HandshakeTimer = ReturnType<typeof setTimeout>;
+    type MaybeUnrefHandle = { unref?: () => void };
+    // 只看 >=1s 的定时器：vi.waitFor 的轮询定时器同样经过被 spy 的 setTimeout。
+    const timedHandles: Array<{ handle: HandshakeTimer; ms: number | undefined }> = [];
+    const isHandshakeTimeout = (ms: number | undefined) => (ms ?? 0) >= 1_000;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      ((handler: TimerHandler, ms?: number, ...rest: unknown[]) => {
+        const handle = (
+          originalSetTimeout as unknown as (...args: unknown[]) => HandshakeTimer
+        )(handler, ms, ...rest);
+        timedHandles.push({ handle, ms });
+        const maybeUnref = handle as unknown as MaybeUnrefHandle;
+        if (isHandshakeTimeout(ms) && typeof maybeUnref.unref === "function") {
+          vi.spyOn(maybeUnref, "unref");
+        }
+        return handle;
+      }) as unknown as typeof setTimeout,
+    );
+
+    try {
+      const credential = parseClientSigningCredential(API_KEY);
+      if (!credential) throw new Error("credential fixture failed to parse");
+      // 永不完成的握手：唯一长挂起的就是 10s 超时定时器。
+      const pending = performClientSigningHandshake({
+        credential,
+        handshakeUrl: `${new URL(BASE_URL).origin}${HANDSHAKE_PATH}`,
+        transport: () => new Promise<Response>(() => {}),
+      });
+      pending.catch(() => {});
+
+      await vi.waitFor(() =>
+        expect(timedHandles.filter((entry) => isHandshakeTimeout(entry.ms))).toHaveLength(1),
+      );
+      const handshakeTimer = timedHandles.find((entry) => isHandshakeTimeout(entry.ms))?.handle;
+      expect((handshakeTimer as unknown as MaybeUnrefHandle).unref).toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      for (const { handle } of timedHandles) clearTimeout(handle);
+    }
   });
 });

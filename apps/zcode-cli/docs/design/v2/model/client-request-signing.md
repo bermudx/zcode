@@ -65,6 +65,7 @@ sig = base64(HMAC-SHA256(
 
 私钥按 `apiKey + origin` 进程内缓存；同一 Provider 的 apiKey / baseURL /
 clientVersion / transport 都没变时复用签名器，变更时销毁旧签名器并重新握手。
+key state 上还挂 BYPASS 标记（见“失败与降级”），跨签名器重建共享。
 
 ## 单请求签名
 
@@ -91,15 +92,18 @@ sig   = base64(Ed25519-sign(privateKey,
 
 | 场景 | 行为 |
 | --- | --- |
+| 需签名 Provider 缺少 `baseURL` | 抛 `invalid-config`（fail-closed）：这是配置错误而非签名失败，静默降级会把 Coding Plan 凭据未签名发往错误端点 |
 | 请求 origin ≠ Provider origin | 未签名直发，`unsigned_sent(origin_mismatch)` |
 | 握手网络/超时/协议/业务失败 | 未签名直发，`unsigned_sent(handshake_failed)` + `handshake_failed` 观测 |
 | API Key 不能解析为签名凭据 | 未签名直发，`unsigned_sent(invalid_credential)` |
 | 缺少 `X-Session-Id` | 未签名直发，`unsigned_sent(missing_session)` |
 | `401` + `VERIFY_SIGNATURE_INVALID` / `VERIFY_APIKEY_EXPIRED` | 失效私钥 → 重新握手 → 重放一次（`signed_sent(signedAttempt=2)`） |
-| 第二次仍被拒绝 | 当前签名器代进入 BYPASS，未签名直发（`verify_refresh_exhausted`），后续请求不再尝试签名 |
+| 第二次仍被拒绝 | 进入 BYPASS，未签名直发（`verify_refresh_exhausted`），后续请求不再尝试签名 |
 
-签名失败**永远不阻断**模型请求：最坏情况只是回到未签名计费。BYPASS 只作用于当前
-签名器代，Provider 账号/key 变更会产生新签名器并重新尝试。
+签名失败**永远不阻断**模型请求：最坏情况只是回到未签名计费（唯一例外是上面的
+`baseURL` 配置错误）。BYPASS 记录在按 `apiKey + origin` 共享的 key state 上：装配层
+每次请求都会因 transport 身份变化重建签名器，共享标记保证 BYPASS 跨签名器代存活；
+Provider 账号/key 变更换到新 key state，自然重置并重新尝试。
 
 与官方的两处刻意差异（开源版更保守）：
 
@@ -129,7 +133,8 @@ Telemetry 映射：`signed_sent` / `unsigned_sent` / `request_failed_closed` 写
 日志级别：`signed_sent` 为 `debug`；`unsigned_sent` 与 `access_mode` 跳过为 `info`
 （每个 Provider 只记一次，不随流量膨胀）；`handshake_failed` / `verify_rejected` /
 `bypass_entered` / `request_failed_closed` 为 `warn`。事件名统一
-`model.client_signing.<kind>`，不包含 API Key、cookie 或请求体。
+`model.client_signing.<kind>`，不包含 API Key、cookie 或请求体。观测回调自身抛错
+记 `model.client_signing.observation_failed`（debug，仅错误消息），绝不影响请求主路径。
 
 ## 安全边界
 
@@ -155,6 +160,8 @@ Telemetry 映射：`signed_sent` / `unsigned_sent` / `request_failed_closed` 写
 | CRS-011 | 普通 `sk-` API Key（无点） | 未签名直发，`unsigned_sent(invalid_credential)` |
 | CRS-012 | 请求带残留 `X-Client-Sig` | 签名前删除，最终只有一组本代签名头 |
 | CRS-013 | 请求体重放 | 第二次发送 body 字节与首次一致 |
+| CRS-014 | 需签名 Provider 缺少 `baseURL` | `protectTransport` 抛 `invalid-config`，不产生未签名流量 |
+| CRS-015 | 连续两次验证拒绝后 transport 身份变化（新 routing fetch 闭包） | BYPASS 存活：不再握手，`unsigned_sent(bypass)`；换 apiKey 后重新签名 |
 
 ## Impact Brief
 
