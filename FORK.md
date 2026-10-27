@@ -101,14 +101,34 @@ submission/acceptance status is **unverified**; no fork PR links have been recor
 |---|---|---|---|
 | P001 | Extra-usage request path: signing and auth/security error policy in adapters request-security-edition and root shared policy; code presence does not prove allowance eligibility | `86ab5b13`, `df8bc4a7`; adapters `client-request-signing.test.ts`; [design](apps/zcode-cli/docs/design/v2/model/client-request-signing.md) | Only retire the local implementation when a verified replacement preserves mandatory signing and the supported extra-usage request path |
 | P002 | Original TUI controls, paste routing and extracted frontend interfaces: CLI tui package | `090276d9`, `31a770cc`, `c0abfcb1`, `6ee50f58`; tui keymap/paste/exit tests | No remaining piz dependency, or upstream equivalent passes relevant regressions; no wholesale deletion without dependency audit |
-| P003 | pi frontend: tui-pi, CLI selection/build wiring, architecture registration, clipboard image paste (`ctrl+v`/`alt+v`), `/skill` argument completion, kitty key-release filtering in chord dispatch, constant three-row footer (activity + pwd/branch row + two-zone stats row), startup `PiBanner` (logo/version/hints/model scope), `userBg` user message block, `markdown*` terminal theme | `570ebd20` through `7e859585` and later skills/image-paste commits plus `b0468c92`, `76335676`, `4422deb7`, `058685af`; tui-pi tests incl. projection, composer, history (incl. kitty press/repeat/release), panels, terminal-drain, mentions, shell, wrapping, image-paste, banner and footer; [design](apps/zcode-cli/docs/design/v2/tui-pi-frontend.md) | Upstream frontend meets our interaction and resource requirements |
+| P003 | pi frontend: tui-pi, CLI selection/build wiring, architecture registration, clipboard image paste (`ctrl+v`/`alt+v`), `/skill` argument completion, kitty key-release filtering in chord dispatch, constant three-row footer (activity + pwd/branch row + two-zone stats row), startup `PiBanner` (logo/version/hints/model scope), `userBg` user message block, `markdown*` terminal theme, `!` shell escape (HEAD semantics: deterministic non-interactive `/bin/bash -c` in an isolated session/process group with `!!` opt-out — supersedes the earlier `80729ec8`/`f5241576` interactive-shell variant) | `570ebd20` through `7e859585` and later skills/image-paste commits plus `b0468c92`, `76335676`, `4422deb7`, `058685af`, `!` port `80729ec8`→`8888d7e9`; tui-pi tests incl. projection, composer, history (incl. kitty press/repeat/release), panels, terminal-drain, mentions, shell, wrapping, image-paste, banner and footer; [design](apps/zcode-cli/docs/design/v2/tui-pi-frontend.md) | Upstream frontend meets our interaction and resource requirements |
 | P004 | Shared core and thin attach client: bootstrap socket listener, CLI attach/spawn/build, root shared protocol; attach `/skill` list + suggestions via `skills/referenceCatalog` additive fields; attach custom-command catalog via new `commands/referenceCatalog` (composer `/` panel + `/help`; expansion stays in the core input facade, local `listAttachCustomCommands` scan removed); herdr pane lifecycle reporter for `zcode-attach` (bounded retry + 30s heartbeat re-assert + always-on throttled stderr diagnostics, since a single lost `working` report pins herdr idle/done for a whole turn) plus `ZCODE_ATTACH_CORE` spawn marker suppressing the shared core's zcode hook | `32dc8799` through later attach fixes including `61abbc11`, plus `887668fb`..`d68db6ab` and the 2026-10-24 reporter-durability commit; CLI attach tests, bootstrap socket-listener + skill-reference-catalog, root shared attach contract, `attach-herdr-reporter` (incl. retry/argv-reuse/heartbeat regressions) + `app-server-spawn` marker tests; [design](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md) | Upstream shared-core mode covers no-plugin isolation, matched builds, sessions, reconnect and low per-client cost |
-| P005 | Interactive unresolved slash input routed as a normal prompt | piz `2f55f457`; allowance has a different patch `c6b36ad5`; coverage sufficiency not established | Upstream equivalent verified on piz, including recognized slash commands |
+| P005 | Interactive unresolved slash input routed as a normal prompt | piz `2f55f457`; allowance has a different patch `c6b36ad5`; coverage (audited 2026-10-26): verbatim forward incl. attachments + default no-opt-in "Unknown command" + headless e2e `--prompt /nope` + attach e2e via real command center asserting exactly one `session/send` + custom-command expansion precedence + recognized builtins staying local (cli.unit / attach-adapter); TUI-lane wiring pinned by `ff7bf885` (2026-10-26); still open: attach unresolved-slash **with attachments** over a real socket | Upstream equivalent verified on piz, including recognized slash commands |
 
 **Pending audit, not a carried-patch claim:** allowance-only `da309372` and
 `bac3682c` provide queue/transcript behavior absent from piz's ancestry; compare
 behavior before deciding whether to port. Do not blindly cherry-pick these or
 the different slash-input fix. lucky-field is contained in allowance, not in piz.
+
+**Later carried behavior (2026-10-26 inventory audit):** the rows above group
+behavior by product area and predate several carried changes; these are the
+verified in-main areas the 2026-10-26 review found missing from the P-rows.
+Count these interfaces when budgeting syncs.
+
+| Behavior | Provenance | Maps to |
+|---|---|---|
+| Shell aliases loaded into exec startup snapshots + eval-wrap for sourced commands | `3b2f3eb4` | adapters exec (bash-startup-script, shell-init-snapshot) |
+| Session plan overlay projected into `settings.mode.current` | `508d1c77` | protocol/bootstrap |
+| tui-pi `!` shell escape (deterministic `/bin/bash -c`, tree kill, `!!` opt-out; supersedes interactive-shell variant) | `80729ec8`, `f5241576` → `8888d7e9` | P003 |
+| ExitPlanMode plan rendered as readable markdown | `4f6d847b` | tui |
+| Detach/adopt lifecycle: detach keeps sessions alive, adopt-on-resume, bounded orphan window, busy-fact reaper | `f95b9b29`, `3d6c2785`, `04a0c046`, `b9e4b0b8` | P004 (attach-core lifecycle) |
+| Busy-quit choice (detach vs stop & quit) + ctrl-d decision fold | `68b5043b`, `87f433f8` | tui / tui-pi |
+| Pi-style usage cluster + live subagent surface | `36076bf8`+ | tui-pi |
+| Keymap additions (ctrl+x copy last reply, ctrl+n /new, ctrl+t thinking, ctrl+o info) | `0b7c1301` | tui-pi |
+| Steer/queue parity (busy Enter steers, Ctrl+Q queues, Alt+Up restores) + drained inputs rendered as transcript user rows | `fbe7dbee`, `a40b6960` (merges `4855b2b4`, `086f08c7`) | spans shared protocol schema, bootstrap server-ops, attach client, tui, tui-pi |
+| App-server ready budget: 60s window starting at spawn completion | `6537f416` | P004 (app-server-spawn) |
+| Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
+| `--model` startup model selection (attach entry + banner) | `3db70344` | P004 (attach entry) |
 
 At import, piz differed from the upstream base by 37 commits / 155 files /
 15,878 insertions / 443 deletions, before these maintenance documents. This is
