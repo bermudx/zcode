@@ -26,21 +26,16 @@ import {
   SIDEBAR_HIDDEN_STATUS,
   SIDEBAR_SHOWN_STATUS,
   applyMainSessionEvent,
-  applyWorkflowProgressToMirror,
   appendAgentResult,
-  appendWorkflowInterruptedNotices,
   createDoublePressGuard,
   createSelectionState,
   createTuiPermissionRequester,
-  interruptedWorkflowNotices,
   lastAgentReplyText,
   resolveDoublePressIntent,
   resetDoublePressGuard,
-  seedWorkflowMirror,
   submitDuringActiveTurn,
   submitIdleTurn,
   validContextUsage,
-  workflowRunSeedFromSummary,
   type TuiWorkflowMirror,
 } from "@zcode/tui/internals";
 import {
@@ -69,7 +64,7 @@ import { AppStore } from "./store.js";
 import { SubagentDirectory } from "./subagents.js";
 import { UsageTotalsAccumulator } from "./usage-totals.js";
 import type { PiTheme } from "./theme.js";
-import { WorkflowCard } from "./workflow.js";
+import { WorkflowCard, seedWorkflowRunsFromPorts } from "./workflow.js";
 
 const COPY_DEFAULT_LOCALE = "en-US" as const;
 
@@ -294,55 +289,17 @@ export class PiTuiApp {
   }
 
   /**
-   * Cold workflow state: replay journal envelopes into the shared reducer first
-   * (real node/actor state), then seed display labels and interrupted-run
-   * notices from the summary list. Both queries failing must not block startup.
+   * Cold workflow state seeding lives in workflow.ts (seedWorkflowRunsFromPorts);
+   * this wrapper keeps the app-owned mirror as the single source of truth.
    */
   private async seedWorkflowRuns(): Promise<void> {
-    const { listWorkflowRuns, replayWorkflowRuns } = this.options;
-    if (replayWorkflowRuns) {
-      try {
-        const envelopes = await replayWorkflowRuns({
-          excludeRunIds: new Set(this.workflowMirror.state.runs.map((run) => run.runId)),
-        });
-        for (const envelope of envelopes) {
-          this.workflowMirror = applyWorkflowProgressToMirror(this.workflowMirror, envelope);
-        }
-        this.workflowCard.setMirror(this.workflowMirror);
-      } catch (error) {
-        // 回放失败不该让 TUI 起不来，但不能无声：单行 stderr 诊断留痕
-        // （诊断走 stderr，不污染协议 stdout）。
-        this.options.stderr.write(
-          `piz tui: workflow replay failed: ${
-            error instanceof Error ? error.message : String(error)
-          }\n`,
-        );
-      }
-    }
-    if (!listWorkflowRuns) return;
-    let summaries: Awaited<ReturnType<NonNullable<typeof listWorkflowRuns>>>;
-    try {
-      summaries = await listWorkflowRuns();
-    } catch (error) {
-      this.options.stderr.write(
-        `piz tui: workflow run list failed: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
-      );
-      return;
-    }
-    if (summaries.length === 0) return;
-    this.workflowMirror = seedWorkflowMirror(
-      this.workflowMirror,
-      summaries.map(workflowRunSeedFromSummary),
-    );
-    this.workflowCard.setMirror(this.workflowMirror);
-    const resumable = interruptedWorkflowNotices(summaries);
-    if (resumable.length > 0) {
-      this.store.setter("messages")((current) =>
-        appendWorkflowInterruptedNotices(current, resumable, this.copy),
-      );
-    }
+    this.workflowMirror = await seedWorkflowRunsFromPorts({
+      appendMessages: this.store.setter("messages"),
+      card: this.workflowCard,
+      copy: this.copy,
+      mirror: this.workflowMirror,
+      ports: this.options,
+    });
     this.tui.requestRender();
   }
 

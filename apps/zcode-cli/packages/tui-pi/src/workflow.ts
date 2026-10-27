@@ -4,9 +4,17 @@
 // TuiWorkflowMirror reducer fed by replay + live progress envelopes.
 
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
-import type {
-  TuiWorkflowMirror,
-  TuiWorkflowRunSeed,
+import type { TuiCopy } from "@zcode/i18n";
+import {
+  applyWorkflowProgressToMirror,
+  appendWorkflowInterruptedNotices,
+  interruptedWorkflowNotices,
+  seedWorkflowMirror,
+  workflowRunSeedFromSummary,
+  type Message,
+  type TuiOptions,
+  type TuiWorkflowMirror,
+  type TuiWorkflowRunSeed,
 } from "@zcode/tui/internals";
 import type { WorkflowRunState } from "@zcode/shared/zcode-protocol-v4";
 import type { PiTheme, Style } from "./theme.js";
@@ -148,3 +156,58 @@ export class WorkflowCard implements Component {
     return lines;
   }
 }
+
+/**
+ * 冷启动 workflow 状态：先把 replay journal envelopes 折进共享 reducer（真实
+ * node/actor 状态），再从 summary list 补 label 与 interrupted notice。两次
+ * 查询失败都不阻断启动，但每次失败写单行 stderr 诊断留痕（诊断走 stderr，
+ * 不污染协议 stdout）。返回推进后的 mirror——mirror 状态由调用方持有。
+ */
+export const seedWorkflowRunsFromPorts = async (input: {
+  appendMessages: (update: (current: Message[]) => Message[]) => void;
+  card: WorkflowCard;
+  copy: TuiCopy;
+  mirror: TuiWorkflowMirror;
+  ports: Pick<TuiOptions, "listWorkflowRuns" | "replayWorkflowRuns" | "stderr">;
+}): Promise<TuiWorkflowMirror> => {
+  const { card, copy, ports } = input;
+  let mirror = input.mirror;
+  if (ports.replayWorkflowRuns) {
+    try {
+      const envelopes = await ports.replayWorkflowRuns({
+        excludeRunIds: new Set(mirror.state.runs.map((run) => run.runId)),
+      });
+      for (const envelope of envelopes) {
+        mirror = applyWorkflowProgressToMirror(mirror, envelope);
+      }
+      card.setMirror(mirror);
+    } catch (error) {
+      // 回放失败不该让 TUI 起不来，但不能无声：单行 stderr 诊断留痕。
+      ports.stderr.write(
+        `piz tui: workflow replay failed: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    }
+  }
+  if (!ports.listWorkflowRuns) return mirror;
+  let summaries: Awaited<ReturnType<NonNullable<typeof ports.listWorkflowRuns>>>;
+  try {
+    summaries = await ports.listWorkflowRuns();
+  } catch (error) {
+    ports.stderr.write(
+      `piz tui: workflow run list failed: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`,
+    );
+    return mirror;
+  }
+  if (summaries.length === 0) return mirror;
+  mirror = seedWorkflowMirror(mirror, summaries.map(workflowRunSeedFromSummary));
+  card.setMirror(mirror);
+  const resumable = interruptedWorkflowNotices(summaries);
+  if (resumable.length > 0) {
+    input.appendMessages((current) => appendWorkflowInterruptedNotices(current, resumable, copy));
+  }
+  return mirror;
+};
