@@ -77,6 +77,12 @@ Slash Commands:
 `,
   },
   tui: {
+    connection: {
+      lost: "Connection to shared core lost — reconnecting…",
+      reconnected: "Reconnected to shared core",
+      reconnectedSessionUnavailable:
+        "Reconnected to shared core — session unavailable, retrying…",
+    },
     copy: {
       copied: "Copied selected text to clipboard.",
       failed: "Could not copy selected text.",

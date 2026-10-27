@@ -10,6 +10,7 @@ import {
   zcodeUserInputRequestParamsSchema,
   type ZCodeSessionRawEvent,
 } from "@zcode/shared";
+import { getZCodeCopy, type TuiCopy } from "@zcode/i18n";
 import type { PermissionBrokerResult } from "@zcode/contracts";
 import {
   brokerResultToPermissionResponse,
@@ -55,6 +56,7 @@ export interface AttachRuntimeOptions {
   ensureConnected?: () => Promise<{ socketPath: string }>;
   socketPath: string;
   logger?: AttachRuntimeLogger;
+  /** 状态行文案的解析 locale（经 getZCodeCopy 走 tui.connection.* 目录）。 */
   locale?: TuiSubmitPromptResult["locale"];
   runtimePreferences?: Record<string, unknown>;
   /** session/resume 冷恢复所需的 workspace ref（core 重启后 session/subscribe 找不到 record）。 */
@@ -197,8 +199,10 @@ export class AttachRuntime {
   private readonly sessionBoundListeners = new Set<
     (handle: AttachSessionHandle) => void
   >();
+  /** 断线状态行文案：构造时按 options.locale 解析（曾硬编码法语、无视 locale）。 */
+  private readonly connectionCopy: TuiCopy["connection"];
 
-  /** Écoute de l'état de connexion (port TuiOptions.subscribeConnectionStatus). */
+  /** 订阅连接状态（TuiOptions.subscribeConnectionStatus 端口）。 */
   onConnectionStatus(listener: (status: string) => void): () => void {
     this.statusListeners.add(listener);
     return () => this.statusListeners.delete(listener);
@@ -219,6 +223,7 @@ export class AttachRuntime {
 
   constructor(options: AttachRuntimeOptions) {
     this.options = options;
+    this.connectionCopy = getZCodeCopy(options.locale).tui.connection;
   }
 
   async connect(): Promise<AttachClient> {
@@ -339,7 +344,7 @@ export class AttachRuntime {
   private onDisconnected(): void {
     if (this.stopped) return;
     this.client = undefined;
-    this.emitStatus("Connexion au core perdue — reconnexion…");
+    this.emitStatus(this.connectionCopy.lost);
     for (const handle of this.sessions.values()) {
       handle.ingestRawEvent(
         connectionNoticeEvent(
@@ -387,11 +392,11 @@ export class AttachRuntime {
       }
     }
     if (total === 0 || recovered === total) {
-      this.emitStatus("Reconnecté au core");
+      this.emitStatus(this.connectionCopy.reconnected);
     } else {
       // core 重连但会话不可恢复（新 core registry 无 record、store 未持久化）——
       // 如实显示并继续退避：core 若在下一轮可恢复（异步物化），仍会补上。
-      this.emitStatus("Reconnecté au core — session indisponible, nouvelle tentative…");
+      this.emitStatus(this.connectionCopy.reconnectedSessionUnavailable);
       this.scheduleReconnect();
     }
   }

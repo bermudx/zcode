@@ -16,6 +16,12 @@ export interface CliCopy {
 }
 
 export interface TuiCopy {
+  /** 共享 core（attach）连接状态行：断线/重连由 runtime 发射，随 locale 解析。 */
+  connection: {
+    lost: string;
+    reconnected: string;
+    reconnectedSessionUnavailable: string;
+  };
   copy: {
     copied: string;
     failed: string;

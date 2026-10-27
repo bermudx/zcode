@@ -77,6 +77,11 @@ Slash Commands:
 `,
   },
   tui: {
+    connection: {
+      lost: "与共享 core 的连接已断开——正在重连…",
+      reconnected: "已重新连接共享 core",
+      reconnectedSessionUnavailable: "已重新连接共享 core——会话暂不可用，正在重试…",
+    },
     copy: {
       copied: "已复制选中文本到剪贴板。",
       failed: "无法复制选中文本。",

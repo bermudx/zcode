@@ -84,13 +84,19 @@ export const runAttachCommand = async (
       workspaceIdentity: env[ZCODE_WORKSPACE_IDENTITY_ENV]?.trim() || undefined,
       workspacePath: workspaceDirectory,
     };
-    // session/create exige le ref complet : workspaceKey = identité résolue
-    // (workspaceIdentity || workspacePath), même helper que resolveSocketPath.
+    // session/create 需要完整 ref：workspaceKey = 解析出的身份
+    // （workspaceIdentity || workspacePath），与 resolveSocketPath 同一 helper。
     const workspaceRef = {
       workspacePath: workspace.workspacePath,
       workspaceIdentity: workspace.workspaceIdentity,
       workspaceKey: resolveWorkspaceKey(workspace),
     };
+    // 瘦客户端（zcode-attach）不带 config 适配器：locale 用轻量路径；
+    // monolith 经 deps.resolveAttachStartupLocale 注入完整 createConfig 实现。
+    // 在 AttachRuntime 构造前解析：断线状态行（tui.connection.*）按同一 locale。
+    const startupLocale =
+      deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
+      resolveLocale(options.locale, options.detectedLocale);
     const { socketPath } = await ensureServer({ env, version, workspace });
     const runtime = new AttachRuntime({
       socketPath,
@@ -100,6 +106,7 @@ export const runAttachCommand = async (
       ensureConnected: async () => ({
         socketPath: (await ensureServer({ env, version, workspace })).socketPath,
       }),
+      locale: startupLocale,
     });
     // herdr reporter：必须在 createAttachPromptHandler 注册首个句柄前挂好
     // onSessionBound，才能收到初始绑定（否则 pane 无 session/resume 元数据）。
@@ -116,11 +123,6 @@ export const runAttachCommand = async (
       runtime.onSessionBound((handle) => herdrReporter.bind(handle));
     }
     const client = await runtime.connect();
-    // 瘦客户端（zcode-attach）不带 config 适配器：locale 用轻量路径；
-    // monolith 经 deps.resolveAttachStartupLocale 注入完整 createConfig 实现。
-    const startupLocale =
-      deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
-      resolveLocale(options.locale, options.detectedLocale);
     try {
       // 会话选择与主 CLI 语义一致（不再默认 resume）：
       //   默认          → session/create（开新会话）
@@ -283,8 +285,8 @@ export const runAttachCommand = async (
         stdin: ctx.stdin,
         stdout: ctx.stdout,
         submitPrompt: promptHandler,
-        // tui-attach : la ligne de status pi-tui lit ce port de niveau options,
-        // pas une propriété du handler — l'émission vient de runtime (reconnect).
+        // tui-attach：pi-tui 状态行从 options 层的这个端口读连接状态（不是
+        // handler 的属性）——发射方是 runtime（重连）。
         subscribeConnectionStatus: (listener) => runtime.onConnectionStatus(listener),
         subscribeSessionEvents: promptHandler.subscribeSessionEvents,
         version,

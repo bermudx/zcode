@@ -4,7 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { ZCODE_PROTOCOL_VERSION } from "@zcode/shared";
+import { ZCODE_PROTOCOL_VERSION, zcodeProtocolErrorCodes } from "@zcode/shared";
+import { getZCodeCopy } from "@zcode/i18n";
 import { connectAttachClient } from "../src/attach/attach-client.js";
 import { AttachSessionHandle } from "../src/attach/attach-session.js";
 import {
@@ -431,6 +432,94 @@ test("recallPreviousInput → session/recallPreviousInput", async () => {
     assert.equal(entry?.text, "previous prompt");
   } finally {
     client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 回归证据（P004-F3，2026-10-26 评审）：断线状态行曾硬编码法语（无视
+// --locale）。状态文案必须走 i18n 目录：tui.connection.* 三键在全部 locale
+// 文件里都有，且不同 locale 解析出各自文案。
+test("断线状态文案三键在 en-US/zh-CN 目录齐全且按 locale 区分", () => {
+  const en = getZCodeCopy("en-US").tui.connection;
+  const zh = getZCodeCopy("zh-CN").tui.connection;
+  assert.equal(en.lost, "Connection to shared core lost — reconnecting…");
+  assert.equal(en.reconnected, "Reconnected to shared core");
+  assert.equal(
+    en.reconnectedSessionUnavailable,
+    "Reconnected to shared core — session unavailable, retrying…",
+  );
+  assert.equal(zh.lost, "与共享 core 的连接已断开——正在重连…");
+  assert.equal(zh.reconnected, "已重新连接共享 core");
+  assert.equal(
+    zh.reconnectedSessionUnavailable,
+    "已重新连接共享 core——会话暂不可用，正在重试…",
+  );
+  // 键互不相同：不是同一份硬编码穿两层。
+  assert.notEqual(en.lost, zh.lost);
+  assert.notEqual(en.reconnected, zh.reconnected);
+  assert.notEqual(en.reconnectedSessionUnavailable, zh.reconnectedSessionUnavailable);
+});
+
+// P004-F3 的发射路径：AttachRuntime 按 options.locale 从目录取状态行——
+// 断线 / 重连成功 / 重连但会话不可恢复三个状态都不得再出现硬编码法语。
+test("AttachRuntime 断线状态行按 locale 走 i18n 目录", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-status-locale-"));
+  const socketPath = join(dir, "core.sock");
+  const goodResponder = (request: Captured): unknown => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    return {};
+  };
+  // 冷 core：subscribe/resume 都回 sessionUnavailable → 会话不可恢复。
+  const coldResponder = (request: Captured): unknown => {
+    if (request.method === "session/subscribe") {
+      return Promise.reject(
+        Object.assign(new Error("session unavailable"), {
+          code: zcodeProtocolErrorCodes.sessionUnavailable,
+        }),
+      );
+    }
+    if (request.method === "session/resume") {
+      return Promise.reject(
+        Object.assign(new Error("no such session"), {
+          code: zcodeProtocolErrorCodes.sessionUnavailable,
+        }),
+      );
+    }
+    return {};
+  };
+  let core = await startFakeCore(socketPath, goodResponder);
+  const runtime = new AttachRuntime({
+    locale: "zh-CN",
+    socketPath,
+    workspace: { workspaceIdentity: undefined, workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+  });
+  const statuses: string[] = [];
+  runtime.onConnectionStatus((status) => statuses.push(status));
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const firstClient = await runtime.connect();
+  try {
+    await core.kill();
+    await firstClient.closed;
+    assert.equal(statuses.at(-1), "与共享 core 的连接已断开——正在重连…");
+    core = await startFakeCore(socketPath, goodResponder);
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    assert.equal(statuses.at(-1), "已重新连接共享 core");
+    await core.kill();
+    await runtime.currentClient().closed;
+    assert.equal(statuses.at(-1), "与共享 core 的连接已断开——正在重连…");
+    core = await startFakeCore(socketPath, coldResponder);
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    assert.equal(statuses.at(-1), "已重新连接共享 core——会话暂不可用，正在重试…");
+  } finally {
+    await runtime.close();
     await core.close();
     await rm(dir, { force: true, recursive: true });
   }
