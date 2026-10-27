@@ -36,7 +36,7 @@ export class NodeExecutionAdapterBase {
 
   protected readonly shellInitRetentionCleanup: Promise<unknown>;
 
-  protected readonly shellInitSnapshots = new ShellInitSnapshotManager();
+  protected readonly shellInitSnapshots: ShellInitSnapshotManager;
 
   protected readonly outputPathsByRequest = new WeakMap<ExecutionRequest, ExecutionOutputPaths>();
 
@@ -46,6 +46,9 @@ export class NodeExecutionAdapterBase {
 
   constructor(options: NodeExecutionAdapterOptions = {}) {
     this.options = options;
+    // 快照管理器要拿到注入的 Logger（失败回退 login shell 时的 debug 留痕），
+    // 只能在构造函数里建，不能放字段初始化器（那里拿不到 options）。
+    this.shellInitSnapshots = new ShellInitSnapshotManager({ logger: options.logger });
     const rootDir = options.outputRootDir ?? resolveDefaultOutputRootDir(options.processEnv);
     this.shellInitRetentionCleanup = cleanupStaleShellInitSnapshots({ rootDir }).catch(
       () => undefined,

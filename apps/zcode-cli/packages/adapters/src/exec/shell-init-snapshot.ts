@@ -7,7 +7,7 @@ import { access, mkdir, readdir, stat, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { windowsPathToGitBashPath } from "@zcode/contracts";
-import type { ExecutionShellDialect } from "@zcode/contracts";
+import type { ExecutionShellDialect, Logger } from "@zcode/contracts";
 import type { StartupShellDialect } from "./bash-startup-script.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -59,6 +59,10 @@ export interface ShellInitSnapshotRequest {
 
 export interface ShellInitSnapshotManagerOptions {
   execFile?: ShellInitSnapshotExecFile;
+  /** 快照创建失败时的诊断出口（debug 级）：失败本身不能无声——执行回退 login
+   *  shell 时，alias 静默失效需要一条日志才能定位（chatty 交互 rc 撑爆
+   *  maxBuffer、spawn 失败等）。沿用包内注入 Logger 的约定。 */
+  logger?: Logger;
 }
 
 export function shellInitSnapshotsDir(rootDir: string): string {
@@ -96,9 +100,11 @@ export class ShellInitSnapshotManager {
   private readonly cache = new Map<string, Promise<ShellInitSnapshot | undefined>>();
   private readonly cleanupRegistry = new ShellInitSnapshotCleanupRegistry();
   private readonly execFile: ShellInitSnapshotExecFile;
+  private readonly logger: Logger | undefined;
 
   constructor(options: ShellInitSnapshotManagerOptions = {}) {
     this.execFile = options.execFile ?? defaultExecFile;
+    this.logger = options.logger;
   }
 
   getOrCreate(request: ShellInitSnapshotRequest): Promise<ShellInitSnapshot | undefined> {
@@ -114,7 +120,20 @@ export class ShellInitSnapshotManager {
     const cached = this.cache.get(key);
     if (cached) return cached;
 
-    const created = this.create(snapshotRequest).catch(() => undefined);
+    // 创建失败（chatty 交互 rc 撑爆 1MB maxBuffer、spawn 失败等）会静默回退
+    // login shell——用户 alias 无声失效。回退必须保留，但失败要留一条 debug
+    // 诊断（诊断经注入 Logger，不污染协议 stdout）。缓存里存的是回退结果
+    // （undefined），不会重复打日志。
+    const created = this.create(snapshotRequest).catch((error: unknown) => {
+      this.logger?.debug("Shell init snapshot creation failed; falling back to login shell", {
+        error: error instanceof Error ? error.message : String(error),
+        event: "exec.shell_init_snapshot_failed",
+        module: "adapters.exec.shell-init-snapshot",
+        rootDir: snapshotRequest.rootDir,
+        shellPath: snapshotRequest.shellPath,
+      });
+      return undefined;
+    });
     this.cache.set(key, created);
     return created;
   }

@@ -1013,6 +1013,54 @@ test("command center keeps the Unknown command response when the client does not
   assert.match(result.response, /Available commands: .*\/review/);
 });
 
+// 回归证据（P005-F1，2026-10-26 评审）：上一个用例只钉了 createCommandCenter 的
+// flag 本体；TUI 车道在 tui-prompt-handler.ts 里自行组装 command center，那条
+// wiring（forwardUnknownSlashAsPrompt: true）没有直接测试——重构 deps 组装时把它
+// 掉了也不会红。这里端到端驱动 createTuiSubmitPrompt 返回的 handler 本体，
+// 断言解析不出来的 `/...` 原文进 app.submitPrompt。
+test("TUI submit prompt handler forwards an unresolvable slash input to the app verbatim", async () => {
+  const submitted: unknown[] = [];
+  const handler = createTuiSubmitPrompt(
+    {
+      ...createPromptDeps(),
+      createZCodeApp: () =>
+        ({
+          getModel: () => "openai/gpt-test",
+          getThoughtLevel: () => "medium",
+          listModels: selectableTestModels,
+          sessionId: "session-tui-forward",
+          traceId: "trace-tui-forward",
+          runtime: {} as never,
+          submitPrompt: async (prompt: unknown) => {
+            submitted.push(prompt);
+            return {
+              projection: fakeProjection as never,
+              response: "answer-from-tui-lane",
+              traceId: "trace-tui-forward" as never,
+              turnId: "turn-tui-forward" as never,
+            };
+          },
+        }) as never,
+      loadCustomCommand: async () => {
+        throw new Error("Custom command not found: home/daniel/dots/pi/models.json");
+      },
+    },
+    {},
+    "test",
+  );
+
+  const input = "/home/daniel/dots/pi/models.json\n\nlogfare models can change every day";
+  const result = await handler(input, {});
+
+  assert.equal(submitted.length, 1);
+  // 原文逐字下发（含首行路径），而不是一句 "Unknown command"。
+  assert.deepEqual(submitted[0], input);
+  assert.equal(result.response, "answer-from-tui-lane");
+  assert.equal(result.response.includes("Unknown command"), false);
+
+  await handler.close?.();
+});
+
 test("zcode commands list prints custom commands", async () => {
   const ctx = createContext(["commands"]);
   const logger = {} as NonNullable<RunDependencies["logger"]>;

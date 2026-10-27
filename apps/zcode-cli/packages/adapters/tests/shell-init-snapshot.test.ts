@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import type { LogContext, Logger } from "@zcode/contracts";
 import {
   ShellInitSnapshotManager,
   buildShellInitSnapshotCreationScript,
@@ -352,6 +353,61 @@ describe("shell init snapshot", () => {
       expect(first).toBeUndefined();
       expect(second).toBeUndefined();
       expect(execFile).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("diagnoses failed snapshot creation via the injected logger while keeping the fallback", async () => {
+    // REM-F3 回归（2026-10-26 评审）：snapshot 创建失败（chatty 交互 rc 撑爆 1MB
+    // maxBuffer、spawn 失败等）曾被 .catch(() => undefined) 无声吞掉——alias 对
+    // 这类用户静默失效，日志里也无从得知。现在每次失败必须经注入 logger 打一条
+    // debug 诊断（event: exec.shell_init_snapshot_failed），且回退契约不变：
+    // getOrCreate 仍解析 undefined，调用方照旧走 login shell。
+    const rootDir = await mkdtemp(join(tmpdir(), "zcode-shell-init-snapshot-"));
+    const maxBufferOverflow = Object.assign(new Error("maxBuffer exceeded"), {
+      code: "ENOBUFS",
+    });
+    const execFile = vi.fn(async () => {
+      throw maxBufferOverflow;
+    });
+    const debugEntries: Array<{ message: string; context?: LogContext }> = [];
+    const logger: Logger = {
+      child: () => logger,
+      debug: (message, context) => {
+        debugEntries.push({ context, message });
+      },
+      error: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+    };
+
+    try {
+      const manager = new ShellInitSnapshotManager({ execFile, logger });
+      const first = await manager.getOrCreate({
+        env: { HOME: rootDir },
+        rootDir,
+        shellDialect: "posix",
+        shellPath: "/bin/bash",
+      });
+      const second = await manager.getOrCreate({
+        env: { HOME: rootDir },
+        rootDir,
+        shellDialect: "posix",
+        shellPath: "/bin/bash",
+      });
+
+      // 回退行为与缓存语义保持不变：失败 → undefined，且只尝试一次。
+      expect(first).toBeUndefined();
+      expect(second).toBeUndefined();
+      expect(execFile).toHaveBeenCalledTimes(1);
+
+      // 失败本身必须留痕：一条 debug 诊断带足定位上下文。
+      expect(debugEntries.length).toBe(1);
+      expect(debugEntries[0]?.message).toContain("snapshot");
+      expect(debugEntries[0]?.context?.event).toBe("exec.shell_init_snapshot_failed");
+      expect(String(debugEntries[0]?.context?.error)).toContain("maxBuffer exceeded");
+      expect(debugEntries[0]?.context?.shellPath).toBe("/bin/bash");
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }

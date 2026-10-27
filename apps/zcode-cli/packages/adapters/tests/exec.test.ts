@@ -53,6 +53,8 @@ import {
   type ExecutionResult,
   type ExecutionRequest,
   type ExecutionRunOptions,
+  type LogContext,
+  type Logger,
   windowsPathToGitBashPath,
 } from "@zcode/contracts";
 import { ZCODE_NO_PROXY_ENV_KEY, ZCODE_TOOL_ENV_PASSTHROUGH_ENV_KEY } from "@zcode/shared";
@@ -1485,6 +1487,94 @@ describe("NodeExecutionAdapter", () => {
         expect(invocations[0]).toContain("-ic");
         expect(invocations.at(-1)).toMatch(/^-c /u);
         expect(invocations.at(-1)).not.toContain("-l ");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!POSIX_BASH_PATH)(
+    "diagnoses shell init snapshot failure and falls back to a login shell",
+    async () => {
+      // REM-F3 回归（2026-10-26 评审）：snapshot 创建失败曾被 .catch(() => undefined)
+      // 无声吞掉——执行静默回退 login shell（alias 失效），日志零线索。wrapper 的
+      // -ic 调用模拟 chatty rc 失败：必须 (1) 经注入 logger 打出 debug 诊断，
+      // (2) 用户命令照常执行且改走 -l login shell（回退行为保持不变）。
+      const root = await mkdtemp(join(tmpdir(), "zcode-exec-snapshot-fallback-"));
+      const home = join(root, "home");
+      const bin = join(root, "bin");
+      const shellLog = join(root, "shell-args.log");
+      const shellWrapper = join(bin, "bash-wrapper");
+
+      await mkdir(home, { recursive: true });
+      await mkdir(bin, { recursive: true });
+      await writeFile(
+        shellWrapper,
+        [
+          "#!/usr/bin/env bash",
+          'printf \'%q \' "$@" >> "$ZCODE_TEST_SHELL_LOG"',
+          "printf '\\n' >> \"$ZCODE_TEST_SHELL_LOG\"",
+          'if [ "$1" = "-ic" ]; then',
+          '  printf "chatty interactive rc noise\\n" >&2',
+          "  exit 1",
+          "fi",
+          `exec ${JSON.stringify(POSIX_BASH_PATH!)} "$@"`,
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+
+      const debugEntries: Array<{ message: string; context?: LogContext }> = [];
+      const logger: Logger = {
+        child: () => logger,
+        debug: (message, context) => {
+          debugEntries.push({ context, message });
+        },
+        error: () => undefined,
+        info: () => undefined,
+        warn: () => undefined,
+      };
+
+      try {
+        const adapter = new NodeExecutionAdapter({
+          logger,
+          outputRootDir: root,
+          processEnv: {
+            ...process.env,
+            HOME: home,
+            SHELL: shellWrapper,
+            ZCODE_TEST_SHELL_LOG: shellLog,
+          },
+        });
+        const result = await adapter.run({
+          command: {
+            mode: "shell",
+            command: 'shopt -q login_shell; rc=$?; printf "%s" "$rc"',
+            shellProfile: "posix-bash",
+            shellOverride: {
+              dialect: "posix",
+              display: { name: "bash" },
+              path: shellWrapper,
+              source: "auto-detected",
+            },
+          },
+        });
+
+        // 用户命令照常执行：login shell 生效（rc=0），回退没有破坏执行。
+        expect(result.status).toBe("completed");
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.text).toBe("0");
+
+        const invocations = (await readFile(shellLog, "utf8")).trim().split("\n");
+        expect(invocations[0]).toContain("-ic");
+        // 快照失败后的执行调用必须带 -l（login shell 回退）。
+        expect(invocations.at(-1)).toMatch(/^-c -l /u);
+
+        // 失败本身必须留痕：一条 debug 诊断。
+        expect(debugEntries.length).toBe(1);
+        expect(debugEntries[0]?.message).toContain("snapshot");
+        expect(debugEntries[0]?.context?.event).toBe("exec.shell_init_snapshot_failed");
+        expect(String(debugEntries[0]?.context?.error)).toContain("Command failed");
       } finally {
         await rm(root, { recursive: true, force: true });
       }
