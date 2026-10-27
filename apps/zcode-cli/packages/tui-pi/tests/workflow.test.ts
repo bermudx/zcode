@@ -96,3 +96,34 @@ test("run line with ANSI styles truncates to width without cutting mid-escape", 
     }
   }
 });
+
+test("workflow seed failures surface a stderr diagnostic and keep the TUI alive", async () => {
+  // P003-F4 回归：replay/list 失败曾被静默吞掉（"回放失败不该让 TUI 起不来"
+  // 只保留了前半句）——用户无感丢失 workflow 状态。现在每次失败必须单行
+  // stderr 留痕，且启动照常完成。
+  const { createHarness } = await import("./harness.js");
+  const stderrLines: string[] = [];
+  const h = createHarness({
+    listWorkflowRuns: () => Promise.reject(new Error("list boom")),
+    replayWorkflowRuns: () => Promise.reject(new Error("replay boom")),
+    stderr: { write: (line: string) => (stderrLines.push(line), true) } as never,
+  });
+  try {
+    await h.app.applyStartupOptions({});
+    // seedWorkflowRuns 是 void 触发的异步链：按「两条诊断都到达」为终态等待。
+    await h.flush(() => stderrLines.length >= 2, 2_000);
+    assert.ok(
+      stderrLines.some((line) => line.includes("replay boom")),
+      `replay diagnostic missing: ${JSON.stringify(stderrLines)}`,
+    );
+    assert.ok(
+      stderrLines.some((line) => line.includes("list boom")),
+      `list diagnostic missing: ${JSON.stringify(stderrLines)}`,
+    );
+    // 启动韧性：TUI 仍在跑、未置退出码。
+    assert.equal(h.exitCode(), undefined);
+    assert.equal(h.terminal.stopped, false);
+  } finally {
+    await h.stop();
+  }
+});

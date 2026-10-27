@@ -309,15 +309,26 @@ export class PiTuiApp {
           this.workflowMirror = applyWorkflowProgressToMirror(this.workflowMirror, envelope);
         }
         this.workflowCard.setMirror(this.workflowMirror);
-      } catch {
-        // 回放失败不该让 TUI 起不来。
+      } catch (error) {
+        // 回放失败不该让 TUI 起不来，但不能无声：单行 stderr 诊断留痕
+        // （诊断走 stderr，不污染协议 stdout）。
+        this.options.stderr.write(
+          `piz tui: workflow replay failed: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
       }
     }
     if (!listWorkflowRuns) return;
     let summaries: Awaited<ReturnType<NonNullable<typeof listWorkflowRuns>>>;
     try {
       summaries = await listWorkflowRuns();
-    } catch {
+    } catch (error) {
+      this.options.stderr.write(
+        `piz tui: workflow run list failed: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
       return;
     }
     if (summaries.length === 0) return;
