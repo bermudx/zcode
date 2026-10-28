@@ -466,3 +466,55 @@ injection by design (pi-mono parity), not mid-stream interruption.
 
 The full acceptance gate (signing against the real provider request,
 allowance evidence, Ctrl-C signal path, memory matrix) remains open.
+
+## 2026-10-27 — merges (footer verbatim + quota, transcript-polish) and promotion of the 24866159 pair
+
+`main` fast-forwarded to `patch/pi-footer-verbatim` (`096da491`, 5 commits: verbatim
+pi footer parity + core-side `usage/codingPlanQuota` cluster), then `patch/transcript-polish`
+(`f4780a2b`) merged as `eb119f46`, plus test-migration fixup `24866159`; promoted from
+clean main.
+
+**Merge conflict with real content:** both main (`a40b6960`, 10-26) and transcript-polish
+(`c0527374`, 10-25 + `f4780a2b` fixups, 10-27) had implemented drained-input transcript
+echo in `@zcode/tui` `app-events.ts` in parallel; the auto-merge kept BOTH definitions.
+Resolved to the transcript-polish reducer (strict superset): rows carry stable ids
+(`messageId` ?? `pendingInputId`, idempotent under redelivery — main's id-less rows would
+duplicate), sensitive prompts redacted on echo, visibility aligned with both resume
+authorities. Main's payload-order test (tui) and tui-pi's `submit.test.ts` e2e migrated
+to the id-carrying row shape. FORK.md P002/P003 rows composed from both sides. Note:
+`tui-pi` `submit.test.ts` had passed on the branch against a **stale `@zcode/tui` dist**
+(id-less era) — the documented stale-dist trap, now hit in the other direction.
+
+Battery on merged main, all green unless stated:
+
+- Root typecheck; root lint 0 errors / 96 warnings (baseline); CLI typecheck 34/34;
+  CLI lint via `run-cli-lint.mjs` 0 errors / 71 warnings / 13 accepted (baseline);
+  `architecture:check --changed` 0 violations.
+- `@zcode/tui` 256/256; `@zcode/tui-pi` 243/243 (after the expectation migration; one
+  earlier full-suite run showed a 496s file-level hang on `submit.test.ts` — traced to
+  orphaned tsx processes from an interrupted run, not reproducible clean, 1.3s isolated).
+- CLI suite: 612 tests, 609 pass. **Resolution of the "3 known pre-existing failures":**
+  2 of them (`includes TUI workspace runtime package assets`, `loads TUI from an extracted
+  SEA runtime dependency closure`) fail because root-workspace `packages/model-option-map/dist`
+  is empty — the CLI turbo build never builds it. `mise exec -- pnpm run build` in that
+  package makes both pass (`build-sea.test.mjs` 42/42). Only
+  `desktop agent builds minify the app-facing JS bundle` (clientOnly deep-equal) remains
+  a genuine known failure. Future batteries should build model-option-map first.
+- Attach extras 44/44; adapters signing 13/13 (grown from 9); bootstrap socket-listener
+  4/4; shared attach contract + new quota schema 8/8 (root vitest).
+- Fresh dist pair (25/25) + `build:attach`; bundle greps: `TranscriptMarkdown` ×6 and
+  `quotaSnapshot` ×2 in tui-pi dist, `usage/codingPlanQuota` in `zcode.cjs` and
+  `zcode-attach.cjs`, polish reducer + redaction in tui dist.
+- `promote-piz.sh` from clean main (gate positive path).
+- Installed-pair smoke (real `piz`, util-linux `script` pty, scratch git ws + isolated
+  `ZCODE_DATA_BASE_DIR`): banner `piz v0.17.0`, footer pwd row `/tmp/piz-smoke-ws4 (main)`
+  + `no-model • yolo` (incl. the `•` identity separator), and the quota cluster surfacing
+  an honest diagnostic under no-credentials:
+  `[tui-pi] quota refresh failed: no coding-plan provider with an API key in the registry`
+  — no crash, cluster degrades, core exited with the client, no scratch leftovers.
+
+NOT exercised live (unverified): a real GLM turn against the promoted pair, the quota
+cluster rendering actual account values (needs the operator's provider config), and the
+narrow-table/json-fence rendering against real model output in a live session. Full
+acceptance gate (signing against the real provider request, allowance evidence, Ctrl-C
+signal path, memory matrix) remains open and unchanged.

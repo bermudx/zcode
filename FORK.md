@@ -157,7 +157,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the 086f08c7 pair (steer/queue parity + live fix: drained steer/queued inputs render as transcript user rows, Steering/Follow-up labels), promoted 2026-10-25 from main after the verification matrix incl. live steer — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the 24866159 pair (footer verbatim parity + coding-plan quota cluster; transcript rendering polish + stable-id drained rows merge), promoted 2026-10-27 from main after the verification battery — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
