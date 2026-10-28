@@ -119,7 +119,7 @@ test("steered input becomes a transcript user row when drained", async () => {
   } as Parameters<typeof h.app.applyEvent>[0]);
 
   assert.deepEqual(h.store.state.messages, [
-    { content: "now to my actual point", role: "user" },
+    { content: "now to my actual point", id: "m1", role: "user" },
   ]);
   assert.deepEqual(h.store.state.queuedInputs, []);
   await h.stop();
