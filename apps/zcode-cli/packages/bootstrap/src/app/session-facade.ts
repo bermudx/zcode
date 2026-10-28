@@ -27,6 +27,7 @@ import {
   createMcpToolEntry,
   toMcpToolName,
   type AgentRuntime,
+  type ProviderRuntimeHeadersPort,
 } from "@zcode/core";
 import { resolveLocale } from "@zcode/i18n";
 import { normalizeModelSelection, type ModelSelection } from "@zcode/provider";
@@ -139,6 +140,12 @@ interface CreateSessionFacadeDeps {
   prepareResume(traceContext?: TraceContext): Promise<void>;
   projectID: ProjectId;
   providerRegistry: ProviderRegistryModelSource;
+  /**
+   * 账号通道凭据解析端口（与模型请求同一所有者）；额度读取经它取
+   * zhipu-account 的计划级凭据。缺席（测试装配）时额度只覆盖 provider
+   * config 内的 API key 访问。
+   */
+  providerRuntimeHeaders?: Pick<ProviderRuntimeHeadersPort, "refreshBeforeModelRequest">;
   resolveUiLocale(locale: UiLocale): SupportedLocale;
   runtime: AgentRuntime;
   sessionId: SessionId;
@@ -352,7 +359,29 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
       }),
     ...createSubagentObservation(deps),
     readCodingPlanQuota: async () =>
-      fetchCodingPlanQuota({ registry: deps.providerRegistry }),
+      fetchCodingPlanQuota({
+        registry: deps.providerRegistry,
+        // 账号凭据解析复用模型请求端口（同一所有者：standalone core 的
+        // createStandaloneProviderRuntimeHeadersPort）。reason 取
+        // "model-request"（协议枚举仅此/captcha-retry；standalone 端口
+        // 不消费 reason，凭据解析语义与请求前刷新一致）。解析失败由
+        // fetchCodingPlanQuota 的候选循环容错，不在此处上报。
+        ...(deps.providerRuntimeHeaders
+          ? {
+              resolveAccountApiKey: (input) =>
+                deps
+                  .providerRuntimeHeaders!.refreshBeforeModelRequest({
+                    accountAccess: input.accountAccess,
+                    modelId: input.modelId,
+                    providerId: input.providerId,
+                    reason: "model-request",
+                    sessionId: deps.sessionId,
+                    traceContext: deps.traceContext,
+                  })
+                  .then((result) => result.requestAuth?.apiKey ?? null),
+            }
+          : {}),
+      }),
     readTodos: async () => deps.sessionStore.readTodos({ sessionID: deps.sessionId }),
     readTarget: readTargetWithInterruptedRunRecovery,
     setCustomSessionTitle: async (input) =>

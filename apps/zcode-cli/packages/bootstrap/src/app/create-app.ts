@@ -1005,6 +1005,10 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       prepareResume,
       projectID,
       providerRegistry: options.providerRegistry,
+      // 账号通道凭据端口（额度读取复用；与 runner 的模型请求鉴权同一实例）。
+      ...(options.providerRuntimeHeadersPort
+        ? { providerRuntimeHeaders: options.providerRuntimeHeadersPort }
+        : {}),
       resolveUiLocale: (locale) => resolveEffectiveLocale(locale, options),
       runtime,
       sessionId,
