@@ -63,7 +63,13 @@ herdr pane 1..N                    每 workspace 一个
   - `submitPrompt` / `sendInput`（steer）/ `setMode` → 对应请求 topic
   - `removeQueuedInputs` → `session/discardPendingInputs` 请求 topic
     （本地队列项客户端摘除，core pendingInputs 项走协议，2026-10-25）
-  - `subscribeSessionEvents` → 通知 topic（沿用 desktop-continuous 语义）
+  - `subscribeSessionEvents` → 通知 topic（沿用 desktop-continuous 语义）。
+    订阅对象是「当前会话」而非某个句柄：`createAttachPromptHandler` 以
+    `durableSinks` + `runtime.onSessionBound` 迁移常驻 sink——/new /resume
+    /fork 换 `current` 后 sink 挂到新句柄，否则旧句柄永久失聪新会话的
+    出回合事件（per-turn onEvent 掩盖故障，表现静默；monolith 侧同一语义
+    由 `sessionEventRelay` 承担）。事件按 `sessionId` 经
+    `runtime.sessions` 注册表路由到句柄 `ingestRawEvent` → sinks。
   - `recallPreviousInput` / `listModelOptions` / `slashCommands` /
     `listWorkflowRuns` / `readSubagents` / `readSubagentTranscript` /
     `getMainSessionId` / `listWorkspacePathSuggestions` → 请求 topic
@@ -311,7 +317,22 @@ attach 入口的会话选择与主 CLI 同语义，不再默认 resume：
 与主 CLI（默认新会话、`-c` 才继续）相反。
 
 resume 成功时 `restoredMessages` 作为 `initialResult` 交给
-`runTui` 首帧渲染历史 transcript。**显式 resume 意图不静默降级**
+`runTui` 首帧渲染历史 transcript。同时 `sessionSnapshotSeed()` 把快照
+投影成一次性的页脚种子并入 `initialResult`（/new /resume /fork 的
+swap 结果同样携带）：`runtime.contextUsage`（`{used,size}`）→
+`projection.contextUsed/contextWindow`，`runtime.usageTotals` →
+`usageTotals`。`runtime.usageTotals` 是 additive 协议字段（
+`packages/shared/src/zcode-protocol-legacy-types.ts`），core 在
+`snapshotWithDiagnostics` 时对本 session eventStore 用
+`summarizeSessionUsageTotals`（contracts）折叠——与 TUI 累计器同一
+事件集合（`model_complete` + 带 usage 的 `model_request_failed`）与
+字段语义，`seed` 与 live 折叠同源同径、读数不跳变。eventStore 是运行
+期内存账本：core 重启冷恢复的 session 只含物化后事件，种子口径与
+`contextUsage` 一致，不承诺跨重启的历史完整度。`applyResult` 必须先
+执行 `resetSessionProjection` 再合并种子，否则种子被清零（曾先 merge
+projection 再 reset，种子整体被抹掉）。
+
+**显式 resume 意图不静默降级**
 （2026-10-24 修复：截断 id `--resume sess_99f180d5` 曾被
 `.catch(() => undefined)` 吞掉 not-found，无声开出空新会话）：
 

@@ -601,3 +601,39 @@ stderr-quiet steady state still need one observed run. Expected: the quota
 read resolves through `account:zai-individual-coding-plan` and renders
 `5h: … ↻… · 7d: … ↻…`; if it still fails, the failure now costs exactly one
 stderr line per episode instead of a wall.
+
+## 2026-10-29 — attach footer session seeds (patch/attach-footer-seed)
+
+Branch `patch/attach-footer-seed` (not merged, not promoted — `piz` still
+runs the previous frozen pair). Checks actually run and observed:
+
+- `pnpm --dir apps/zcode-cli typecheck` (turbo via PATH-injected
+  `node_modules/.bin`): 34/34 tasks, 0 errors.
+- CLI lint via `node ~/.local/share/pnpm/.tools/pnpm/10.33.2/node_modules/pnpm/bin/pnpm.cjs
+  --dir apps/zcode-cli lint`: 0 errors, 71 warnings (all pre-existing
+  upstream; the two `no-useless-fallback-in-spread` findings this branch
+  introduced were fixed before commit). Running pnpm.cjs directly is an
+  equivalent npm_execpath fix to the documented env route.
+- tui-pi `status-line.test.ts` 31/31 (new: seed-lands-after-reset ordering,
+  seed+live fold continuation, `model_complete` payload.contextWindow,
+  model-catalog contextWindow fallback incl. provider-mismatch guard,
+  accumulator↔`summarizeSessionUsageTotals` drift gate); `footer.test.ts` +
+  `smoke.test.ts` 8/8.
+- cli `attach-adapter.test.ts` 43/43 (new: durable sink migration on
+  `/resume`, `/resume` result carries projection+usageTotals seeds,
+  `sessionSnapshotSeed` runtime→projection fallback).
+- contracts `session-usage-totals.test.ts` 4/4 (fold semantics:
+  model_complete+failed-request set, latest-hit-rate ordering, sparse
+  usage, event-free → undefined).
+- bootstrap `zcode-protocol.test.ts` 128/128 (new: snapshot
+  `runtime.usageTotals` folded from the session eventStore).
+- `pnpm architecture:check --changed`: 0 violations. `attach-session.ts`
+  breached the 800-line cap during the patch; transcript/seed projections
+  were extracted to `attach-projection.ts` (real separation, back at 747).
+
+NOT exercised live (unverified): a real `piz` session — the footer cluster
+against an actual attached/resumed session still needs one observed run
+after merge + promotion. The fold is runtime-ledger scoped: sessions
+materialized after a core restart only fold events present in the
+eventStore (same window as `runtime.contextUsage`), not full persisted
+history.

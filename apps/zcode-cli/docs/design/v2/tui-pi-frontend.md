@@ -188,15 +188,18 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     契约字段把设置态带到 `ContextUsage`；字段落地前 footer 不显示 `(auto)`，
     不按默认值伪造。
   - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
-    维护的 session 累计。契约没有 session 级权威用量源——`turn_complete`
-    / `submitPrompt` 结果的 `usage` 都是 `createModelUsageSummaryFromEvents`
-    (本回合事件) 的回合口径，采纳会把累计显示打回本回合数字——故只做
-    纯折叠：已 dedup 的主会话 `model_complete` 与 `model_request_failed`
-    单请求 `ModelUsage` 逐次累加（与权威口径同一事件集合）。只在
-    `applyMainSessionEvent` 采纳后折叠：同一事件经 session sink 与
-    per-turn onEvent 双投递，dedup 保证恰好一次。attach 中途接入只计
-    接入后流量；`resetSessionProjection` 清零。`state.usage` 在 turn 内
-    是单请求口径，不能直接显示为累计。
+    维护的 session 累计。折叠口径与 contracts `summarizeSessionUsageTotals`
+    同源：已 dedup 的主会话 `model_complete` 与 `model_request_failed`
+    单请求 `ModelUsage` 逐次累加（`turn_complete` / `submitPrompt` 结果的
+    `usage` 是 `createModelUsageSummaryFromEvents` 回合口径，采纳会把累计
+    显示打回本回合数字，故不取）。只在 `applyMainSessionEvent` 采纳后
+    折叠：同一事件经 session sink 与 per-turn onEvent 双投递，dedup 保证
+    恰好一次。attach 接入前的部分由快照 `runtime.usageTotals` 种子补齐
+    （core 对 eventStore 同口径折叠；eventStore 是运行期内存账本，core
+    重启冷恢复的 session 只含物化后事件，与 `runtime.contextUsage` 同
+    窗口）。种子经 `applyResult`/`seed` 在 `resetSessionProjection` 清零
+    之后落地，live 增量在其上继续累加。`state.usage` 在 turn 内是单请求
+    口径，不能直接显示为累计。
   - `R` 为累计 `cacheReadTokens`（与 pi-mono footer 同字段语义）。
   - `CH` 取 `ModelComplete.payload.cacheHit.latestHitRate`（最近一次请求的
     命中口径，即 pi 的 `latestCacheHitRate`；0–1 小数，渲染成一位小数百分比）。
@@ -205,6 +208,11 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     伪装成当前命中率）。
   - `ctx` 段为 `contextUsage.contextUsed / contextWindow`：窗口在时渲染
     `{pct}%/{compact(window)}`，仅有 contextUsed 时降级为 `ctx {compact}`。
+    `contextWindow` 取值链：`session_created` / `model_complete` payload 的
+    `contextWindow`、快照 `runtime.contextUsage.size` 种子；三者都缺时回退
+    当前模型的 catalog `contextWindow`（provider 匹配的 `modelOptions` 条目，
+    pi `contextWindow ?? model.contextWindow` 同款——同名模型跨 provider 不
+    互借窗口）。
   - `agents:{n}` 在 running 子代理数 > 0 时追加到右区身份簇（见下方目录段）。
   - `$cost`：契约无成本字段（core step-finish 落 `cost: 0` 占位），成本在
     客户端按模型单价计算（pi `calculateCost` 同公式：

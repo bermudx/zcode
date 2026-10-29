@@ -216,3 +216,29 @@ identity or enable inherited upload/update paths without a separate audit.
   freshness gate for this remote mapping.
 - Not built, installed, pushed or released. Follow-up: allowance-only behavior
   audit, dependency/bootstrap verification, tested build and installation plan.
+
+### 2026-10-29 — attach footer session seeds (patch/attach-footer-seed)
+
+- Restored the pi-style stats cluster on the attach lane (`↑in ↓out Rcache
+  CH% $cost ctx/window`): the cluster counted live events only, so any
+  attached/resumed session showed an empty left zone until the next turn.
+- Protocol: additive `runtime.usageTotals` on the session snapshot
+  (`packages/shared/zcode-protocol-legacy-types`), folded server-side from
+  the session eventStore via new contracts `summarizeSessionUsageTotals`
+  (same event set + field semantics as the TUI accumulator: `model_complete`
+  + failed `model_request_failed` with usage; runtime memory-ledger scope).
+- Client: `sessionSnapshotSeed` (new `attach-projection.ts`) projects
+  `runtime.contextUsage`/`projection` + `usageTotals` into `initialResult`
+  and `/new` `/resume` `/fork` swap results; `applyResult` now applies
+  `resetSessionProjection` before merging seeds (previously erased them);
+  `UsageTotalsAccumulator.seed()` folds totals + latest cache-hit rate;
+  `applyModelCompleteEvent` now honors `payload.contextWindow`; stats line
+  falls back to the current model's catalog `contextWindow` (pi parity,
+  provider-matched).
+- Fixed a quiet bug: `subscribeSessionEvents` bound the TUI's durable sink
+  to the handle current at subscription time; `/new` `/resume` `/fork`
+  swapped `current` but the sink stayed on the old handle. Sinks now
+  migrate via `durableSinks` + `runtime.onSessionBound` (monolith
+  `sessionEventRelay` semantics).
+- Design docs updated: tui-pi-frontend.md (fold provenance, ctx-window
+  chain), tui-attach-shared-core.md (seed path, sink migration).
