@@ -254,3 +254,20 @@ identity or enable inherited upload/update paths without a separate audit.
   truncating status/spinner when <2 columns remain). `formatPwdRow` removed;
   `formatMetaLine` composes the meta row from `formatPwdLine` + the shared
   stats-left segments; `formatStatsLine` remains as the no-cwd form.
+
+### 2026-10-29 — promotion of bf6d3a16 (attach footer seeds + two-row layout)
+
+- Merge `bf6d3a16` carried `patch/attach-footer-seed` to `main` unchanged
+  (merge-commit only, no conflict edits). Build:
+  `turbo run build --filter=@zcode/cli...` from `apps/zcode-cli` — 12/12,
+  cache misses on `tui`/`tui-pi`/`cli`.
+- Freshness spot-check: `usageTotals`/`sessionSnapshotSeed`/
+  `formatMetaLine`/`summarizeSessionUsageTotals` present in
+  `cli/dist/zcode-attach.cjs`, `tui-pi/dist/index.js`,
+  `tui/dist/index.js`, and in the frozen `dist-runtime` copies.
+- `sh apps/zcode-cli/scripts/promote-piz.sh` from clean `main`.
+- Live-core note: `runtime.usageTotals` is folded core-side; a core still
+  running the previous build simply omits the additive field (clients
+  degrade gracefully to live-only counting). Client-side fixes (two-row
+  footer, sink migration, ctx-window plumbing) take effect on next `piz`
+  launch; the session seed requires a core restart to be observable.
