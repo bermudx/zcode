@@ -577,3 +577,27 @@ and at baseline; contention-related, not quota-related.
 NOT exercised live (unverified): the promoted-pair smoke (this branch is not
 promoted; `piz` still runs the 24866159 pair until merge + promotion), and the
 rendered footer cluster in a real piz session against the account values.
+
+## 2026-10-28 — promotion of 8fd13a43 (quota account-channel merge)
+
+The 2026-10-28 verification above ran on `patch/quota-account-channel`; the
+merge `8fd13a43` carried that tree to `main` unchanged (merge-commit only, no
+conflict edits). Promotion path:
+
+- `mise exec -- ../../node_modules/.bin/turbo run build --filter=@zcode/cli...`
+  from `apps/zcode-cli` — 12/12, cache misses on `tui-pi`, `bootstrap`, `cli`
+  (rebuilt with the fix); `tui` replayed from cache.
+- Freshness spot-check on built output (the recurring stale-dist trap):
+  `lastFailureMessage`/`FAILURE_BACKOFF` present in `tui-pi/dist/index.js` and
+  the frozen `dist-runtime/node_modules/@zcode/tui-pi/dist/index.js`;
+  `zhipu-account`/`individual-coding-plan`/`refreshBeforeModelRequest` present
+  in `cli/dist/zcode.cjs`.
+- `sh apps/zcode-cli/scripts/promote-piz.sh` from clean `main` — promoted
+  `cli/dist` + tui-pi/tui snapshots to `dist-runtime/`.
+
+NOT exercised live (unverified): a real `piz` session against the promoted
+pair — the footer cluster rendering the account-channel values and the
+stderr-quiet steady state still need one observed run. Expected: the quota
+read resolves through `account:zai-individual-coding-plan` and renders
+`5h: … ↻… · 7d: … ↻…`; if it still fails, the failure now costs exactly one
+stderr line per episode instead of a wall.
