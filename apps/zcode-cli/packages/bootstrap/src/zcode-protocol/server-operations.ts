@@ -38,6 +38,7 @@ import {
   type SessionInfo,
   type SessionTaskType,
   type CollaborationMode,
+  summarizeSessionUsageTotals,
   type TargetCompletionVerificationPayload,
   type TraceId,
   type TurnBackgroundAttribution,
@@ -3870,6 +3871,7 @@ interface SnapshotPhaseDurationsMs {
   rewindEvents: number;
   target: number;
   todos: number;
+  usageTotals: number;
   buildSnapshot: number;
 }
 
@@ -3909,6 +3911,7 @@ async function snapshotWithDiagnostics(
     rewindEvents: 0,
     target: 0,
     todos: 0,
+    usageTotals: 0,
     buildSnapshot: 0,
   };
   const measureSnapshotPhase = async <T>(
@@ -3931,6 +3934,7 @@ async function snapshotWithDiagnostics(
     persistedTodos,
     persistedGoalVerificationEvents,
     persistedContextUsageBreakdownEvents,
+    usageTotals,
   ] = await Promise.all([
     measureSnapshotPhase("eventSeq", () =>
       getProtocolEventSeq(context, record, record.deliveryKind),
@@ -3949,6 +3953,13 @@ async function snapshotWithDiagnostics(
     ),
     measureSnapshotPhase("contextUsageBreakdownEvents", () =>
       readSessionContextUsageBreakdownEvents(record),
+    ),
+    measureSnapshotPhase("usageTotals", async () =>
+      // session 级累计用量（attach 页脚种子）：对运行期 eventStore 全量折叠，
+      // 与 getProtocolEventSeq 读的是同一内存账本，单次扫描成本可忽略。
+      summarizeSessionUsageTotals(
+        await record.eventStore.getEvents(record.app.sessionId as SessionId),
+      ),
     ),
   ]);
   const messages = projectActiveSessionMessages(persistedMessages, session, rewindEvents);
@@ -3974,6 +3985,7 @@ async function snapshotWithDiagnostics(
     },
     stateRevision: record.stateRevision,
     target: persistedTarget,
+    usageTotals,
     todos: persistedTodos,
     workspace: record.workspace,
   });

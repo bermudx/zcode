@@ -2310,6 +2310,92 @@ describe("ZCodeProtocolAgentServer", () => {
     expect(JSON.stringify(sentLog?.context)).not.toContain("hello");
   });
 
+  // attach 页脚的 session 用量种子：快照 runtime.usageTotals 是对本 session
+  // eventStore 的折叠（summarizeSessionUsageTotals），让接入前的累计计数
+  // 不经事件回放就能到达客户端。
+  it("folds session eventStore usage into snapshot runtime.usageTotals", async () => {
+    let eventStore: ZCodeAppOptions["eventStore"];
+    const server = new ZCodeProtocolAgentServer({
+      createZCodeApp: (options) => {
+        eventStore = options?.eventStore;
+        return createFakeApp(options);
+      },
+      cwd: workspace.workspacePath,
+      version: "test-version",
+    });
+    setTestNotificationSink(server, () => {});
+
+    const created = zcodeSessionStateSnapshotSchema.parse(
+      await requestResult(server, {
+        id: 1,
+        method: zcodeProtocolMethods.sessionCreate,
+        params: { workspace },
+      }),
+    );
+    expect(created.runtime.usageTotals).toBeUndefined();
+
+    const sessionId = created.session.sessionId as SessionId;
+    const appendEvent = async (
+      type: SessionEvent["type"],
+      payload: Record<string, unknown>,
+      id: string,
+    ) => {
+      if (!eventStore) throw new Error("expected eventStore");
+      await eventStore.append({
+        id: id as SessionEvent["id"],
+        payload,
+        sessionId,
+        timestamp: new Date(1),
+        traceId: "trace_usage_seed" as SessionEvent["traceId"],
+        type,
+        sequenceNumber: 0,
+      });
+    };
+    await appendEvent(
+      SessionEventType.ModelComplete,
+      {
+        cacheHit: { latestHitRate: 0.9 },
+        content: "a",
+        stopReason: "stop",
+        usage: { cacheReadTokens: 800, inputTokens: 1_000, outputTokens: 10 },
+      },
+      "evt_complete_1",
+    );
+    await appendEvent(
+      SessionEventType.ModelNetworkStatus,
+      {
+        type: "model_request_failed",
+        usage: { inputTokens: 50, outputTokens: 0 },
+      },
+      "evt_failed_1",
+    );
+    // 非用量事件不影响折叠。
+    await appendEvent(
+      SessionEventType.TurnComplete,
+      { resultType: "success", usage: { inputTokens: 9_999, modelRequestCount: 2, outputTokens: 9 } },
+      "evt_turn_complete_1",
+    );
+
+    const subscribed = zcodeSessionSubscribeResultSchema.parse(
+      await requestResult(server, {
+        id: 2,
+        method: zcodeProtocolMethods.sessionSubscribe,
+        params: {
+          sessionId: created.session.sessionId,
+          deliveryKind: "desktop-continuous",
+          includeSnapshot: true,
+        },
+      }),
+    );
+    expect(subscribed.snapshot?.runtime.usageTotals).toEqual({
+      cacheReadTokens: 800,
+      cacheWriteTokens: 0,
+      inputTokens: 1_050,
+      latestCacheHitRate: 0.9,
+      outputTokens: 10,
+    });
+  });
+
   it("omits repeated scheduled tool input after model streaming tool calls", async () => {
     const notifications: ZCodeProtocolNotification[] = [];
     let eventStore: ZCodeAppOptions["eventStore"];

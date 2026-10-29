@@ -45,7 +45,10 @@ import type {
   ModelUsage,
   ModelUsageSummary,
 } from "../model/index.js";
-import { createModelUsageSummary } from "../model/index.js";
+import {
+  createModelUsageSummary,
+  getModelUsageInputWindowTokens,
+} from "../model/index.js";
 import type { CheckpointCreatedPayload, RewindTriggeredPayload } from "../rewind/index.js";
 import type { SkillTelemetryMetadata } from "../skills/index.js";
 import type { ModelApiErrorPhase, ModelFailureExceptionKind } from "../telemetry/index.js";
@@ -1291,6 +1294,69 @@ export function createModelUsageSummaryFromEvents(
   }
 
   return createModelUsageSummary(usages);
+}
+
+/**
+ * session 级累计用量（pi footer 的 ↑/↓/R/W 是同会话语义）：把本 session
+ * eventStore 的 model_complete + model_request_failed 单请求用量折叠成
+ * 四个 token 计数，附带最近一次 model_complete 的 cacheHit.latestHitRate。
+ *
+ * 折叠口径必须与 tui-pi UsageTotalsAccumulator.fold 逐字段一致（同一事件
+ * 集合、inputTokens 取 getModelUsageInputWindowTokens 的输入窗口径）——
+ * core 快照的 runtime.usageTotals 经此产出，attach 客户端把它采纳为
+ * 累计器基线后继续折叠 live 事件；两侧漂移会让接入前后的计数跳变。
+ */
+export interface SessionUsageTotalsSummary {
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  inputTokens: number;
+  latestCacheHitRate?: number;
+  outputTokens: number;
+}
+
+export function summarizeSessionUsageTotals(
+  events: readonly SessionEvent[],
+): SessionUsageTotalsSummary | undefined {
+  let sawUsage = false;
+  const totals: SessionUsageTotalsSummary = {
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+  };
+  for (const event of events) {
+    if (event.type === SessionEventType.ModelNetworkStatus) {
+      const payload = event.payload as ModelNetworkStatusEvent | undefined;
+      if (payload?.type === "model_request_failed" && payload.usage) {
+        foldSessionUsageTotalsEntry(totals, payload.usage);
+        sawUsage = true;
+      }
+      continue;
+    }
+    if (event.type !== SessionEventType.ModelComplete) continue;
+    const payload = event.payload as Partial<ModelCompletePayload> | undefined;
+    if (payload?.usage) {
+      foldSessionUsageTotalsEntry(totals, payload.usage as ModelUsage);
+      sawUsage = true;
+    }
+    const rate = payload?.cacheHit?.latestHitRate;
+    if (typeof rate === "number" && Number.isFinite(rate)) {
+      totals.latestCacheHitRate = rate;
+    }
+  }
+  return sawUsage ? totals : undefined;
+}
+
+function foldSessionUsageTotalsEntry(
+  totals: SessionUsageTotalsSummary,
+  usage: ModelUsage,
+): void {
+  // TokenUsage 分支只有 cacheTokens 聚合值，没有 read/write 拆分。
+  const cacheRead = "cacheReadTokens" in usage ? usage.cacheReadTokens : undefined;
+  totals.inputTokens += getModelUsageInputWindowTokens(usage) ?? 0;
+  totals.outputTokens += Math.max(0, usage.outputTokens ?? 0);
+  totals.cacheReadTokens += Math.max(0, cacheRead ?? 0);
+  totals.cacheWriteTokens += Math.max(0, usage.cacheWriteTokens ?? 0);
 }
 
 export type SessionEventPayload =

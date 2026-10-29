@@ -517,6 +517,25 @@ export const zcodeSessionContextUsageSchema = z
     breakdown: zcodeContextUsageBreakdownSchema.optional(),
   })
   .strict();
+/**
+ * session 级累计用量（attach 接入前的权威折叠）：由 core 对本 session
+ * eventStore 的 model_complete / model_request_failed 单请求用量折叠
+ * （contracts summarizeSessionUsageTotals，与 tui-pi 客户端累计器同口径）。
+ * latestCacheHitRate 是最近一次 model_complete 的 payload.cacheHit.latestHitRate
+ * （0–1；pi footer CH 同源）。eventStore 是运行期内存账本，core 重启后
+ * 冷恢复的 session 只含物化后的事件——本字段与 projection.contextUsed
+ * 同样遵循"运行期覆盖"语义，不承诺持久历史。
+ */
+export const zcodeSessionUsageTotalsSchema = z
+  .object({
+    cacheReadTokens: z.number().int().nonnegative(),
+    cacheWriteTokens: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative(),
+    latestCacheHitRate: z.number().nonnegative().nullable().optional(),
+    outputTokens: z.number().int().nonnegative(),
+  })
+  .strict();
+export type ZCodeSessionUsageTotals = z.infer<typeof zcodeSessionUsageTotalsSchema>;
 export const zcodeSessionRuntimeStateSchema = z
   .object({
     eventSeq: z.number().int().nonnegative(),
@@ -528,6 +547,7 @@ export const zcodeSessionRuntimeStateSchema = z
     apiRetry: zcodeSessionApiRetryStatusSchema.nullable().optional(),
     contextUsage: zcodeSessionContextUsageSchema.optional(),
     goalVerifications: z.array(zcodeSessionGoalVerificationSchema).optional(),
+    usageTotals: zcodeSessionUsageTotalsSchema.optional(),
     goalVerificationTimeline: z.array(zcodeSessionGoalVerificationTimelineSchema).optional(),
   })
   .strict();
