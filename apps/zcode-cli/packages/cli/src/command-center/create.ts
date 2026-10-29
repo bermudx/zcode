@@ -291,10 +291,16 @@ export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
         const targetCheckpointId = parseForkTarget(command.args);
         if (deps.forkApp) {
           const result = await deps.forkApp(targetCheckpointId);
+          // /fork 换绑到新会话：与 /new /resume 同口径 reset + 快照种子，
+          // 否则页脚残留 fork 前会话的用量/ctx。
+          const app = await deps.getApp();
           return {
             mode: deps.getMode?.(),
+            resetSessionProjection: true,
             response: result.response,
+            sessionId: app.sessionId,
             traceId: undefined,
+            ...app.sessionSnapshotSeed?.(),
           };
         }
 
@@ -352,6 +358,7 @@ export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
           sessionId: app.sessionId,
           thoughtLevel: app.getThoughtLevel?.(),
           traceId: app.traceId,
+          ...app.sessionSnapshotSeed?.(),
         };
       }
 
@@ -402,6 +409,7 @@ export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
         response: formatResumeResult(app.sessionId, result),
         thoughtLevel: app.getThoughtLevel?.(),
         traceId: result.traceId ?? app.traceId,
+        ...app.sessionSnapshotSeed?.(),
       };
     })();
 

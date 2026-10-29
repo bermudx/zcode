@@ -16,7 +16,6 @@ import {
 } from "@zcode/shared";
 import type {
   TuiPromptInput,
-  TuiRestoredTranscriptPart,
   TuiSendInputResult,
   TuiSubmitPromptResult,
   TuiSubagentTranscriptSnapshot,
@@ -33,6 +32,10 @@ import {
   type SteerQueueContext,
 } from "./attach-steer.js";
 import { toProtocolAttachments } from "./attach-attachments.js";
+import {
+  projectAttachTranscriptMessages,
+  projectSessionSnapshotSeed,
+} from "./attach-projection.js";
 import { PendingInteractions } from "./attach-interactions.js";
 import { requestSessionStopBestEffort } from "./attach-session-stop.js";
 import { mergeCatalog, modelOptionKey, thoughtLevelKey } from "./attach-catalog.js";
@@ -53,67 +56,7 @@ function formatModelRef(
   return `${current.providerId}/${current.modelId}`;
 }
 
-/** wire part（zcodeMessagePartSchema）→ TuiRestoredTranscriptPart。
- * 与 bootstrap projectSessionTranscript 同语义；瘦客户端不引 bootstrap barrel。 */
-function projectWirePart(part: unknown): TuiRestoredTranscriptPart | undefined {
-  const record = part as Record<string, unknown> | undefined;
-  if (record?.type === "text" && typeof record.text === "string") {
-    return record.ignored === true ? undefined : { text: record.text, type: "text" };
-  }
-  if (record?.type === "reasoning" && typeof record.text === "string") {
-    return { text: record.text, type: "thought" };
-  }
-  if (record?.type === "tool" && typeof record.tool === "string") {
-    const state = (record.state ?? {}) as Record<string, unknown>;
-    const base = {
-      input: (state.input ?? {}) as Record<string, unknown>,
-      ...(typeof state.title === "string" ? { title: state.title } : {}),
-      toolCallId:
-        (typeof record.callId === "string" && record.callId) ||
-        (typeof record.callID === "string" ? record.callID : ""),
-      toolName: record.tool,
-      type: "tool" as const,
-    };
-    if (state.status === "completed") {
-      return {
-        ...base,
-        ...(typeof state.output === "string" ? { output: state.output } : {}),
-        status: "completed",
-      };
-    }
-    if (state.status === "error") {
-      return {
-        ...base,
-        ...(typeof state.error === "string" ? { error: state.error } : {}),
-        status: "failed",
-      };
-    }
-    return { ...base, status: "running" };
-  }
-  return undefined;
-}
-
-/** 快照/存储里的 wire messages → TuiSubmitPromptResult.restoredMessages。 */
-export function projectAttachTranscriptMessages(
-  messages: ReadonlyArray<{
-    info?: { messageId?: string; role?: string };
-    parts?: unknown[];
-  }>,
-): NonNullable<TuiSubmitPromptResult["restoredMessages"]> {
-  return messages.map((message) => {
-    const parts = (message.parts ?? [])
-      .map(projectWirePart)
-      .filter((part): part is TuiRestoredTranscriptPart => part !== undefined);
-    return {
-      content: "",
-      ...(message.info?.messageId ? { id: message.info.messageId } : {}),
-      ...(parts.length > 0 ? { parts } : {}),
-      role: (message.info?.role === "user" ? "user" : "agent") as
-        | "user"
-        | "agent",
-    };
-  });
-}
+export { projectAttachTranscriptMessages } from "./attach-projection.js";
 
 export type AttachSessionEvent = SessionEvent;
 
@@ -497,6 +440,11 @@ export class AttachSessionHandle {
 
   getLocale(): TuiSubmitPromptResult["locale"] {
     return this.locale;
+  }
+
+  /** 绑定时的页脚种子（实现与注释见 attach-projection.ts 同名投影）。 */
+  sessionSnapshotSeed(): Pick<TuiSubmitPromptResult, "projection" | "usageTotals"> {
+    return projectSessionSnapshotSeed(this.snapshot);
   }
 
   setLocale(locale: TuiSubmitPromptResult["locale"]): { locale: TuiSubmitPromptResult["locale"] } {

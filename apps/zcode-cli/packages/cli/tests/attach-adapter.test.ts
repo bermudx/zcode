@@ -2294,3 +2294,171 @@ test("TUI 裸 /resume 空列表显式报错", async () => {
   }
 });
 
+
+// 回归证据（2026-11-14，`piz` 页脚排查）：subscribeSessionEvents 曾绑定在调用时刻
+// 的 current 句柄——/resume /new /fork 换绑后，TUI 常驻 sink 留在旧句柄上，
+// 新会话的出回合事件永远到不了页脚（per-turn onEvent 掩盖了故障，表现静默）。
+// monolith 的 sessionEventRelay 在换绑时迁移订阅；attach 侧由 durableSinks +
+// onSessionBound 承担同一职责。
+test("subscribeSessionEvents 的常驻 sink 随 /resume 换绑到新句柄", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-sink-swap-"));
+  const socketPath = join(dir, "core.sock");
+  const resumed = makeSnapshot() as {
+    session: { sessionId: string };
+  } & ReturnType<typeof makeSnapshot>;
+  resumed.session = { ...resumed.session, sessionId: "sess-2" };
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return {
+        eventSeq: 0,
+        events: [],
+        rawEvents: [],
+        sessionId: request.params.sessionId,
+        snapshot: resumed,
+      };
+    }
+    if (request.method === "session/resume") {
+      return { sessionId: request.params.sessionId };
+    }
+    if (request.method === "session/messages") {
+      return { messages: [] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const received: string[] = [];
+    handler.subscribeSessionEvents?.((event) => {
+      received.push(`${event.sessionId}:${event.type}`);
+    });
+    const result = await handler("/resume sess-2", {});
+    assert.match(result.response ?? "", /Resumed session sess-2/);
+    assert.equal(handler.getMainSessionId?.(), "sess-2");
+    // 新会话的出回合事件必须到达常驻 sink——这是 footer 在 /resume 后能收到
+    // 远端发起回合的 model_complete/spinner 的前提。
+    core.notify({ ...rawEvent({ seq: 7, type: "model_complete" }), sessionId: "sess-2" });
+    // 旧会话的事件不再投递：sink 已迁移，旧句柄上已无该订阅。
+    core.notify(rawEvent({ seq: 8, type: "model_complete" }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(received, ["sess-2:model_complete"]);
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 换绑结果的页脚种子：订阅快照的 runtime.contextUsage / runtime.usageTotals
+// 必须经 sessionSnapshotSeed 上溯到 /resume /new 的 TuiSubmitPromptResult——
+// 否则恢复会话的 footer 在下一个 model_complete 前没有任何用量/ctx 读数。
+test("/resume 结果携带快照的 projection 与 usageTotals 种子", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-seed-"));
+  const socketPath = join(dir, "core.sock");
+  const resumed = makeSnapshot() as {
+    session: { sessionId: string };
+  } & ReturnType<typeof makeSnapshot>;
+  resumed.session = { ...resumed.session, sessionId: "sess-2" };
+  resumed.runtime = {
+    ...resumed.runtime,
+    contextUsage: { size: 255_000, used: 103_000 },
+    usageTotals: {
+      cacheReadTokens: 27_000_000,
+      cacheWriteTokens: 0,
+      inputTokens: 463_000,
+      latestCacheHitRate: 1,
+      outputTokens: 118_000,
+    },
+  };
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return {
+        eventSeq: 0,
+        events: [],
+        rawEvents: [],
+        sessionId: request.params.sessionId,
+        snapshot: resumed,
+      };
+    }
+    if (request.method === "session/resume") {
+      return { sessionId: request.params.sessionId };
+    }
+    if (request.method === "session/messages") {
+      return { messages: [] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = await handler("/resume sess-2", {});
+    assert.equal(result.resetSessionProjection, true);
+    assert.deepEqual(result.projection, {
+      contextUsed: 103_000,
+      contextWindow: 255_000,
+    });
+    assert.deepEqual(result.usageTotals, {
+      cacheReadTokens: 27_000_000,
+      cacheWriteTokens: 0,
+      inputTokens: 463_000,
+      latestCacheHitRate: 1,
+      outputTokens: 118_000,
+    });
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("sessionSnapshotSeed 回退到 projection（无 runtime.contextUsage）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-seed-projection-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, () => ({}));
+  const client = await connectAttachClient(socketPath);
+  try {
+    const snapshot = makeSnapshot() as ReturnType<typeof makeSnapshot>;
+    snapshot.projection = {
+      ...snapshot.projection,
+      contextUsed: 267_000,
+      contextWindow: 255_000,
+    };
+    const handle = new AttachSessionHandle({
+      client,
+      sessionId: SID,
+      snapshot: snapshot as never,
+    });
+    const seed = handle.sessionSnapshotSeed();
+    assert.deepEqual(seed.projection, {
+      contextUsed: 267_000,
+      contextWindow: 255_000,
+    });
+    assert.equal(seed.usageTotals, undefined);
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});

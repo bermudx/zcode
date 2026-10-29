@@ -204,6 +204,12 @@ export type CommandCenterApp = {
   getTheme?(): TuiSubmitPromptResult["theme"];
   getThoughtLevel?(): string | undefined;
   loadSessionTranscript?(): Promise<NonNullable<TuiSubmitPromptResult["restoredMessages"]>>;
+  /**
+   * 会话绑定期一次性展示种子（attach 快照的 ctx 水位 + session 累计用量）；
+   * 由 /new /resume 这类"换绑结果"透传给 applyResult，live 事件折叠
+   * 在此基础上继续。缺席时结果不携带种子，页脚维持 live-only 口径。
+   */
+  sessionSnapshotSeed?(): Pick<TuiSubmitPromptResult, "projection" | "usageTotals">;
   readSubagents?: import("@zcode/tui").TuiReadSubagents;
   readCodingPlanQuota?: () => Promise<import("@zcode/shared").UsageQuotaSnapshot>;
   readSubagentTranscript?: import("@zcode/tui").TuiReadSubagentTranscript;
