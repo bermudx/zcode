@@ -16,13 +16,25 @@ const provider = (over: {
   group?: string;
   accessType?: string;
   apiKey?: string;
+  accountType?: "zai" | "bigmodel";
+  mode?: string;
+  entitled?: boolean;
+  builtinModelIds?: string[];
 }): Provider =>
   ({
     config: {
       access: {
         apiKey: over.apiKey,
         type: over.accessType ?? "api",
+        ...(over.accessType === "zhipu-account"
+          ? {
+              accountType: over.accountType,
+              entitled: over.entitled,
+              mode: over.mode,
+            }
+          : {}),
       },
+      builtinModelIds: over.builtinModelIds,
       group: over.group,
     },
     models: [],
@@ -41,8 +53,8 @@ const registry = (providers: Provider[]): ProviderRegistryModelSource =>
   }) as unknown as ProviderRegistryModelSource;
 
 describe("resolveCodingPlanQuotaProvider", () => {
-  it("picks the first coding-plan family provider with an API key", () => {
-    const resolved = resolveCodingPlanQuotaProvider(
+  it("picks the first coding-plan family provider with an API key", async () => {
+    const resolved = await resolveCodingPlanQuotaProvider(
       registry([
         provider({ apiKey: undefined, group: "zai-family", providerId: "zai-nokey" }),
         provider({ apiKey: "k2", group: "bigmodel-family", providerId: "bigmodel" }),
@@ -53,22 +65,131 @@ describe("resolveCodingPlanQuotaProvider", () => {
     expect(resolved?.url).toBe("https://open.bigmodel.cn/api/monitor/usage/quota/limit");
   });
 
-  it("routes the zai family to api.z.ai", () => {
-    const resolved = resolveCodingPlanQuotaProvider(
+  it("routes the zai family to api.z.ai", async () => {
+    const resolved = await resolveCodingPlanQuotaProvider(
       registry([provider({ apiKey: "k", group: "zai-family", providerId: "zai" })]),
     );
     expect(resolved?.url).toBe("https://api.z.ai/api/monitor/usage/quota/limit");
   });
 
-  it("skips zhipu-account access and non-coding-plan providers", () => {
+  it("skips zhipu-account access without a resolver and non-coding-plan providers", async () => {
     expect(
-      resolveCodingPlanQuotaProvider(
+      await resolveCodingPlanQuotaProvider(
         registry([
-          provider({ accessType: "zhipu-account", group: "zai-family", providerId: "zai-acct" }),
+          provider({
+            accessType: "zhipu-account",
+            accountType: "zai",
+            entitled: true,
+            group: "zai-family",
+            mode: "individual-coding-plan",
+            providerId: "zai-acct",
+          }),
           provider({ apiKey: "k", group: "other-family", providerId: "other" }),
         ]),
       ),
     ).toBeNull();
+  });
+
+  it("resolves an entitled individual-coding-plan account provider via the account resolver", async () => {
+    const calls: Array<{ modelId: string; providerId: string }> = [];
+    const resolved = await resolveCodingPlanQuotaProvider(
+      registry([
+        provider({
+          accessType: "zhipu-account",
+          accountType: "zai",
+          builtinModelIds: ["GLM-5.3"],
+          entitled: true,
+          group: "zai-family",
+          mode: "individual-coding-plan",
+          providerId: "account:zai-individual-coding-plan",
+        }),
+      ]),
+      async (input) => {
+        calls.push({ modelId: input.modelId, providerId: input.providerId });
+        expect(input.accountAccess).toEqual({
+          accountType: "zai",
+          entitled: true,
+          mode: "individual-coding-plan",
+          type: "zhipu-account",
+        });
+        return "plan-key";
+      },
+    );
+    expect(calls).toEqual([{ modelId: "GLM-5.3", providerId: "account:zai-individual-coding-plan" }]);
+    expect(resolved?.apiKey).toBe("plan-key");
+    expect(resolved?.url).toBe("https://api.z.ai/api/monitor/usage/quota/limit");
+  });
+
+  it("falls through when the account resolver returns null or throws, then picks a later API-key provider", async () => {
+    let sawAccountProvider = false;
+    const resolved = await resolveCodingPlanQuotaProvider(
+      registry([
+        provider({
+          accessType: "zhipu-account",
+          accountType: "bigmodel",
+          entitled: true,
+          group: "bigmodel-family",
+          mode: "individual-coding-plan",
+          providerId: "acct-no-cred",
+        }),
+        provider({
+          accessType: "zhipu-account",
+          accountType: "zai",
+          entitled: true,
+          group: "zai-family",
+          mode: "individual-coding-plan",
+          providerId: "acct-throws",
+        }),
+        provider({ apiKey: "k1", group: "zai-family", providerId: "zai-key" }),
+      ]),
+      async (input) => {
+        if (input.providerId === "acct-no-cred") return null;
+        sawAccountProvider = true;
+        throw new Error("project_token_login_required");
+      },
+    );
+    expect(sawAccountProvider).toBe(true);
+    expect(resolved?.apiKey).toBe("k1");
+    expect(resolved?.providerId).toBe("zai-key");
+  });
+
+  it("skips non-entitled and non-individual account access", async () => {
+    const calls: string[] = [];
+    const resolve = async (input: { providerId: string }): Promise<string | null> => {
+      calls.push(input.providerId);
+      return "plan-key";
+    };
+    const resolved = await resolveCodingPlanQuotaProvider(
+      registry([
+        provider({
+          accessType: "zhipu-account",
+          accountType: "zai",
+          entitled: false,
+          group: "zai-family",
+          mode: "individual-coding-plan",
+          providerId: "acct-logged-out",
+        }),
+        provider({
+          accessType: "zhipu-account",
+          accountType: "zai",
+          entitled: true,
+          group: "zai-family",
+          mode: "team-coding-plan",
+          providerId: "acct-team",
+        }),
+        provider({
+          accessType: "zhipu-account",
+          accountType: "bigmodel",
+          entitled: true,
+          group: "bigmodel-family",
+          mode: "start-plan",
+          providerId: "acct-start",
+        }),
+      ]),
+      resolve,
+    );
+    expect(calls).toEqual([]);
+    expect(resolved).toBeNull();
   });
 });
 
@@ -185,5 +306,32 @@ describe("fetchCodingPlanQuota", () => {
         registry: registry([provider({ group: "zai-family", providerId: "zai-nokey" })]),
       }),
     ).rejects.toThrow(CodingPlanQuotaUnavailableError);
+  });
+
+  it("fetches with the account-resolved plan key for account providers", async () => {
+    let authHeader: string | undefined;
+    let requestedUrl: string | undefined;
+    const snapshot = await fetchCodingPlanQuota({
+      fetchImpl: async (url, init) => {
+        requestedUrl = String(url);
+        authHeader = new Headers(init?.headers).get("Authorization") ?? undefined;
+        return okResponse({ code: 200, data: { level: "glm-coding-plan", limits: [] }, success: true });
+      },
+      registry: registry([
+        provider({
+          accessType: "zhipu-account",
+          accountType: "zai",
+          builtinModelIds: ["GLM-5.3"],
+          entitled: true,
+          group: "zai-family",
+          mode: "individual-coding-plan",
+          providerId: "account:zai-individual-coding-plan",
+        }),
+      ]),
+      resolveAccountApiKey: async () => "resolved-plan-key",
+    });
+    expect(requestedUrl).toBe("https://api.z.ai/api/monitor/usage/quota/limit");
+    expect(authHeader).toBe("Bearer resolved-plan-key");
+    expect(snapshot.level).toBe("glm-coding-plan");
   });
 });

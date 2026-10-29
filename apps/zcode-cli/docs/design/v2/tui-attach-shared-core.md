@@ -248,12 +248,19 @@ pi 侧 provider-balance 额度簇的 piz 对应物。数据面走协议而非客
 
 - **新协议方法** `usage/codingPlanQuota`（params `{sessionId}`，账号级读数
   经 session 载体访问 live app 的 Registry）：bootstrap session facade 新增
-  `readCodingPlanQuota` —— Registry 里第一个「zai-family / bigmodel-family
-  + API key 访问」的 provider 按 family 分流打监控端点（api.z.ai /
+  `readCodingPlanQuota` —— Registry 里第一个可用凭据的「zai-family /
+  bigmodel-family」provider 按 family 分流打监控端点（api.z.ai /
   open.bigmodel.cn 同一路径），Bearer 凭据只进请求头；envelope
   `success===true && code===200` 门后透传 `UsageQuotaSnapshot`（共享
-  `usage-quota.ts` 纯类型 + zod schema 双向漂移门）。zhipu-account 访问态
-  不覆盖（凭据不经 provider config 持有），无可用 provider 抛显式错误。
+  `usage-quota.ts` 纯类型 + zod schema 双向漂移门）。凭据两路
+  （2026-10-28 扩展账号通道）：provider config 内 API key 访问
+  （api-key / zhipu-coding-plan-api-key）直读；zhipu-account（entitled +
+  individual-coding-plan）经 session facade 注入的账号解析器现取——
+  复用 `providerRuntimeHeadersPort.refreshBeforeModelRequest`（与模型请求
+  同一凭据所有者：standalone core 的 manual 计划 Key 或 OAuth 派生 project
+  token），解析失败/返回空跳过该 provider 继续候选；team/start/off-peak
+  等其它套餐形态维持不覆盖（desktop 各自额度服务负责）。无可用 provider
+  抛显式错误。
 - **消费面**：tui-pi 额度簇（`TuiOptions.readUsageQuota`，quota-cluster）
   在主会话绑定后接线（attach 经 attach-tui-options，进程内经
   tui-prompt-handler-queries），刷新策略与展示格式见 tui-pi-frontend.md

@@ -4,7 +4,9 @@
 //   · turn 沿（busy 下降沿）授权一次刷新尝试——仍受 ≥30s 防抖（与空闲轮询
 //     同一闸门），快速连击 turn 不放大请求频率
 //   · 读数 30min TTL：超龄读数从 footer 消失，不悬挂假数据
-//   · 失败保留上次读数并写单行 stderr 诊断（诊断走 stderr，不占协议 stdout）
+//   · 失败保留上次读数并写单行 stderr 诊断（诊断走 stderr，不占协议
+//     stdout）；同一失败消息只诊断一次，失败后空闲拍退避 60s
+//     （FAILURE_BACKOFF_MS，provider-balance 同分工：权威拍仍尝试）
 // options.readUsageQuota 缺席（旧 core / 未接线）时整个簇静默。
 
 import type { UsageQuotaSnapshot } from "@zcode/shared";
@@ -18,6 +20,12 @@ const IDLE_REFRESH_INTERVAL_MS = 60_000;
 const IDLE_REFRESH_JITTER_MS = 15_000;
 /** 两次刷新尝试的最小间隔（turn 沿与空闲轮询共用，防抖）。 */
 const REFRESH_MIN_INTERVAL_MS = 30_000;
+/**
+ * 失败后空闲轮询的退避窗口（provider-balance FAILURE_BACKOFF_MS 同值）：
+ * 永久性失败（无 coding-plan 凭据）不该每 60s 重打一行 stderr；空闲拍
+ * 在窗口内直接跳过，turn 沿/启动/reset 等权威拍仍尝试（≥30s 防抖不变）。
+ */
+const FAILURE_BACKOFF_MS = 60_000;
 
 export interface QuotaClusterPorts {
   readUsageQuota?: () => Promise<UsageQuotaSnapshot>;
@@ -35,6 +43,8 @@ export class QuotaCluster {
   private generation = 0;
   private inflight = false;
   private lastAttemptAt = 0;
+  private lastFailureAt: number | undefined;
+  private lastFailureMessage: string | undefined;
   private idleTimer: unknown = undefined;
   private readonly ports: QuotaClusterPorts;
 
@@ -62,10 +72,20 @@ export class QuotaCluster {
    * 拉取并落地快照。in-flight 去重；min-interval 是所有路径共用的统一闸门：
    * turn 沿与空闲轮询一并受 ≥30s 防抖（tui-pi-frontend.md「turn 沿刷新
    * ≥30s 间隔」同语义），仅启动首拍与 reset()（lastAttemptAt 归零）绕过。
+   * opportunistic=true 的空闲拍额外受失败退避（FAILURE_BACKOFF_MS）约束
+   * ——provider-balance 同分工：用户活动触发的权威拍值得真实尝试，后台
+   * 拍在端点/凭据持续失败时静默让路，不把永久失败变成刷屏日志。
    */
-  refresh(): void {
+  refresh(opportunistic = false): void {
     const readUsageQuota = this.ports.readUsageQuota;
     if (!readUsageQuota || this.inflight) return;
+    if (
+      opportunistic &&
+      this.lastFailureAt !== undefined &&
+      this.now() - this.lastFailureAt < FAILURE_BACKOFF_MS
+    ) {
+      return;
+    }
     const nowMs = this.now();
     if (nowMs - this.lastAttemptAt < REFRESH_MIN_INTERVAL_MS && this.lastAttemptAt !== 0) {
       return;
@@ -76,6 +96,10 @@ export class QuotaCluster {
     void readUsageQuota()
       .then((snapshot) => {
         if (epoch !== this.generation) return;
+        // 成功即恢复：清退避窗口与诊断去重（provider-balance「成功让空闲拍
+        // 恢复」同义）——同消息的下一段失败是新事件，允许再次诊断。
+        this.lastFailureAt = undefined;
+        this.lastFailureMessage = undefined;
         const balance = quotaSnapshotToBalance(snapshot);
         // 空读数与失败同态：保留上次读数，不把 footer 闪成空串。
         if (balance.length === 0) {
@@ -114,6 +138,7 @@ export class QuotaCluster {
     this.generation += 1;
     this.inflight = false;
     this.lastAttemptAt = 0;
+    this.lastFailureAt = undefined;
     this.store.set("quotaBalance", undefined);
     this.store.set("quotaFetchedAt", undefined);
     this.refresh();
@@ -135,7 +160,8 @@ export class QuotaCluster {
     const jitter = Math.floor(Math.random() * IDLE_REFRESH_JITTER_MS);
     this.clearTimer(this.idleTimer);
     this.idleTimer = setTimer(() => {
-      this.refresh();
+      // 空闲拍是 opportunistic：失败退避窗口内跳过（见 refresh）。
+      this.refresh(true);
       this.scheduleIdleTimer();
     }, IDLE_REFRESH_INTERVAL_MS + jitter);
   }
@@ -147,9 +173,16 @@ export class QuotaCluster {
   }
 
   private noteFailure(cause: unknown): void {
+    this.lastFailureAt = this.now();
     const stderr = this.ports.stderr;
     if (!stderr) return;
     const message = cause instanceof Error ? cause.message : String(cause);
+    // 同一失败只诊断一次（provider-balance reportFailure 走文件日志 +
+    // 非 TTY 才 stderr 的同精神；这里没有文件面，收敛为按消息去重）：
+    // 永久失败（无凭据）每 60s 一行会把终端刷成噪声墙。消息变化或成功
+    // （lastFailureMessage 在落地读数时重置）后重新允许一次诊断。
+    if (message === this.lastFailureMessage) return;
+    this.lastFailureMessage = message;
     stderr.write(`[tui-pi] quota refresh failed: ${message}\n`);
   }
 }

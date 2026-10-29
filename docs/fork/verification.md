@@ -518,3 +518,62 @@ cluster rendering actual account values (needs the operator's provider config), 
 narrow-table/json-fence rendering against real model output in a live session. Full
 acceptance gate (signing against the real provider request, allowance evidence, Ctrl-C
 signal path, memory matrix) remains open and unchanged.
+
+## 2026-10-28 — quota cluster account channel + failure-diagnostic dedupe (branch `patch/quota-account-channel`, `a306dd50`)
+
+Problem observed live: with GLM Coding Plan via account login (the operator's
+default model `GLM-5.3` on `account:zai-individual-coding-plan`), the footer
+quota read threw `no coding-plan provider with an API key in the registry` on
+every ~60s poll — the core resolver only accepted API keys held in provider
+config and explicitly skipped zhipu-account access — and the tui-pi cluster
+echoed each failure to stderr with no dedup or backoff: a permanent state as an
+endless log wall. Design reference: pi provider-balance (same endpoint, same
+credential as chat; no-credential is a silent state; failures back off 60s
+machine-wide and report to a file, stderr only when headless).
+
+Fix: core-side `resolveCodingPlanQuotaProvider` now also accepts entitled
+`individual-coding-plan` account providers, resolving plan credentials through
+`providerRuntimeHeadersPort.refreshBeforeModelRequest` (the same owner model
+requests use; manual plan key or OAuth-derived project token), plumbed via
+create-app → session-facade. Resolver absence/null/throw falls through to the
+next candidate; team/start/off-peak plans stay out of this channel (desktop's
+own usage services own those). Client-side `QuotaCluster` dedupes failure
+diagnostics per message (one line per failure episode; new message or
+successful landing re-arms) and idle ticks back off 60s after a failure while
+turn-edge/startup/reset refreshes still attempt.
+
+Checks run on the branch:
+
+- Bootstrap `coding-plan-quota.test.ts` 14/14 (new: account resolver happy
+  path with accountAccess shape asserted, null/throw fall-through to later
+  API-key candidates, non-entitled/team/start account access skipped,
+  fetch-level Bearer of the resolved plan key).
+- tui-pi suite 244/244 (new: same-message failure diagnosed once; idle
+  `refresh(true)` inside the 60s window skipped; authoritative turn-edge still
+  fetches; backoff expiry resumes idle fetches; message change logs a new
+  line; success re-arms diagnostics for the next episode).
+- CLI `attach-adapter` + `tui-quota-query` 42/42; root typecheck (incl.
+  desktop projects) and CLI typecheck clean; `architecture:check --changed`
+  0 violations; bootstrap/tui-pi lint introduce no new findings (bootstrap
+  lint exit-1 is the pre-existing `transcript-hydration.ts` max-lines error).
+- **Live observation (real credentials, never printed):** a scratch probe ran
+  the exact new path against the real credential store and endpoint —
+  `resolver called for account:zai-individual-coding-plan model=GLM-5.3`,
+  port resolved a credential (length 49), and
+  `https://api.z.ai/api/monitor/usage/quota/limit` returned
+  `level="pro"`, `CREDIT_LIMIT unit=3 number=5 percentage=14` (5h window,
+  14% used) and `unit=6 number=1 percentage=91` (7d window) with
+  `nextResetTime` values — the same wire pi's provider-balance consumes.
+  The cluster will render these as `5h: 86% ↻… · 7d: 9% ↻…`.
+
+Unrelated failures observed (pre-existing, reproduced identical at baseline):
+bootstrap full-suite under load flakes in `session-persistence` (2),
+`v4-gateway` oversize-projection, `v4-native-interaction-background` dwf
+cancel, and intermittently `workflow-fault-matrix.retry` /
+`protocol-unbound-resume` / `dynamic-workflow-run-service` /
+`fault-matrix-harness` / `plugins` — all pass in isolation both on the branch
+and at baseline; contention-related, not quota-related.
+
+NOT exercised live (unverified): the promoted-pair smoke (this branch is not
+promoted; `piz` still runs the 24866159 pair until merge + promotion), and the
+rendered footer cluster in a real piz session against the account values.

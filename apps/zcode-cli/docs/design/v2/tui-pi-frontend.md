@@ -219,7 +219,12 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     由 core 用 provider 凭据拉监控端点，返回共享 `UsageQuotaSnapshot`；
     `tui-pi/src/quota.ts` 持有与刷新（provider-balance 同策略：空闲 60s
     ±15s 抖动、turn 沿刷新 ≥30s 间隔、读数 30min TTL、失败保留上次读数并
-    stderr 诊断；`options.readUsageQuota` 缺席时静默）。格式化同
+    stderr 诊断、`options.readUsageQuota` 缺席时静默）。失败诊断不刷屏
+    （2026-10-28）：同一失败消息只诊断一次（消息变化或成功落地后重新
+    允许一次），空闲拍在失败后 60s（FAILURE_BACKOFF_MS）退避窗口内跳过，
+    turn 沿/启动/reset 等权威拍仍真实尝试——provider-balance
+    「opportunistic 让路、authoritative 重试」同分工；永久失败（无凭据）
+    不再每 60s 一行 stderr。格式化同
     provider-balance：unit/number → 窗口标签（d/h/m）、`percentage`
     （已用口径）翻转为剩余、`nextResetTime` 秒/毫秒双容差、窗口按秒升序、
     倒计时 `now/m/h/d/d{h}` 空格紧凑式、百分比 0–100 收敛。

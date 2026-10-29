@@ -6,12 +6,15 @@
 // 严格收。端点按 family 分流（zai-family → api.z.ai，bigmodel-family →
 // open.bigmodel.cn），路径与 desktop services bigmodelUsageQuotaProvider
 // 的 BIGMODEL_QUOTA_PATH 一致。凭据只进 Authorization 头，不进日志。
+// 凭据来源两路：provider config 内的 API key 访问，与 zhipu-account
+// （individual coding plan 账号登录态）经注入解析器取的计划级凭据。
 
 import type { ProviderRegistryModelSource } from "./provider-registry-model-runtime.js";
 import type {
   UsageQuotaLimit,
   UsageQuotaSnapshot,
   UsageQuotaUsageDetail,
+  ZCodeProviderAccountAccess,
 } from "@zcode/shared";
 
 const ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
@@ -30,19 +33,60 @@ export interface ResolvedCodingPlanQuotaProvider {
 }
 
 /**
- * 第一个「coding plan 族 + API key 访问」的 provider（Registry 视图序，
- * 确定性）。zhipu-account 访问态的凭据不经 provider config 持有，此处
- * 不覆盖——它的额度面走账号通道，另行接入。
+ * 账号通道凭据解析器：由宿主注入（session facade 用
+ * providerRuntimeHeadersPort 包装），此处只约定「拿到本轮可用的计划级
+ * 凭据，拿不到返回 null」。凭据内容不进日志、不进返回值之外的任何面。
  */
-export function resolveCodingPlanQuotaProvider(
+export type CodingPlanQuotaAccountResolver = (input: {
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly accountAccess: ZCodeProviderAccountAccess;
+}) => Promise<string | null>;
+
+/**
+ * 第一个可用凭据的 coding plan 族 provider（Registry 视图序，确定性）：
+ * API key 访问（api-key / zhipu-coding-plan-api-key，凭据在 provider config）
+ * 或「zhipu-account + entitled + individual-coding-plan」的账号 provider——
+ * 后者凭据经注入的账号解析器现取（manual 计划 Key 或 OAuth 派生 project
+ * token，与模型请求同一所有者），解析器缺席/返回 null/抛错都跳过该
+ * provider 继续找下一个候选。desktop 侧同语义（usage 读取走
+ * accountRequestAuthService.resolveCurrent）；team/start/off-peak 等其它
+ * 套餐形态的额度面不在本通道（desktop 各自的额度服务负责），维持跳过。
+ */
+export async function resolveCodingPlanQuotaProvider(
   registry: ProviderRegistryModelSource,
-): ResolvedCodingPlanQuotaProvider | null {
+  resolveAccountApiKey?: CodingPlanQuotaAccountResolver,
+): Promise<ResolvedCodingPlanQuotaProvider | null> {
   for (const provider of registry.getView().providers) {
     const host = CODING_PLAN_FAMILY_HOSTS[provider.config.group ?? ""];
     if (!host) continue;
     const access = provider.config.access;
-    if (access.type === "zhipu-account") continue;
-    const apiKey = access.apiKey;
+    if (access.type !== "zhipu-account") {
+      const apiKey = access.apiKey;
+      if (typeof apiKey === "string" && apiKey.length > 0) {
+        return { apiKey, providerId: provider.providerId, url: host };
+      }
+      continue;
+    }
+    if (access.entitled !== true) continue;
+    if (access.mode !== "individual-coding-plan") continue;
+    if (access.accountType !== "zai" && access.accountType !== "bigmodel") continue;
+    if (!resolveAccountApiKey) continue;
+    const modelId = provider.config.builtinModelIds?.find((candidate) => candidate.trim()) ?? "";
+    const accountAccess: ZCodeProviderAccountAccess = {
+      type: "zhipu-account",
+      accountType: access.accountType,
+      mode: access.mode,
+      entitled: true,
+    };
+    let apiKey: string | null;
+    try {
+      apiKey = await resolveAccountApiKey({ providerId: provider.providerId, modelId, accountAccess });
+    } catch {
+      // 账号凭据解析失败（未登录/换号中/project token 交换失败）不当成功
+      // 也不当终态：跳过该 provider，让后续候选（或最终显式错误）接管。
+      continue;
+    }
     if (typeof apiKey !== "string" || apiKey.length === 0) continue;
     return { apiKey, providerId: provider.providerId, url: host };
   }
@@ -154,12 +198,17 @@ export class CodingPlanQuotaUnavailableError extends Error {
 
 export interface CodingPlanQuotaFetchOptions {
   registry: ProviderRegistryModelSource;
+  /** 账号通道凭据解析器；缺席时只覆盖 provider config 内的 API key 访问。 */
+  resolveAccountApiKey?: CodingPlanQuotaAccountResolver;
   fetchImpl?: typeof fetch;
 }
 
 /** 拉取 Coding Plan 额度快照；无可用 provider / 端点失败都抛显式错误。 */
 export async function fetchCodingPlanQuota(options: CodingPlanQuotaFetchOptions): Promise<UsageQuotaSnapshot> {
-  const resolved = resolveCodingPlanQuotaProvider(options.registry);
+  const resolved = await resolveCodingPlanQuotaProvider(
+    options.registry,
+    options.resolveAccountApiKey,
+  );
   if (!resolved) {
     throw new CodingPlanQuotaUnavailableError("no coding-plan provider with an API key in the registry");
   }

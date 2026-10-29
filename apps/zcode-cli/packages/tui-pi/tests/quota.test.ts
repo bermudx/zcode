@@ -1,6 +1,7 @@
 // 额度簇：quota.ts 纯格式化（provider-balance 同构）+ QuotaCluster 刷新
 // 策略（空闲轮询、turn 沿授权刷新、min-interval 防抖、30min TTL、失败保留
-// 上次读数 + stderr 诊断、readUsageQuota 缺席静默）。
+// 上次读数 + stderr 诊断按消息去重、失败后空闲拍退避、readUsageQuota 缺席
+// 静默）。
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -208,6 +209,73 @@ test("cluster: failure keeps the last reading and writes a stderr diagnostic", a
   // 读数保留，不闪空；诊断落 stderr。
   assert.deepEqual(store.state.quotaBalance?.length, 1);
   assert.ok(stderrChunks.join("").includes("quota refresh failed: 502 bad gateway"));
+  h.dispose();
+});
+
+test("cluster: same failure is diagnosed once; idle ticks back off; success re-arms", async () => {
+  const store = new AppStore();
+  const clock = new FakeClock();
+  let fail = true;
+  let message = "no coding-plan provider with an API key in the registry";
+  let fetches = 0;
+  const h = cluster(
+    store,
+    async () => {
+      fetches += 1;
+      if (fail) throw new Error(message);
+      return snapshot([limit({ percentage: 1 })]);
+    },
+    clock,
+  );
+  stderrChunks.length = 0;
+  h.start();
+  await flush();
+  // 启动拍（权威）失败：恰好一行诊断。
+  assert.equal(stderrChunks.length, 1);
+  assert.ok(stderrChunks[0]?.includes(message));
+  assert.equal(fetches, 1);
+
+  // +31s：空闲拍（opportunistic）在 60s 退避窗口内被跳过，不打请求。
+  clock.advance(31_000);
+  h.refresh(true);
+  await flush();
+  assert.equal(fetches, 1, "idle refresh inside the failure backoff window is skipped");
+
+  // 同刻 turn 沿（权威拍）仍真实尝试：请求发生，但同消息不再诊断。
+  h.onTurnSettled();
+  await flush();
+  assert.equal(fetches, 2, "authoritative turn-edge refresh still attempts");
+  assert.equal(stderrChunks.length, 1, "identical failure message is diagnosed once");
+
+  // +92s：距上次失败 61s，退避窗口出界，空闲拍恢复尝试；同消息仍只一行。
+  clock.advance(61_000);
+  h.refresh(true);
+  await flush();
+  assert.equal(fetches, 3, "idle refresh resumes after the backoff window");
+  assert.equal(stderrChunks.length, 1);
+
+  // 失败换消息 → 新诊断行。
+  message = "coding-plan quota request failed: 502";
+  clock.advance(31_000);
+  h.onTurnSettled();
+  await flush();
+  assert.equal(fetches, 4);
+  assert.equal(stderrChunks.length, 2);
+  assert.ok(stderrChunks[1]?.includes("502"));
+
+  // 成功重置去重与退避；随后同消息再次失败允许再诊断一次。
+  fail = false;
+  clock.advance(31_000);
+  h.onTurnSettled();
+  await flush();
+  assert.equal(fetches, 5);
+  assert.ok(store.state.quotaBalance?.length === 1);
+  fail = true;
+  message = "no coding-plan provider with an API key in the registry";
+  clock.advance(31_000);
+  h.onTurnSettled();
+  await flush();
+  assert.equal(stderrChunks.length, 3, "success re-arms diagnostics for the next failure episode");
   h.dispose();
 });
 
