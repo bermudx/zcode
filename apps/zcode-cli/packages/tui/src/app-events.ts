@@ -384,6 +384,16 @@ function applyModelCompleteEvent(
       }));
     }
   }
+  // core 的 main_turn model_complete 自带 contextWindow——attach 接入拿不到
+  // session_created（先 emit 后订阅），这里补上窗口并随回合刷新（换模型后
+  // 窗口变化也自校正）。
+  const contextWindow = contextWindowFromPayload(payload);
+  if (contextWindow !== undefined) {
+    setContextUsage((current) => ({
+      ...current,
+      contextWindow,
+    }));
+  }
   setStatus(
     nextUsage
       ? copy.model.responseReceivedWithTokens(formatNumber(nextUsage.totalTokens))

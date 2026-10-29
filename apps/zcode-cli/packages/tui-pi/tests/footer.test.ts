@@ -1,7 +1,8 @@
-// Footer 恒高回归：statusBox 恒为三行（活动行 + pwd 行 + stats 行）。旧实现
-// 把 pi-tui Loader（自带空行 + 内容行）在 busy 时挂进 composerBox、idle 时
-// 摘除——footer 在行数间跳变，整屏内容随 spinner 顶起/落下。现三个子组件
-// 常驻且各自恒为单行。
+// Footer 恒高回归：statusBox 恒为两行（活动行 + meta 行）。旧实现把 pi-tui
+// Loader（自带空行 + 内容行）在 busy 时挂进 composerBox、idle 时摘除——
+// footer 在行数间跳变，整屏内容随 spinner 顶起/落下。现两个子组件常驻且
+// 各自恒为单行：活动行（spinner + status + 行尾额度簇）、meta 行
+// （cwd + 用量/ctx | 身份簇）。
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -20,32 +21,32 @@ const footerRows = (app: PiTuiApp, width = 80): string[] =>
     width,
   );
 
-test("footer stays three rows across idle → busy → idle", async () => {
+test("footer stays two rows across idle → busy → idle", async () => {
   const h = createHarness({ initialMode: "build", initialModel: "prov/model" });
   try {
     h.store.set("status", "Ready.");
     let rows = footerRows(h.app);
-    assert.equal(rows.length, 3);
+    assert.equal(rows.length, 2);
     assert.match(rows[0] ?? "", /Ready\./);
     assert.doesNotMatch(rows[0] ?? "", SPINNER);
-    // pwd 行：cwd 标签常驻（无 branch 时无括号段），stats 行是身份簇
+    // meta 行：cwd 标签常驻（无 branch 时无括号段），行尾是身份簇
     // （pi 语法：model • mode；单 provider 无前缀）。
     assert.ok((visibleWidth(rows[1] ?? "") > 0));
-    assert.match(strip(rows[2] ?? ""), /model • build/);
-    assert.doesNotMatch(strip(rows[2] ?? ""), /\(prov\)/);
-    assert.doesNotMatch(rows[2] ?? "", /Ready\./);
+    assert.match(strip(rows[1] ?? ""), /model • build/);
+    assert.doesNotMatch(strip(rows[1] ?? ""), /\(prov\)/);
+    assert.doesNotMatch(rows[1] ?? "", /Ready\./);
 
     h.store.set("busy", true);
     rows = footerRows(h.app);
-    assert.equal(rows.length, 3);
+    assert.equal(rows.length, 2);
     assert.match(rows[0] ?? "", SPINNER);
     assert.match(rows[0] ?? "", /Ready\./);
-    // stats 行不再有 busy 字面量（活动行即 busy 指示）。
-    assert.doesNotMatch(rows[2] ?? "", /busy/);
+    // meta 行不再有 busy 字面量（活动行即 busy 指示）。
+    assert.doesNotMatch(rows[1] ?? "", /busy/);
 
     h.store.set("busy", false);
     rows = footerRows(h.app);
-    assert.equal(rows.length, 3);
+    assert.equal(rows.length, 2);
     assert.doesNotMatch(rows[0] ?? "", SPINNER);
     assert.match(rows[0] ?? "", /Ready\./);
   } finally {
@@ -53,24 +54,24 @@ test("footer stays three rows across idle → busy → idle", async () => {
   }
 });
 
-test("workspaceGitBranch lands in the pwd row only", async () => {
+test("workspaceGitBranch lands in the meta row only", async () => {
   const h = createHarness({ workspaceDirectory: "/home/u/proj" });
   try {
     h.store.set("workspaceGitBranch", "main");
     const rows = footerRows(h.app);
-    assert.match(strip(rows[1] ?? ""), /\(main\)$/);
-    assert.doesNotMatch(rows[2] ?? "", /\(main\)/);
+    assert.match(strip(rows[1] ?? ""), /\(main\)/);
+    assert.doesNotMatch(rows[0] ?? "", /\(main\)/);
   } finally {
     await h.stop();
   }
 });
 
-test("startup options deliver the branch to the pwd row", async () => {
+test("startup options deliver the branch to the meta row", async () => {
   const h = createHarness({ workspaceDirectory: "/home/u/proj" });
   try {
     await h.app.applyStartupOptions({ workspaceGitBranch: "feature/x" });
     const rows = footerRows(h.app);
-    assert.match(strip(rows[1] ?? ""), /\(feature\/x\)$/);
+    assert.match(strip(rows[1] ?? ""), /\(feature\/x\)/);
   } finally {
     await h.stop();
   }
@@ -95,7 +96,7 @@ test("busy with empty status shows the interrupt hint; long status never wraps",
     assert.match(footerRows(h.app)[0] ?? "", /esc to interrupt/);
     h.store.set("status", "x".repeat(200));
     const rows = footerRows(h.app, 40);
-    assert.equal(rows.length, 3);
+    assert.equal(rows.length, 2);
     for (const row of rows) assert.ok(visibleWidth(row) <= 40);
   } finally {
     await h.stop();

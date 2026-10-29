@@ -472,6 +472,20 @@ export function createAttachPromptHandler(
   const { runtime } = options;
   let current = options.initialHandle;
   runtime.registerSession(current);
+  // 常驻 session sink 随会话换绑迁移（monolith sessionEventRelay 同语义）：
+  // subscribeSessionEvents 订阅的是「当前会话」不是某个句柄——/new /resume
+  // /fork 换 current 后，旧句柄上的 sink 会永久失聪新会话的出回合事件
+  // （per-turn onEvent 仍走句柄本地 sinks，自己的回合不受影响，故障静默）。
+  const durableSinks = new Map<
+    (event: SessionEvent) => void,
+    () => void
+  >();
+  runtime.onSessionBound((handle) => {
+    for (const [sink, unsubscribe] of durableSinks) {
+      unsubscribe();
+      durableSinks.set(sink, handle.addSink(sink));
+    }
+  });
   // 重连会换 client：会话级 request 一律经 runtime 拿当前连接，不能用捕获的旧 client。
   const request = <T = unknown>(method: string, params?: unknown): Promise<T> =>
     runtime.currentClient().request<T>(method, params);
@@ -617,7 +631,14 @@ export function createAttachPromptHandler(
   };
   submitPrompt.listModelOptions = async () =>
     current.snapshot.settings.model.available as never;
-  submitPrompt.subscribeSessionEvents = (sink) => current.addSink(sink);
+  submitPrompt.subscribeSessionEvents = (sink) => {
+    const handle = runtime.currentSession ?? current;
+    durableSinks.set(sink, handle.addSink(sink));
+    return () => {
+      durableSinks.get(sink)?.();
+      durableSinks.delete(sink);
+    };
+  };
   // "stop & quit"：对当前会话发 session/stop 并等有界回执；随 current 跟随 /new /resume。
   submitPrompt.requestStopActiveTurn = () => current.stopActiveTurn();
   submitPrompt.close = async () => {

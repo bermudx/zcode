@@ -22,6 +22,7 @@ import {
   type ZCodeSessionSettingsState,
   type ZCodeSessionStateSnapshot,
   type ZCodeSessionTodoGroup,
+  type ZCodeSessionUsageTotals,
   type ZCodeWorkspaceRef,
   isMainAgentToolProjectionSource,
 } from "@zcode/shared";
@@ -72,6 +73,7 @@ export async function buildSessionSnapshot(input: {
   slashCommandOptions?: ListProtocolSlashCommandsOptions;
   target?: SessionGoal | null;
   todos?: TodoItem[];
+  usageTotals?: ZCodeSessionUsageTotals;
   workspace: ZCodeWorkspaceRef;
 }): Promise<ZCodeSessionStateSnapshot> {
   const runtimeProjection = await input.app.runtime.getProjection();
@@ -112,6 +114,7 @@ export async function buildSessionSnapshot(input: {
       persistedContextUsageBreakdownEvents: input.persistedContextUsageBreakdownEvents,
       projection,
       stateRevision: input.stateRevision,
+      usageTotals: input.usageTotals,
     }),
     session: mapSessionInfo({
       app: input.app,
@@ -568,6 +571,7 @@ function mapRuntimeState(input: {
   persistedContextUsageBreakdownEvents?: readonly SessionEvent[];
   projection: SessionProjection;
   stateRevision: number;
+  usageTotals?: ZCodeSessionUsageTotals;
 }): ZCodeSessionRuntimeState {
   // projection.currentTurnId 是投影最后处理过的 turn，不代表当前仍在运行。
   // session 恢复/subscribe 快照如果把它回填成 runtime.activeTurnId，会让已 idle/complete 的任务误显示为 thinking。
@@ -593,6 +597,7 @@ function mapRuntimeState(input: {
       input.projection.targetCompletionVerificationTimeline,
     ),
     stateRevision: input.stateRevision,
+    ...(input.usageTotals ? { usageTotals: input.usageTotals } : {}),
   };
 }
 

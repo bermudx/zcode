@@ -24,10 +24,8 @@ import { resolveWorkspaceGitBranch } from "../tui-workspace-git.js";
 import { loadPiTuiRuntime } from "../tui-pi-runtime-loader.js";
 import { loadTuiRuntime } from "../tui-runtime-loader.js";
 import { DEFAULT_CLI_WORKFLOW_MODE } from "../workflow-mode.js";
-import {
-  AttachSessionHandle,
-  projectAttachTranscriptMessages,
-} from "./attach-session.js";
+import { AttachSessionHandle } from "./attach-session.js";
+import { projectAttachTranscriptMessages } from "./attach-projection.js";
 import { listAttachSkillCatalog, toSkillSuggestions } from "./attach-skills.js";
 import { listAttachCommandCatalog, toCommandCenterCustomCommandList } from "./attach-commands.js";
 import {
@@ -229,7 +227,8 @@ export const runAttachCommand = async (
         getMainSessionId: promptHandler.getMainSessionId,
         initialMode: handle.getMode(),
         // resume-latest：快照自带 messages，按 loadSessionTranscript 的映射
-        // 产出 restoredMessages 让 transcript 首帧即历史。
+        // 产出 restoredMessages 让 transcript 首帧即历史；sessionSnapshotSeed
+        // 把快照的 ctx 水位与 session 累计用量带给页脚（接入前流量不再显示为 0）。
         ...(resumedSnapshot
           ? {
               initialResult: {
@@ -243,6 +242,7 @@ export const runAttachCommand = async (
                 sessionId: snapshot.session.sessionId,
                 thoughtLevel: handle.getThoughtLevel(),
                 traceId: snapshot.session.traceId,
+                ...handle.sessionSnapshotSeed(),
               } satisfies TuiSubmitPromptResult,
             }
           : {}),

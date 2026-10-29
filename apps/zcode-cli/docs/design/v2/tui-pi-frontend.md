@@ -150,53 +150,56 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   正文色值（`label: value` 分层，整行不再全灰）；同一消息内
   thought/tool/text part 之间保证恰一行呼吸位（不与 markdown 自带的段尾
   空行叠加）。
-- Footer 恒定三行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
+- Footer 恒定两行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
   `Container`）唯一 own：高度不随 busy 变化，挂载/卸载 spinner 不再把整屏
-  内容顶起/落下；`update({state, status, cwdLabel})` 一行委托三行。布局
-  对齐 pi-mono footer：pwd 行独立，stats 行左右两区、ctx 仪表贴用量簇。
+  内容顶起/落下；`update({state, status, cwdLabel, quotaText})` 一行委托
+  两行。操作者口径为两行（2026-10-29 起恢复 3324315f 前的双行布局）：
+  活动行 + meta 行（cwd 并入 stats 左区，额度簇右移到活动行尾）。
   - 活动行（`ActivityLine`，Loader 单行形态）：busy 或 `activeTurnId` 在场
     时动画 spinner + `status`（status 为空回退 `input.activeStatusHint`，
     "esc to interrupt"，与 React 前端同文案）；空闲时 spinner 位留空格对齐、
     显示 `status` 或留白。`activeTurnId` 并入活动判定与
     `quitChoice.turnBusy` 同口径——attach 会话远端发起的 turn 也可见
-    spinner；指示切换只在 busy 沿变化时发生。
-  - pwd 行（`PwdLine`）：`~/cwd (branch)`，`$HOME` 折叠为 `~`。branch 取
-    `TuiStartupOptions.workspaceGitBranch`（CLI 组合层启动快照，与 React
-    sidebar 同一来源；无 live watcher，会话内切分支不刷新）。非 git 目录
-    只显示 cwd；行尾 "..." 截断（pi footer 同款三连点）。
-    有额度读数时右对齐额度簇（pi goodies provider-balance
-    `addBalanceToWorkingDirectoryLine` 同构移植，`tui-pi/src/footer.ts`）：
-    右半 `theme.dim`，两区间距 ≥2 空格（padding 下限 1）；右半 ≥ 全宽时
-    只渲染右半截断；左半按余宽 "..." 截断。
-  - stats 行（`StatsLine` + `status-line.ts` 纯格式化）：左区
-    `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}] [CH{hit}%] [$cost]
-    {ctxPct}%/{ctxWindow}(auto)`（pi footer 同构同序；窗口缺失降级
+    spinner；指示切换只在 busy 沿变化时发生。行尾右对齐额度簇（pi
+    provider-balance 同式，`appendFooterRightZone`）：账号级读数不占
+    meta 行的 session 左区；`theme.dim`，间距 ≥2 列，余量不足丢额度
+    读数不截 status/spinner。
+  - meta 行（`MetaLine` + `status-line.ts` 纯格式化 `formatMetaLine`）：
+    左区 `~/cwd (branch)` + `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}]
+    [CH{hit}%] [$cost] {ctxPct}%/{ctxWindow}(auto)`（pi footer 同构同序；
+    `$HOME` 折叠为 `~`，branch 取 `TuiStartupOptions.workspaceGitBranch`
+    ——CLI 组合层启动快照，与 React sidebar 同一来源；无 live watcher，
+    会话内切分支不刷新；非 git 目录只显 cwd。窗口缺失降级
     `ctx {compact(used)}`；`W` 仅 cacheWrite>0 时显示），右区
     `(provider) model • thought • mode • agents:N`（pi 用 `•` 分隔；
     provider 前缀仅当可用 provider 数 >1 时显示，与 pi
     `getAvailableProviderCount()>1` 同规约；mode/agents 为 piz 扩展段，
     附着在 pi 段之后），两区间距 ≥2 空格。宽度收缩顺序：左区行尾 "..."
-    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）。
+    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）；cwd
+    在左区最前、最后丢，用量/ctx 读数先收缩。
     早期「右区余窗 <4 列整体退场」的防碎片守卫已移除，以 pi 行为为准。
   - ctx 百分比按 pi 阈值着色：>90% `theme.danger`、>70% `theme.warning`、
     其余随行 `theme.muted`；`(auto)` 直接拼在窗口紧凑计数之后
     （`{pct}%/{win} (auto)`）。
-  - 三行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
-    status 也不会把 footer 撑过三行。
+  - 两行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
+    status 也不会把 footer 撑过两行。
   - `(auto)`：core `AutoCompactPolicyConfig.enabled` 目前不在客户端事件面
     暴露（compact 事件只带 `autoCompactThreshold` 结果值）。计划经 additive
     契约字段把设置态带到 `ContextUsage`；字段落地前 footer 不显示 `(auto)`，
     不按默认值伪造。
   - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
-    维护的 session 累计。契约没有 session 级权威用量源——`turn_complete`
-    / `submitPrompt` 结果的 `usage` 都是 `createModelUsageSummaryFromEvents`
-    (本回合事件) 的回合口径，采纳会把累计显示打回本回合数字——故只做
-    纯折叠：已 dedup 的主会话 `model_complete` 与 `model_request_failed`
-    单请求 `ModelUsage` 逐次累加（与权威口径同一事件集合）。只在
-    `applyMainSessionEvent` 采纳后折叠：同一事件经 session sink 与
-    per-turn onEvent 双投递，dedup 保证恰好一次。attach 中途接入只计
-    接入后流量；`resetSessionProjection` 清零。`state.usage` 在 turn 内
-    是单请求口径，不能直接显示为累计。
+    维护的 session 累计。折叠口径与 contracts `summarizeSessionUsageTotals`
+    同源：已 dedup 的主会话 `model_complete` 与 `model_request_failed`
+    单请求 `ModelUsage` 逐次累加（`turn_complete` / `submitPrompt` 结果的
+    `usage` 是 `createModelUsageSummaryFromEvents` 回合口径，采纳会把累计
+    显示打回本回合数字，故不取）。只在 `applyMainSessionEvent` 采纳后
+    折叠：同一事件经 session sink 与 per-turn onEvent 双投递，dedup 保证
+    恰好一次。attach 接入前的部分由快照 `runtime.usageTotals` 种子补齐
+    （core 对 eventStore 同口径折叠；eventStore 是运行期内存账本，core
+    重启冷恢复的 session 只含物化后事件，与 `runtime.contextUsage` 同
+    窗口）。种子经 `applyResult`/`seed` 在 `resetSessionProjection` 清零
+    之后落地，live 增量在其上继续累加。`state.usage` 在 turn 内是单请求
+    口径，不能直接显示为累计。
   - `R` 为累计 `cacheReadTokens`（与 pi-mono footer 同字段语义）。
   - `CH` 取 `ModelComplete.payload.cacheHit.latestHitRate`（最近一次请求的
     命中口径，即 pi 的 `latestCacheHitRate`；0–1 小数，渲染成一位小数百分比）。
@@ -205,6 +208,11 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     伪装成当前命中率）。
   - `ctx` 段为 `contextUsage.contextUsed / contextWindow`：窗口在时渲染
     `{pct}%/{compact(window)}`，仅有 contextUsed 时降级为 `ctx {compact}`。
+    `contextWindow` 取值链：`session_created` / `model_complete` payload 的
+    `contextWindow`、快照 `runtime.contextUsage.size` 种子；三者都缺时回退
+    当前模型的 catalog `contextWindow`（provider 匹配的 `modelOptions` 条目，
+    pi `contextWindow ?? model.contextWindow` 同款——同名模型跨 provider 不
+    互借窗口）。
   - `agents:{n}` 在 running 子代理数 > 0 时追加到右区身份簇（见下方目录段）。
   - `$cost`：契约无成本字段（core step-finish 落 `cost: 0` 占位），成本在
     客户端按模型单价计算（pi `calculateCost` 同公式：

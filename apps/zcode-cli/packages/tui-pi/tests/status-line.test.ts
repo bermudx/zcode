@@ -12,8 +12,9 @@ import {
   formatCwdLabel,
   formatIdentityCluster,
   formatModelLabel,
+  appendFooterRightZone,
+  formatMetaLine,
   formatPwdLine,
-  formatPwdRow,
   formatStatsLine,
   formatTokens,
   formatUsageCluster,
@@ -166,22 +167,67 @@ test("pwd line appends the branch and truncates the tail with ...", () => {
   assert.ok(truncated.startsWith("~/build"), truncated);
 });
 
-test("pwd row right-aligns the quota cluster with >=2 columns between", () => {
-  const base = { cwdLabel: "~/piz", theme: testTheme };
-  // pi addBalanceToWorkingDirectoryLine：右对齐，padding 下限 1（间距含
-  // 分隔语义 ≥2 由宽度充足时的 max(1, …)+左行未截断保证，与 pi 同式）。
-  const line = formatPwdRow({ ...base, quotaText: "5h: 99% ↻4h", width: 40 });
+test("activity row right-aligns the quota cluster; drops it when no room", () => {
+  const base = { theme: testTheme };
+  // pi provider-balance 同款右对齐 + dim，间距 ≥2 列。
+  const line = appendFooterRightZone({
+    ...base,
+    line: "  Ready.",
+    right: "5h: 99% ↻4h",
+    width: 40,
+  });
   assert.ok(strip(line).endsWith("5h: 99% ↻4h"), line);
-  assert.ok(strip(line).startsWith("~/piz"), line);
+  assert.ok(strip(line).startsWith("  Ready."), line);
   assert.equal(visibleWidth(line), 40);
-  // 右半 ≥ 全宽：只渲染右半（截断无标记）。
-  const narrow = formatPwdRow({ ...base, quotaText: "7d: 32% ↻5d9h", width: 8 });
-  assert.equal(visibleWidth(narrow), 8);
-  // 左半按余宽 ... 截断。
-  const clipped = formatPwdRow({ ...base, branch: "main", quotaText: "5h: 99% ↻4h", width: 12 });
-  assert.equal(visibleWidth(clipped), 12);
-  // 无额度读数：退化为普通 pwd 行（含 dim 包裹）。
-  assert.equal(visibleWidth(formatPwdRow({ ...base, width: 20 })), 5);
+  // 余量 <2 列：丢额度读数而不是截断 status/spinner 文本。
+  const tight = appendFooterRightZone({
+    ...base,
+    line: "  " + "x".repeat(30),
+    right: "5h: 99% ↻4h",
+    width: 40,
+  });
+  assert.equal(strip(tight), "  " + "x".repeat(30));
+  // 无额度读数：原样返回行内容。
+  assert.equal(
+    appendFooterRightZone({ ...base, line: "  Ready.", width: 40 }),
+    "  Ready.",
+  );
+});
+
+test("meta line composes cwd + usage + ctx | identity", () => {
+  const s = state({
+    cacheHitRate: 1,
+    contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
+    mode: "yolo",
+    model: "zai/glm-5.3",
+    thoughtLevel: "max",
+    usageTotals: totals(463_000, 118_000, 27_000_000),
+  });
+  const line = strip(
+    formatMetaLine({
+      branch: "dev",
+      cwdLabel: "~/build/piz",
+      state: s,
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(line.startsWith("~/build/piz (dev)"), line);
+  assert.ok(line.includes("↑463k ↓118k R27M CH100.0%"), line);
+  assert.ok(line.includes("40.4%/255k"), line);
+  assert.ok(line.endsWith("glm-5.3 • max • yolo"), line);
+  // 超宽：行尾 "..." 截断先收缩用量读数，cwd 前缀存活最久。
+  const narrow = strip(
+    formatMetaLine({
+      branch: "dev",
+      cwdLabel: "~/build/piz",
+      state: s,
+      theme: testTheme,
+      width: 40,
+    }),
+  );
+  assert.equal(visibleWidth(narrow), 40);
+  assert.ok(narrow.startsWith("~/build/piz (dev)"), narrow);
 });
 
 test("stats line lays out left cluster + ctx gauge and right identity (pi separators)", () => {
@@ -575,6 +621,176 @@ test("child-session usage events never reach the main footer", async () => {
     await h.flush();
     assert.match(h.output(), /↑500 ↓5/);
     assert.doesNotMatch(h.output(), /↑9\.0M|9\.9M|R0/);
+  } finally {
+    await h.stop();
+  }
+});
+
+// ---- attach 绑定种子（快照 runtime.usageTotals / contextUsage → 页脚） ----
+
+test("bind seed lands after reset: swap result seeds usage totals, ctx, CH", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    // /resume 结果同包：resetSessionProjection + 快照种子。旧顺序先 merge
+    // projection 再 reset 会把种子整体抹掉——断言种子最终可见。
+    h.app.applyResult({
+      projection: { contextUsed: 103_000, contextWindow: 255_000 },
+      resetSessionProjection: true,
+      response: "",
+      usageTotals: {
+        cacheReadTokens: 27_000_000,
+        cacheWriteTokens: 0,
+        inputTokens: 463_000,
+        latestCacheHitRate: 1,
+        outputTokens: 118_000,
+      },
+    });
+    await h.flush();
+    assert.deepEqual(h.store.state.contextUsage, {
+      contextUsed: 103_000,
+      contextWindow: 255_000,
+    });
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: 27_000_000,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+      inputTokens: 463_000,
+      outputTokens: 118_000,
+    });
+    assert.equal(h.store.state.cacheHitRate, 1);
+  } finally {
+    await h.stop();
+  }
+});
+
+test("live folds continue on top of the bind seed", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    h.app.applyResult({
+      response: "",
+      usageTotals: {
+        cacheReadTokens: 1_000,
+        cacheWriteTokens: 0,
+        inputTokens: 463_000,
+        outputTokens: 118_000,
+      },
+    });
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "chunk",
+        stopReason: "stop",
+        usage: { cacheReadTokens: 100, inputTokens: 1_000, outputTokens: 10 },
+      }),
+    );
+    await h.flush();
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: 1_100,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+      inputTokens: 464_000,
+      outputTokens: 118_010,
+    });
+  } finally {
+    await h.stop();
+  }
+});
+
+test("model_complete payload.contextWindow seeds the ctx gauge (attach 无 session_created)", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "chunk",
+        contextWindow: 255_000,
+        stopReason: "stop",
+        usage: { inputTokens: 267_000, outputTokens: 5 },
+      }),
+    );
+    await h.flush();
+    assert.deepEqual(h.store.state.contextUsage, {
+      contextUsed: 267_000,
+      contextWindow: 255_000,
+    });
+  } finally {
+    await h.stop();
+  }
+});
+
+test("ctx segment falls back to the current model's catalog contextWindow (pi 同款)", () => {
+  const options = [
+    {
+      contextWindow: 255_000,
+      ref: { modelId: "glm-5.3", providerId: "zai" },
+    },
+  ] as unknown as AppStore["state"]["modelOptions"];
+  const withFallback = strip(
+    formatStatsLine({
+      state: state({ model: "zai/glm-5.3", modelOptions: options }),
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(withFallback.includes("?/255k"), `expected ?/255k in: ${withFallback}`);
+  // provider 不匹配不取别家窗口；catalog 缺 contextWindow 也不伪造。
+  const wrongProvider = strip(
+    formatStatsLine({
+      state: state({ model: "other/glm-5.3", modelOptions: options }),
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(!wrongProvider.includes("?/255k"), `unexpected ?/255k in: ${wrongProvider}`);
+  // 会话事件已给出窗口时优先（快照/model_complete 读数赢过目录）。
+  const explicit = strip(
+    formatStatsLine({
+      state: state({
+        contextUsage: { contextWindow: 128_000 },
+        model: "zai/glm-5.3",
+        modelOptions: options,
+      }),
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(explicit.includes("?/128k"), `expected ?/128k in: ${explicit}`);
+});
+
+// 双向漂移门：attach 的 session 种子由 core 经 contracts
+// summarizeSessionUsageTotals 折叠——必须与客户端累计器逐事件折叠同结果，
+// 否则接入前后的 ↑/↓/R 读数会跳变。
+test("accumulator fold matches contracts summarizeSessionUsageTotals on the same events", async () => {
+  const { summarizeSessionUsageTotals } = await import("@zcode/contracts");
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    const events = [
+      sessionEvent("model_complete", {
+        cacheHit: { latestHitRate: 0.9 },
+        content: "a",
+        stopReason: "stop",
+        usage: { cacheReadTokens: 800, cacheWriteTokens: 10, inputTokens: 1_000, outputTokens: 10 },
+      }),
+      sessionEvent("model_complete", {
+        cacheHit: { latestHitRate: null },
+        content: "b",
+        stopReason: "stop",
+        usage: { outputTokens: 5, totalTokens: 600 },
+      }),
+      sessionEvent("model_network_status", {
+        type: "model_request_failed",
+        usage: { inputTokens: 50, outputTokens: 0 },
+      }),
+    ];
+    for (const event of events) h.app.applyEvent(event);
+    await h.flush();
+    const wire = summarizeSessionUsageTotals(events);
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: wire?.cacheReadTokens,
+      cacheWriteTokens: wire?.cacheWriteTokens,
+      costUsd: 0,
+      inputTokens: wire?.inputTokens,
+      outputTokens: wire?.outputTokens,
+    });
+    assert.equal(h.store.state.cacheHitRate, wire?.latestCacheHitRate);
   } finally {
     await h.stop();
   }

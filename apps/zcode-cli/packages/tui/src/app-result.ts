@@ -75,13 +75,8 @@ export function useTuiApplyResult(input: TuiApplyResultInput) {
           current === result.turnId ? undefined : current,
         );
       }
-      if (result.usage) input.setUsage(result.usage);
-      if (result.projection) {
-        input.setContextUsage((current) => ({
-          ...current,
-          ...validContextUsage(result.projection ?? {}),
-        }));
-      }
+      // 换绑结果会同时携带 reset 与绑定种子（projection/usageTotals）：
+      // 必须先清空再落种子，否则 reset 会把刚种上的快照读数抹掉。
       if (result.resetSessionProjection) {
         input.setUsage(undefined);
         input.setContextUsage({});
@@ -90,6 +85,13 @@ export function useTuiApplyResult(input: TuiApplyResultInput) {
         input.setNetworkRequests([]);
         input.setModifiedFiles([]);
         input.modifiedFileToolCallIds.clear();
+      }
+      if (result.usage) input.setUsage(result.usage);
+      if (result.projection) {
+        input.setContextUsage((current) => ({
+          ...current,
+          ...validContextUsage(result.projection ?? {}),
+        }));
       }
 
       input.setSelection(createSelectionState(result.selection));
