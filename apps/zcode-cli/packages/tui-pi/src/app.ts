@@ -754,7 +754,7 @@ export class PiTuiApp {
     }
   }
 
-  /** Footer 三行的 owner 在 footer.ts；这里只把最新 state 递下去。 */
+  /** Footer 两行的 owner 在 footer.ts；这里只把最新 state 递下去。 */
   private updateFooter(): void {
     this.statusBox.update({
       cwdLabel: this.cwdLabel,

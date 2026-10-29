@@ -1,9 +1,9 @@
-// Footer stats 行布局（pi-mono footer 同构）：左区 session 用量簇
-// （↑in ↓out R… [W…] [CH%] [$cost]）+ ctx 仪表 `{pct}%/{win}(auto)`，右区
-// 身份簇 `(provider) model • thought • mode • agents:N`。pwd 行
-// （`~/cwd (branch)` + 可选右对齐额度簇）见 formatPwdLine / formatPwdRow。
-// 分段门与分隔符、右对齐最小间距、截断标记均对齐 pi footer：
-// 左区行尾 "..." 截断 → 右区按剩余宽度截断（无标记）。
+// Footer meta 行布局（pi-mono footer 同构）：左区 `~/cwd (branch)` + session
+// 用量簇（↑in ↓out R… [W…] [CH%] [$cost]）+ ctx 仪表 `{pct}%/{win}(auto)`，
+// 右区身份簇 `(provider) model • thought • mode • agents:N`；额度簇右对齐
+// 在活动行尾（appendFooterRightZone）。分段门与分隔符、右对齐最小间距、
+// 截断标记均对齐 pi footer：左区行尾 "..." 截断 → 右区按剩余宽度截断
+// （无标记）。
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ContextUsage } from "@zcode/tui/internals";
@@ -176,29 +176,22 @@ export function formatPwdLine(input: {
 }
 
 /**
- * pwd 行整行组装（pi goodies provider-balance
- * `addBalanceToWorkingDirectoryLine` 同构移植）：额度读数右对齐、`dim`，
- * 两区间距 ≥2 空格（padding 下限 1）；右半 ≥ 全宽时只渲染右半（截断无
- * 标记）；左半按余宽 "..." 截断。quotaText 缺席时退化为普通 pwd 行。
+ * 活动行右区追加（额度簇 pi provider-balance 同款右对齐 + dim，间距 ≥2 列）。
+ * 行内内容优先：余量不足直接丢右区，不截断已渲染的 status/spinner 文本——
+ * 窄终端丢额度读数而不是丢中断提示或活动状态。
  */
-export function formatPwdRow(input: {
-  branch?: string;
-  cwdLabel?: string;
-  width: number;
+export function appendFooterRightZone(input: {
+  line: string;
+  right?: string;
   theme: Pick<PiTheme, "dim">;
-  quotaText?: string;
+  width: number;
 }): string {
-  if (input.width < 1) return "";
-  const styled = input.theme.dim(formatPwdLine(input));
-  const quotaText = input.quotaText;
-  if (!quotaText) return truncateToWidth(styled, input.width, input.theme.dim("..."));
-  const right = input.theme.dim(quotaText);
-  const rightWidth = visibleWidth(right);
-  if (rightWidth >= input.width) return truncateToWidth(right, input.width, "");
-  const maxLeftWidth = Math.max(0, input.width - rightWidth - 2);
-  const left = truncateToWidth(styled, maxLeftWidth, input.theme.dim("..."));
-  const padding = " ".repeat(Math.max(1, input.width - visibleWidth(left) - rightWidth));
-  return `${left}${padding}${right}`;
+  const { line, right, theme, width } = input;
+  if (!right || width < 1) return line;
+  const styled = theme.dim(right);
+  const gap = width - visibleWidth(line) - visibleWidth(styled);
+  if (gap < 2) return line;
+  return `${line}${" ".repeat(gap)}${styled}`;
 }
 
 /** stats 行左区：用量簇 + $ + ctx 仪表（pi footer 同序），空段跳过。 */
@@ -224,16 +217,8 @@ const formatStatsLeftSegments = (
   return segments;
 };
 
-/**
- * stats 行整行组装：左区放不下先行尾 "..." 截断，右区再按剩余宽度截断
- * （pi footer 同序；右区截断无标记，避免挤掉身份簇尾部）。着色同 pi：
- * 整行 dim，ctx 百分比 >90 danger、>70 warning（着色段两侧的 dim 独立
- * 包裹——外层 dim 会被内段 reset 提前终结）。
- */
-export function formatStatsLine(input: { state: AppStore["state"]; width: number; theme: PiTheme }): string {
-  const { state, width, theme } = input;
-  if (width < 1) return "";
-  const MIN_PADDING = 2;
+/** stats 左区着色拼接（dim 基底，ctx 段按阈值 warning/danger 独立着色）。 */
+const renderStatsLeft = (state: AppStore["state"], theme: PiTheme): string => {
   const segments = formatStatsLeftSegments(state);
   const contextIndex = segments.findIndex((segment) => segment.isContext);
   const renderSegment = (segment: { text: string; style?: "warning" | "danger" }): string => {
@@ -241,26 +226,82 @@ export function formatStatsLine(input: { state: AppStore["state"]; width: number
     if (segment.style === "warning") return theme.warning(segment.text);
     return theme.dim(segment.text);
   };
-  let statsLeft: string;
   if (contextIndex >= 0) {
     const before = segments.slice(0, contextIndex).map(renderSegment).join(" ");
     const at = renderSegment(segments[contextIndex]);
     const after = segments.slice(contextIndex + 1).map(renderSegment).join(" ");
-    statsLeft = [before, at, after].filter((part) => part.length > 0).join(" ");
-  } else {
-    statsLeft = segments.map(renderSegment).join(" ");
+    return [before, at, after].filter((part) => part.length > 0).join(" ");
   }
-  if (visibleWidth(statsLeft) > width) {
-    statsLeft = truncateToWidth(statsLeft, width, theme.dim("..."));
+  return segments.map(renderSegment).join(" ");
+};
+
+/**
+ * 左右区整行组装：左区放不下先行尾 "..." 截断，右区再按剩余宽度截断
+ * （pi footer 同序；右区截断无标记，避免挤掉身份簇尾部）。着色同 pi：
+ * 整行 dim，ctx 百分比 >90 danger、>70 warning（着色段两侧的 dim 独立
+ * 包裹——外层 dim 会被内段 reset 提前终结）。
+ */
+const composeFooterZones = (input: {
+  left: string;
+  right: string;
+  theme: PiTheme;
+  width: number;
+}): string => {
+  const { theme, width } = input;
+  const MIN_PADDING = 2;
+  let left = input.left;
+  if (visibleWidth(left) > width) {
+    left = truncateToWidth(left, width, theme.dim("..."));
   }
-  const leftWidth = visibleWidth(statsLeft);
-  const right = formatIdentityCluster(state) ?? "";
+  const leftWidth = visibleWidth(left);
   const availableForRight = width - leftWidth - MIN_PADDING;
-  let rightText = right;
+  let right = input.right;
   if (visibleWidth(right) > availableForRight) {
-    rightText = availableForRight > 0 ? truncateToWidth(right, availableForRight, "") : "";
+    right = availableForRight > 0 ? truncateToWidth(right, availableForRight, "") : "";
   }
-  if (rightText.length === 0) return statsLeft;
-  const padding = " ".repeat(Math.max(0, width - leftWidth - visibleWidth(rightText)));
-  return `${statsLeft}${theme.dim(padding + rightText)}`;
+  if (right.length === 0) return left;
+  const padding = " ".repeat(Math.max(0, width - leftWidth - visibleWidth(right)));
+  return `${left}${theme.dim(padding + right)}`;
+};
+
+/** stats 行（无 cwd 前缀）：用量簇 + ctx | 身份簇。 */
+export function formatStatsLine(input: { state: AppStore["state"]; width: number; theme: PiTheme }): string {
+  const { state, width, theme } = input;
+  if (width < 1) return "";
+  return composeFooterZones({
+    left: renderStatsLeft(state, theme),
+    right: formatIdentityCluster(state) ?? "",
+    theme,
+    width,
+  });
+}
+
+/**
+ * meta 行（footer 第二行）：`~/cwd (branch)` 前缀 + stats 左区 | 身份簇。
+ * cwd 与用量簇之间两空格；左区超宽从行尾 "..." 截断——cwd 在最前最后丢，
+ * 用量/ctx 读数先行收缩（与原 stats 行同序）。
+ */
+export function formatMetaLine(input: {
+  branch?: string;
+  cwdLabel?: string;
+  state: AppStore["state"];
+  width: number;
+  theme: PiTheme;
+}): string {
+  const { state, width, theme } = input;
+  if (width < 1) return "";
+  const pwd = formatPwdLine({ branch: input.branch, cwdLabel: input.cwdLabel, width });
+  const statsLeft = renderStatsLeft(state, theme);
+  const left = [
+    pwd ? theme.dim(pwd) : "",
+    statsLeft,
+  ]
+    .filter((part) => part.length > 0)
+    .join("  ");
+  return composeFooterZones({
+    left,
+    right: formatIdentityCluster(state) ?? "",
+    theme,
+    width,
+  });
 }

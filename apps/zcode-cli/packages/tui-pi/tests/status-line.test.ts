@@ -12,8 +12,9 @@ import {
   formatCwdLabel,
   formatIdentityCluster,
   formatModelLabel,
+  appendFooterRightZone,
+  formatMetaLine,
   formatPwdLine,
-  formatPwdRow,
   formatStatsLine,
   formatTokens,
   formatUsageCluster,
@@ -166,22 +167,67 @@ test("pwd line appends the branch and truncates the tail with ...", () => {
   assert.ok(truncated.startsWith("~/build"), truncated);
 });
 
-test("pwd row right-aligns the quota cluster with >=2 columns between", () => {
-  const base = { cwdLabel: "~/piz", theme: testTheme };
-  // pi addBalanceToWorkingDirectoryLine：右对齐，padding 下限 1（间距含
-  // 分隔语义 ≥2 由宽度充足时的 max(1, …)+左行未截断保证，与 pi 同式）。
-  const line = formatPwdRow({ ...base, quotaText: "5h: 99% ↻4h", width: 40 });
+test("activity row right-aligns the quota cluster; drops it when no room", () => {
+  const base = { theme: testTheme };
+  // pi provider-balance 同款右对齐 + dim，间距 ≥2 列。
+  const line = appendFooterRightZone({
+    ...base,
+    line: "  Ready.",
+    right: "5h: 99% ↻4h",
+    width: 40,
+  });
   assert.ok(strip(line).endsWith("5h: 99% ↻4h"), line);
-  assert.ok(strip(line).startsWith("~/piz"), line);
+  assert.ok(strip(line).startsWith("  Ready."), line);
   assert.equal(visibleWidth(line), 40);
-  // 右半 ≥ 全宽：只渲染右半（截断无标记）。
-  const narrow = formatPwdRow({ ...base, quotaText: "7d: 32% ↻5d9h", width: 8 });
-  assert.equal(visibleWidth(narrow), 8);
-  // 左半按余宽 ... 截断。
-  const clipped = formatPwdRow({ ...base, branch: "main", quotaText: "5h: 99% ↻4h", width: 12 });
-  assert.equal(visibleWidth(clipped), 12);
-  // 无额度读数：退化为普通 pwd 行（含 dim 包裹）。
-  assert.equal(visibleWidth(formatPwdRow({ ...base, width: 20 })), 5);
+  // 余量 <2 列：丢额度读数而不是截断 status/spinner 文本。
+  const tight = appendFooterRightZone({
+    ...base,
+    line: "  " + "x".repeat(30),
+    right: "5h: 99% ↻4h",
+    width: 40,
+  });
+  assert.equal(strip(tight), "  " + "x".repeat(30));
+  // 无额度读数：原样返回行内容。
+  assert.equal(
+    appendFooterRightZone({ ...base, line: "  Ready.", width: 40 }),
+    "  Ready.",
+  );
+});
+
+test("meta line composes cwd + usage + ctx | identity", () => {
+  const s = state({
+    cacheHitRate: 1,
+    contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
+    mode: "yolo",
+    model: "zai/glm-5.3",
+    thoughtLevel: "max",
+    usageTotals: totals(463_000, 118_000, 27_000_000),
+  });
+  const line = strip(
+    formatMetaLine({
+      branch: "dev",
+      cwdLabel: "~/build/piz",
+      state: s,
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(line.startsWith("~/build/piz (dev)"), line);
+  assert.ok(line.includes("↑463k ↓118k R27M CH100.0%"), line);
+  assert.ok(line.includes("40.4%/255k"), line);
+  assert.ok(line.endsWith("glm-5.3 • max • yolo"), line);
+  // 超宽：行尾 "..." 截断先收缩用量读数，cwd 前缀存活最久。
+  const narrow = strip(
+    formatMetaLine({
+      branch: "dev",
+      cwdLabel: "~/build/piz",
+      state: s,
+      theme: testTheme,
+      width: 40,
+    }),
+  );
+  assert.equal(visibleWidth(narrow), 40);
+  assert.ok(narrow.startsWith("~/build/piz (dev)"), narrow);
 });
 
 test("stats line lays out left cluster + ctx gauge and right identity (pi separators)", () => {
