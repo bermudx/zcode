@@ -97,6 +97,26 @@ function splitModelLabel(model: string): { provider?: string; model: string } {
 }
 
 /**
+ * pi footer `contextWindow ?? model.contextWindow` 同款回退：会话事件还没
+ * 给出窗口时（attach 首帧、新会话首个 model_complete 之前），用当前模型
+ * 的目录窗口渲染 `?/{win}`。model 为 `provider/model` 时要求 provider
+ * 一并匹配，避免同名模型误取另一家的窗口。
+ */
+function contextUsageWithModelWindow(s: AppStore["state"]): ContextUsage {
+  if (s.contextUsage.contextWindow !== undefined || !s.model) return s.contextUsage;
+  const split = splitModelLabel(s.model);
+  const option = (s.modelOptions ?? []).find(
+    (candidate) =>
+      candidate.ref?.modelId === split.model &&
+      (split.provider === undefined || candidate.ref.providerId === split.provider),
+  );
+  const contextWindow = option?.contextWindow;
+  return contextWindow === undefined
+    ? s.contextUsage
+    : { ...s.contextUsage, contextWindow };
+}
+
+/**
  * 可用 provider 数：modelOptions 里去重后的 providerId 数（pi
  * `getAvailableProviderCount()` 同角色）。快照缺席时按 1 处理——不凭空
  * 显示 provider 前缀。
@@ -193,7 +213,7 @@ const formatStatsLeftSegments = (
   if (usage) segments.push({ text: usage });
   const cost = formatCostSegment(s.usageTotals?.costUsd);
   if (cost) segments.push({ text: cost });
-  const ctx = contextSegmentParts(s.contextUsage, { autoCompact: s.autoCompact });
+  const ctx = contextSegmentParts(contextUsageWithModelWindow(s), { autoCompact: s.autoCompact });
   if (ctx.text) {
     segments.push({
       isContext: true,

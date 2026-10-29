@@ -390,14 +390,8 @@ export class PiTuiApp {
     store.set("liveModelText", "");
     // settle 回合不得回写 activeTurnId：socket 事件先清零，无条件回写会把已完成回合复活成 busy。
     if (result.turnId && store.state.activeTurnId === result.turnId) store.set("activeTurnId", undefined);
-    // result.usage 是回合口径（同 turn_complete），不进 session 累计器。
-    if (result.usage) store.set("usage", result.usage);
-    if (result.projection) {
-      store.setter("contextUsage")((current) => ({
-        ...current,
-        ...validContextUsage(result.projection ?? {}),
-      }));
-    }
+    // 换绑结果会同时携带 reset 与绑定种子（projection/usageTotals）：
+    // 必须先清空再落种子，否则 reset 会把刚种上的快照读数抹掉。
     if (result.resetSessionProjection) {
       store.set("usage", undefined);
       store.set("contextUsage", {});
@@ -410,6 +404,15 @@ export class PiTuiApp {
       this.quota.reset();
       this.usageTotals.reset();
     }
+    // result.usage 是回合口径（同 turn_complete），不进 session 累计器。
+    if (result.usage) store.set("usage", result.usage);
+    if (result.projection) {
+      store.setter("contextUsage")((current) => ({
+        ...current,
+        ...validContextUsage(result.projection ?? {}),
+      }));
+    }
+    this.usageTotals.seed(result.usageTotals);
     store.set("selection", createSelectionState(result.selection));
     store.set("queuedInputs", []);
     const activeLoginRequired = result.loginRequired ?? this.fallback.loginRequired;

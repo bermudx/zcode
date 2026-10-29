@@ -1,12 +1,13 @@
-// 状态行的 session 累计用量（pi footer 的 ↑/↓/R 是累计计数）。契约里没有
-// session 级权威用量源——turn_complete / submitPrompt 的 usage 都是
-// createModelUsageSummaryFromEvents(本回合事件) 的回合口径，采纳会把
-// 累计显示打回本回合数字——所以这里只做纯折叠：model_complete 与
-// model_request_failed 的单请求用量逐次累加，与权威口径同一事件集合
-// （contracts/session.events.ts:1275-1290）。
+// 状态行的 session 累计用量（pi footer 的 ↑/↓/R 是累计计数）。turn_complete
+// / submitPrompt 的 usage 都是 createModelUsageSummaryFromEvents(本回合事件)
+// 的回合口径，采纳会把累计显示打回本回合数字——所以 live 部分只做纯折叠：
+// model_complete 与 model_request_failed 的单请求用量逐次累加，与
+// contracts summarizeSessionUsageTotals 同一事件集合、同一字段口径。
 // 调用方只投递 applyMainSessionEvent 已采纳（主会话门 + 事件 id 去重）的
 // 事件——同一事件经 session sink 与 per-turn onEvent 双投递，dedup 保证
-// 恰好一次。attach 中途接入只计接入后流量；resetSessionProjection 时清零。
+// 恰好一次。接入前的部分由绑定结果的 usageTotals 种子补齐（协议快照
+// runtime.usageTotals，core 对 eventStore 同口径折叠）；resetSessionProjection
+// 时清零。
 
 import {
   SessionEventType,
@@ -16,7 +17,11 @@ import {
   type ModelUsage,
   type SessionEvent,
 } from "@zcode/contracts";
-import { isMainSessionEvent, type TuiOptions } from "@zcode/tui/internals";
+import {
+  isMainSessionEvent,
+  type TuiOptions,
+  type TuiSubmitPromptResult,
+} from "@zcode/tui/internals";
 import type { AppStore, UsageTotals } from "./store.js";
 import { cacheExclusiveInputTokens, lookupModelRates, requestCostUsd } from "./pricing.js";
 
@@ -47,6 +52,40 @@ export class UsageTotalsAccumulator {
       if (payload?.type === "model_request_failed" && payload.usage) {
         this.fold(payload.usage);
       }
+    }
+  }
+
+  /**
+   * 绑定结果携带的 session 级种子（协议快照 runtime.usageTotals，
+   * contracts summarizeSessionUsageTotals 产出——与 fold 同一事件集合、
+   * 同一字段口径）：采纳为累计基线，live 事件自此继续折叠。seed 替换而
+   * 非累加，重复应用幂等。costUsd 没有历史分布，只能对整份种子按当前
+   * 模型目录价一次性估值——与逐请求折叠的归界误差同级。
+   */
+  seed(totals: TuiSubmitPromptResult["usageTotals"] | undefined): void {
+    if (!totals) return;
+    const inputTokens = Math.max(0, totals.inputTokens);
+    const outputTokens = Math.max(0, totals.outputTokens);
+    const cacheReadTokens = Math.max(0, totals.cacheReadTokens);
+    const cacheWriteTokens = Math.max(0, totals.cacheWriteTokens);
+    const rates = lookupModelRates(this.store.state.model);
+    const costUsd = rates
+      ? requestCostUsd(rates, {
+          cacheReadTokens,
+          cacheWriteTokens,
+          inputTokens: cacheExclusiveInputTokens({
+            cacheReadTokens,
+            cacheWriteTokens,
+            inputWindowTokens: inputTokens,
+          }),
+          outputTokens,
+        })
+      : 0;
+    this.totals = { cacheReadTokens, cacheWriteTokens, costUsd, inputTokens, outputTokens };
+    this.publish();
+    const rate = totals.latestCacheHitRate;
+    if (typeof rate === "number" && Number.isFinite(rate)) {
+      this.store.set("cacheHitRate", rate);
     }
   }
 

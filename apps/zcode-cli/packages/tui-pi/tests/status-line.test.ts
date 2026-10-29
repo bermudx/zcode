@@ -579,3 +579,173 @@ test("child-session usage events never reach the main footer", async () => {
     await h.stop();
   }
 });
+
+// ---- attach 绑定种子（快照 runtime.usageTotals / contextUsage → 页脚） ----
+
+test("bind seed lands after reset: swap result seeds usage totals, ctx, CH", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    // /resume 结果同包：resetSessionProjection + 快照种子。旧顺序先 merge
+    // projection 再 reset 会把种子整体抹掉——断言种子最终可见。
+    h.app.applyResult({
+      projection: { contextUsed: 103_000, contextWindow: 255_000 },
+      resetSessionProjection: true,
+      response: "",
+      usageTotals: {
+        cacheReadTokens: 27_000_000,
+        cacheWriteTokens: 0,
+        inputTokens: 463_000,
+        latestCacheHitRate: 1,
+        outputTokens: 118_000,
+      },
+    });
+    await h.flush();
+    assert.deepEqual(h.store.state.contextUsage, {
+      contextUsed: 103_000,
+      contextWindow: 255_000,
+    });
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: 27_000_000,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+      inputTokens: 463_000,
+      outputTokens: 118_000,
+    });
+    assert.equal(h.store.state.cacheHitRate, 1);
+  } finally {
+    await h.stop();
+  }
+});
+
+test("live folds continue on top of the bind seed", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    h.app.applyResult({
+      response: "",
+      usageTotals: {
+        cacheReadTokens: 1_000,
+        cacheWriteTokens: 0,
+        inputTokens: 463_000,
+        outputTokens: 118_000,
+      },
+    });
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "chunk",
+        stopReason: "stop",
+        usage: { cacheReadTokens: 100, inputTokens: 1_000, outputTokens: 10 },
+      }),
+    );
+    await h.flush();
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: 1_100,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+      inputTokens: 464_000,
+      outputTokens: 118_010,
+    });
+  } finally {
+    await h.stop();
+  }
+});
+
+test("model_complete payload.contextWindow seeds the ctx gauge (attach 无 session_created)", async () => {
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    h.app.applyEvent(
+      sessionEvent("model_complete", {
+        content: "chunk",
+        contextWindow: 255_000,
+        stopReason: "stop",
+        usage: { inputTokens: 267_000, outputTokens: 5 },
+      }),
+    );
+    await h.flush();
+    assert.deepEqual(h.store.state.contextUsage, {
+      contextUsed: 267_000,
+      contextWindow: 255_000,
+    });
+  } finally {
+    await h.stop();
+  }
+});
+
+test("ctx segment falls back to the current model's catalog contextWindow (pi 同款)", () => {
+  const options = [
+    {
+      contextWindow: 255_000,
+      ref: { modelId: "glm-5.3", providerId: "zai" },
+    },
+  ] as unknown as AppStore["state"]["modelOptions"];
+  const withFallback = strip(
+    formatStatsLine({
+      state: state({ model: "zai/glm-5.3", modelOptions: options }),
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(withFallback.includes("?/255k"), `expected ?/255k in: ${withFallback}`);
+  // provider 不匹配不取别家窗口；catalog 缺 contextWindow 也不伪造。
+  const wrongProvider = strip(
+    formatStatsLine({
+      state: state({ model: "other/glm-5.3", modelOptions: options }),
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(!wrongProvider.includes("?/255k"), `unexpected ?/255k in: ${wrongProvider}`);
+  // 会话事件已给出窗口时优先（快照/model_complete 读数赢过目录）。
+  const explicit = strip(
+    formatStatsLine({
+      state: state({
+        contextUsage: { contextWindow: 128_000 },
+        model: "zai/glm-5.3",
+        modelOptions: options,
+      }),
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(explicit.includes("?/128k"), `expected ?/128k in: ${explicit}`);
+});
+
+// 双向漂移门：attach 的 session 种子由 core 经 contracts
+// summarizeSessionUsageTotals 折叠——必须与客户端累计器逐事件折叠同结果，
+// 否则接入前后的 ↑/↓/R 读数会跳变。
+test("accumulator fold matches contracts summarizeSessionUsageTotals on the same events", async () => {
+  const { summarizeSessionUsageTotals } = await import("@zcode/contracts");
+  const h = createHarness({ getMainSessionId: () => "sess-test" });
+  try {
+    const events = [
+      sessionEvent("model_complete", {
+        cacheHit: { latestHitRate: 0.9 },
+        content: "a",
+        stopReason: "stop",
+        usage: { cacheReadTokens: 800, cacheWriteTokens: 10, inputTokens: 1_000, outputTokens: 10 },
+      }),
+      sessionEvent("model_complete", {
+        cacheHit: { latestHitRate: null },
+        content: "b",
+        stopReason: "stop",
+        usage: { outputTokens: 5, totalTokens: 600 },
+      }),
+      sessionEvent("model_network_status", {
+        type: "model_request_failed",
+        usage: { inputTokens: 50, outputTokens: 0 },
+      }),
+    ];
+    for (const event of events) h.app.applyEvent(event);
+    await h.flush();
+    const wire = summarizeSessionUsageTotals(events);
+    assert.deepEqual(h.store.state.usageTotals, {
+      cacheReadTokens: wire?.cacheReadTokens,
+      cacheWriteTokens: wire?.cacheWriteTokens,
+      costUsd: 0,
+      inputTokens: wire?.inputTokens,
+      outputTokens: wire?.outputTokens,
+    });
+    assert.equal(h.store.state.cacheHitRate, wire?.latestCacheHitRate);
+  } finally {
+    await h.stop();
+  }
+});
