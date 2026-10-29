@@ -1,5 +1,10 @@
 import type { WorkflowRunProgressEnvelope } from "@zcode/shared/zcode-protocol-v4";
-import type { ModelSelection, UsageQuotaSnapshot, ZCodeModelOption } from "@zcode/shared";
+import type {
+  ModelSelection,
+  UsageQuotaSnapshot,
+  ZCodeModelOption,
+  ZCodeSessionUsageTotals,
+} from "@zcode/shared";
 import type {
   CollaborationMode,
   ModelUsageSummary,
@@ -178,13 +183,7 @@ export type TuiSubmitPromptResult = {
    * 基线后继续折叠 live 事件；回合结果不携带——快照不会逐回合刷新，
    * 陈旧种子会回退已折叠的计数。
    */
-  usageTotals?: {
-    cacheReadTokens: number;
-    cacheWriteTokens: number;
-    inputTokens: number;
-    latestCacheHitRate?: number | null;
-    outputTokens: number;
-  };
+  usageTotals?: ZCodeSessionUsageTotals;
 };
 
 export type TuiRequestPermission = (

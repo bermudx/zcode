@@ -103,7 +103,10 @@ function splitModelLabel(model: string): { provider?: string; model: string } {
  * 一并匹配，避免同名模型误取另一家的窗口。
  */
 function contextUsageWithModelWindow(s: AppStore["state"]): ContextUsage {
-  if (s.contextUsage.contextWindow !== undefined || !s.model) return s.contextUsage;
+  // 0/负数视为缺省：contextWindowFromPayload 接受 >=0，0 落到 store 会既
+  // 挡住目录回退又渲染不出 `?/{win}`。
+  const window = s.contextUsage.contextWindow;
+  if ((window !== undefined && window > 0) || !s.model) return s.contextUsage;
   const split = splitModelLabel(s.model);
   const option = (s.modelOptions ?? []).find(
     (candidate) =>

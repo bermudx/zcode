@@ -75,6 +75,11 @@ export function projectAttachTranscriptMessages(
  * 扫 session history，这是 attach 客户端的等价物。eventStore 是运行期
  * 内存账本，core 重启后冷恢复的 session 只含物化后事件（与
  * projection.contextUsed 同口径）。
+ *
+ * 已知边界：常驻 sink 在 registerSession 时即挂上（onSessionBound），
+ * subscribe 往返期间的 live 事件既被 sink 折叠、又落在快照折叠里——
+ * 单次换绑最多双计一个请求的计数；彻底消重需要快照带 asOfSeq 水位
+ * （subscribe 已回 eventSeq），交给 live 折叠跳过 ≤ 水位的事件。
  */
 export function projectSessionSnapshotSeed(
   snapshot: ZCodeSessionStateSnapshot,
