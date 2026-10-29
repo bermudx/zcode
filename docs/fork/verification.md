@@ -637,3 +637,16 @@ after merge + promotion. The fold is runtime-ledger scoped: sessions
 materialized after a core restart only fold events present in the
 eventStore (same window as `runtime.contextUsage`), not full persisted
 history.
+
+## 2026-10-29 — two-row footer restore (same branch)
+
+Same `patch/attach-footer-seed` branch, follow-up to the seed work above:
+
+- tui-pi suite 250/250 (rewrote the row-count and quota-placement
+  regressions for the two-row layout; new: meta-row composition cwd + usage
+  + ctx | identity, activity-row quota right-zone with fit-or-drop).
+- `pnpm --dir apps/zcode-cli lint`: 0 errors, 71 warnings (unchanged set).
+- `pnpm architecture:check --changed`: 0 violations.
+
+NOT exercised live (unverified): rendered two-row footer in a real `piz`
+session — layout/widths verified against formatter + component tests only.

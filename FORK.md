@@ -242,3 +242,15 @@ identity or enable inherited upload/update paths without a separate audit.
   `sessionEventRelay` semantics).
 - Design docs updated: tui-pi-frontend.md (fold provenance, ctx-window
   chain), tui-attach-shared-core.md (seed path, sink migration).
+
+### 2026-10-29 — restore two-row footer (patch/attach-footer-seed)
+
+- Operator direction is two rows; the 3324315f-era three-row layout (activity
+  + pwd + stats) is superseded by the restored double-row form: activity row
+  (spinner + status + right-aligned quota cluster) + meta row (`~/cwd
+  (branch)` + `↑↓ R CH $ ctx` left, identity right).
+- Quota moved to the activity row's right edge via `appendFooterRightZone`
+  (pi provider-balance alignment; drops the quota text rather than
+  truncating status/spinner when <2 columns remain). `formatPwdRow` removed;
+  `formatMetaLine` composes the meta row from `formatPwdLine` + the shared
+  stats-left segments; `formatStatsLine` remains as the no-cwd form.

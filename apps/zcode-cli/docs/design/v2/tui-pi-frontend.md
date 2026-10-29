@@ -150,39 +150,39 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   正文色值（`label: value` 分层，整行不再全灰）；同一消息内
   thought/tool/text part 之间保证恰一行呼吸位（不与 markdown 自带的段尾
   空行叠加）。
-- Footer 恒定三行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
+- Footer 恒定两行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
   `Container`）唯一 own：高度不随 busy 变化，挂载/卸载 spinner 不再把整屏
-  内容顶起/落下；`update({state, status, cwdLabel})` 一行委托三行。布局
-  对齐 pi-mono footer：pwd 行独立，stats 行左右两区、ctx 仪表贴用量簇。
+  内容顶起/落下；`update({state, status, cwdLabel, quotaText})` 一行委托
+  两行。操作者口径为两行（2026-10-29 起恢复 3324315f 前的双行布局）：
+  活动行 + meta 行（cwd 并入 stats 左区，额度簇右移到活动行尾）。
   - 活动行（`ActivityLine`，Loader 单行形态）：busy 或 `activeTurnId` 在场
     时动画 spinner + `status`（status 为空回退 `input.activeStatusHint`，
     "esc to interrupt"，与 React 前端同文案）；空闲时 spinner 位留空格对齐、
     显示 `status` 或留白。`activeTurnId` 并入活动判定与
     `quitChoice.turnBusy` 同口径——attach 会话远端发起的 turn 也可见
-    spinner；指示切换只在 busy 沿变化时发生。
-  - pwd 行（`PwdLine`）：`~/cwd (branch)`，`$HOME` 折叠为 `~`。branch 取
-    `TuiStartupOptions.workspaceGitBranch`（CLI 组合层启动快照，与 React
-    sidebar 同一来源；无 live watcher，会话内切分支不刷新）。非 git 目录
-    只显示 cwd；行尾 "..." 截断（pi footer 同款三连点）。
-    有额度读数时右对齐额度簇（pi goodies provider-balance
-    `addBalanceToWorkingDirectoryLine` 同构移植，`tui-pi/src/footer.ts`）：
-    右半 `theme.dim`，两区间距 ≥2 空格（padding 下限 1）；右半 ≥ 全宽时
-    只渲染右半截断；左半按余宽 "..." 截断。
-  - stats 行（`StatsLine` + `status-line.ts` 纯格式化）：左区
-    `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}] [CH{hit}%] [$cost]
-    {ctxPct}%/{ctxWindow}(auto)`（pi footer 同构同序；窗口缺失降级
+    spinner；指示切换只在 busy 沿变化时发生。行尾右对齐额度簇（pi
+    provider-balance 同式，`appendFooterRightZone`）：账号级读数不占
+    meta 行的 session 左区；`theme.dim`，间距 ≥2 列，余量不足丢额度
+    读数不截 status/spinner。
+  - meta 行（`MetaLine` + `status-line.ts` 纯格式化 `formatMetaLine`）：
+    左区 `~/cwd (branch)` + `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}]
+    [CH{hit}%] [$cost] {ctxPct}%/{ctxWindow}(auto)`（pi footer 同构同序；
+    `$HOME` 折叠为 `~`，branch 取 `TuiStartupOptions.workspaceGitBranch`
+    ——CLI 组合层启动快照，与 React sidebar 同一来源；无 live watcher，
+    会话内切分支不刷新；非 git 目录只显 cwd。窗口缺失降级
     `ctx {compact(used)}`；`W` 仅 cacheWrite>0 时显示），右区
     `(provider) model • thought • mode • agents:N`（pi 用 `•` 分隔；
     provider 前缀仅当可用 provider 数 >1 时显示，与 pi
     `getAvailableProviderCount()>1` 同规约；mode/agents 为 piz 扩展段，
     附着在 pi 段之后），两区间距 ≥2 空格。宽度收缩顺序：左区行尾 "..."
-    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）。
+    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）；cwd
+    在左区最前、最后丢，用量/ctx 读数先收缩。
     早期「右区余窗 <4 列整体退场」的防碎片守卫已移除，以 pi 行为为准。
   - ctx 百分比按 pi 阈值着色：>90% `theme.danger`、>70% `theme.warning`、
     其余随行 `theme.muted`；`(auto)` 直接拼在窗口紧凑计数之后
     （`{pct}%/{win} (auto)`）。
-  - 三行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
-    status 也不会把 footer 撑过三行。
+  - 两行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
+    status 也不会把 footer 撑过两行。
   - `(auto)`：core `AutoCompactPolicyConfig.enabled` 目前不在客户端事件面
     暴露（compact 事件只带 `autoCompactThreshold` 结果值）。计划经 additive
     契约字段把设置态带到 `ContextUsage`；字段落地前 footer 不显示 `(auto)`，
