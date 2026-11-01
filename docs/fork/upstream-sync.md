@@ -33,7 +33,9 @@ No feature branch is implicitly eligible for integration.
    require file review, not just reading subjects. Inspect the seams below.
 4. Merge the pinned upstream target on the candidate. Keep existing history;
    never use blanket ours/theirs or a clean textual merge as proof of correctness.
-   Review rerere resolutions too.
+   Review rerere resolutions too. Resolve conflicts under
+   [fork-deleted paths](#fork-deleted-paths) mechanically before reviewing real
+   conflicts.
 5. For each P001–P005 patch, record retained/replaced/obsolete/redesign. Confirm
    upstream replacements satisfy our scenarios before removing local behavior.
    Signing is mandatory: reject candidates that drop/break it. Retire local
@@ -53,6 +55,33 @@ No feature branch is implicitly eligible for integration.
    deletion or live-core disruption is implicit approval from a sync request.
 10. Preserve old artifacts and refs. Coordinate restart: rebuilding files cannot
     update a long-running core; don't kill existing sessions indiscriminately.
+
+## Fork-deleted paths
+
+Paths the fork removed while upstream still owns them. When upstream edits one,
+the merge reports a modify/delete conflict (`DU`/`UD` in `git status`). Git has
+no per-path "ours wins" declaration — merge drivers only see content conflicts
+and `-X ours` cannot be scoped — so the policy is procedural: for unmerged paths
+under these prefixes, the fork deletion always wins. Never re-add upstream's
+version; update this list whenever the fork deletes an upstream-owned path.
+
+- `.agents/skills/agent-browser/` — pre-existing removal; user-level skill suffices
+- `.agents/skills/ai-elements/` — no new web chat UI is a fork product
+- `.agents/skills/dogfood/` — web-app QA workflow is not a fork activity
+- `.agents/skills/e2e-case-lifecycle/` — desktop E2E lifecycle; fork e2e is `apps/zcode-cli/e2e`
+- `.agents/skills/electron/` — fork goal is explicitly without Electron
+- `apps/zcode-cli/.agents/skills/vercel-react-view-transitions/` — browser API; no browser surface in the CLI app
+
+After `git merge` stops on conflicts, before resolving anything else:
+
+```sh
+# Prefixes must mirror the list above.
+deleted='^\.agents/skills/(agent-browser|ai-elements|dogfood|e2e-case-lifecycle|electron)/|^apps/zcode-cli/\.agents/skills/vercel-react-view-transitions/'
+git diff --name-only --diff-filter=U | grep -E "$deleted" | xargs -r git rm -q --
+```
+
+Unmerged paths outside these prefixes are real conflicts: resolve them under
+the review rules above, not with this rule.
 
 ## Incoming-change map
 

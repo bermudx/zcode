@@ -271,3 +271,28 @@ identity or enable inherited upload/update paths without a separate audit.
   degrade gracefully to live-only counting). Client-side fixes (two-row
   footer, sink migration, ctx-window plumbing) take effect on next `piz`
   launch; the session seed requires a core restart to be observable.
+
+### 2026-11-01 — prune off-product inherited agent skills
+
+- Removed upstream-inherited skills outside fork scope:
+  `.agents/skills/{agent-browser,ai-elements,dogfood,e2e-case-lifecycle,electron}`
+  and `apps/zcode-cli/.agents/skills/vercel-react-view-transitions`.
+  agent-browser's worktree deletion predates this entry (uncommitted operator
+  work); the rest target Electron/desktop-E2E/web-chat-UI workflows the fork
+  does not ship. Kept: architecture-governance, session-management, dep-refs,
+  feature-boundary-planner, react-best-practices (×2), session/attachment
+  fixtures, opentui — all load-bearing per working rules or for tui-pi.
+- Updated `third-party/copied-components.json` to match (ai-elements entry
+  now covers only `packages/ui` components; agent-browser skills entry and
+  its license snapshot removed) and dropped the stale
+  `vercel-react-view-transitions` entry in `apps/zcode-cli/skills-lock.json`.
+  `THIRD-PARTY-NOTICES.md` is generated — it refreshes on the next notices
+  run, which also remains gated on other pre-existing drift (e.g.
+  `third-party/README.md` prose still lists the deleted dirs).
+- `feature-boundary-planner` still names `e2e-case-lifecycle` as a handoff
+  target; the reference is now dangling (kept file untouched — it is
+  upstream-owned content, and a dead pointer is cheaper than a permanent
+  content-conflict surface).
+- Added the [fork-deleted paths](docs/fork/upstream-sync.md#fork-deleted-paths)
+  policy: modify/delete conflicts under those prefixes resolve to
+  "stay deleted" mechanically during sync merges.
