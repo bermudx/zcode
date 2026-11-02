@@ -16,25 +16,40 @@
 //   tail (pi#5303).
 //
 // Divergences kept for this thin client: no settings.shellPath override, no
-// pi bin-dir PATH prepend, no extension hooks/Esc-cancel, and output keeps
-// head-truncation into <shell-output> blocks on the next prompt instead of
-// pi's tail-truncation + temp file (the core owns history and has no
-// "append local message" verb). `!` buffers output into the next prompt;
-// `!!` runs locally and is excluded from context — pi's own semantics.
+// pi bin-dir PATH prepend, no extension hooks/Esc-cancel. Output follows pi's
+// tail-truncation + temp-file spill (bash-executor.ts semantics, char units):
+// the tail rides a <shell-output> block on the next prompt, the full output
+// goes to <tmpdir>/piz-shell-<hex>.log — raw bytes, where pi writes sanitized
+// text because its executor is core-side. The core owns history and has no
+// "append local message" verb, so the block rides the next prompt rather than
+// a dedicated history message. `!` buffers output into the next prompt; `!!`
+// runs locally and is excluded from context — pi's own semantics (its spill
+// file still serves the operator).
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { accessSync, constants as fsConstants, existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  accessSync,
+  constants as fsConstants,
+  createWriteStream,
+  existsSync,
+  type WriteStream,
+} from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
-import { constants as osConstants } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
 
 export const SHELL_ROW_PREFIX = "!";
 export const SHELL_EXCLUDED_PREFIX = "!!";
 const MAX_OUTPUT_CHARS = 64_000;
 const MAX_OUTPUT_LINES = 2_000;
+/** 滚动缓冲是截断阈值的 2 倍（pi-mono bash-executor 同比例）。 */
+const MAX_ROLLING_CHARS = MAX_OUTPUT_CHARS * 2;
 export const SHELL_TIMEOUT_MS = 120_000;
 const EXIT_STDIO_GRACE_MS = 100;
 const WHICH_TIMEOUT_MS = 5_000;
+/** spill 文件可携带私有输出，仅属主可读（pi output-files 同策略）。 */
+const SPILL_FILE_MODE = 0o600;
 
 export type ShellRunResult = {
   command: string;
@@ -42,8 +57,17 @@ export type ShellRunResult = {
   output: string;
   timedOut: boolean;
   truncated: boolean;
+  /** 截断时完整输出所在的临时文件；spill 写失败时缺省。 */
+  fullOutputPath?: string;
   /** `!!cmd` ran locally but its output never enters model context. */
   excludeFromContext?: boolean;
+};
+
+export type ShellSpillStream = { path: string; stream: WriteStream };
+
+const createDefaultSpillStream = (): ShellSpillStream => {
+  const path = join(tmpdir(), `piz-shell-${randomBytes(8).toString("hex")}.log`);
+  return { path, stream: createWriteStream(path, { mode: SPILL_FILE_MODE, flags: "wx" }) };
 };
 
 /**
@@ -59,6 +83,10 @@ export const isShellCommand = (text: string): boolean => {
   return body.trim().length > 0;
 };
 
+/** pi-mono bash-executor 的 `[Output truncated. Full output: …]` 告知行。 */
+export const formatShellTruncationNotice = (run: ShellRunResult): string =>
+  `[Output truncated. Full output: ${run.fullOutputPath ?? "unavailable"}]`;
+
 /** Transcript content for a finished run: `!cmd` line, blank line, output. */
 export const formatShellTranscriptRow = (run: ShellRunResult): string => {
   const header = `${run.excludeFromContext ? SHELL_EXCLUDED_PREFIX : SHELL_ROW_PREFIX}${run.command}`;
@@ -70,6 +98,7 @@ export const formatShellTranscriptRow = (run: ShellRunResult): string => {
   const lines = [header];
   if (status) lines.push(status);
   if (run.output.trim().length > 0) lines.push(run.output.trimEnd());
+  if (run.truncated) lines.push(formatShellTruncationNotice(run));
   return lines.join("\n");
 };
 
@@ -80,12 +109,18 @@ export const formatShellContextBlock = (run: ShellRunResult): string => {
     run.exitCode === null ? "" : `exit=${run.exitCode}`,
     run.timedOut ? "timed_out=true" : "",
     run.truncated ? "truncated=true" : "",
+    run.truncated && run.fullOutputPath
+      ? `full_output=${JSON.stringify(run.fullOutputPath)}`
+      : "",
   ]
     .filter(Boolean)
     .join(" ");
-  return [`<shell-output ${attributes}>`, run.output.trimEnd(), "</shell-output>"].join(
-    "\n",
-  );
+  const body = run.output.trimEnd();
+  return [
+    `<shell-output ${attributes}>`,
+    run.truncated ? `${body}\n${formatShellTruncationNotice(run)}` : body,
+    "</shell-output>",
+  ].join("\n");
 };
 
 const SHELL_CONTEXT_OPEN = "<shell-output ";
@@ -110,7 +145,12 @@ const shellContextNotices = (header: string): string[] => {
   const command = attributes.get("command");
   const exitCode = attributes.get("exit");
   const suffix = exitCode === undefined ? "" : ` (exit ${exitCode})`;
-  return [`⤷ shell output: ${command ?? ""}${suffix}`];
+  const fullOutput = attributes.get("full_output");
+  const truncated =
+    attributes.get("truncated") === "true"
+      ? ` — truncated${fullOutput ? `, full output: ${fullOutput}` : ""}`
+      : "";
+  return [`⤷ shell output: ${command ?? ""}${suffix}${truncated}`];
 };
 
 /**
@@ -429,12 +469,48 @@ const waitForChildProcess = (child: ChildProcess): Promise<number | null> =>
     child.once("close", onClose);
   });
 
+/**
+ * pi-mono truncateTail 语义（字符单位）：保留末尾最多 maxLines 行完整行，
+ * 从尾往前首个超限行单独超过字符上限时保留该行末尾 maxChars 字符
+ * （pi 的 lastLinePartial 边界）。未超限原样返回。
+ */
+const truncateTail = (
+  text: string,
+  maxLines: number,
+  maxChars: number,
+): { content: string; truncated: boolean } => {
+  // 计数按 pi 惯例去掉行尾空段；未截断时原样返回（保留尾随换行）。
+  const trimmed = text.trimEnd();
+  const lines = trimmed.split("\n");
+  if (lines.length <= maxLines && trimmed.length <= maxChars) {
+    return { content: text, truncated: false };
+  }
+  const kept: string[] = [];
+  let chars = 0;
+  for (let i = lines.length - 1; i >= 0 && kept.length < maxLines; i--) {
+    const line = lines[i]!;
+    const cost = line.length + (kept.length > 0 ? 1 : 0);
+    if (chars + cost > maxChars) {
+      // 还没保住任何行就越限：这一行本身就是超限单行，取其末尾。
+      if (kept.length === 0) kept.unshift(line.slice(line.length - maxChars));
+      break;
+    }
+    kept.unshift(line);
+    chars += cost;
+  }
+  return { content: kept.join("\n"), truncated: true };
+};
+
 export const runShellCommand = async (input: {
   command: string;
   cwd: string;
   env?: NodeJS.ProcessEnv;
   shellExists?: (path: string) => boolean;
   signal?: AbortSignal;
+  /** 测试注入假 spill 流（失败路径 / 路径断言）；缺省写 os tmpdir。 */
+  createSpillStream?: () => ShellSpillStream;
+  /** spill 打开或写入失败时回调一次（单行 stderr 诊断用）。 */
+  onSpillError?: (error: unknown) => void;
 }): Promise<ShellRunResult> => {
   const env = input.env ?? process.env;
   const errorResult = (message: string): ShellRunResult => ({
@@ -459,10 +535,36 @@ export const runShellCommand = async (input: {
   }
 
   return await new Promise<ShellRunResult>((resolve) => {
-    let output = "";
-    let truncated = false;
     let timedOut = false;
     let settled = false;
+
+    // pi-mono bash-executor 溢出策略：滚动缓冲保留尾部 2×阈值；累计越过阈值
+    // 即懒开启 spill 文件并回填已缓冲块（此后淘汰只影响内存，不影响文件），
+    // 行数超限而字符未越界时由 finish 兜底开启。
+    const chunks: string[] = [];
+    let bufferedChars = 0;
+    let totalChars = 0;
+    let spill: ShellSpillStream | undefined;
+    let spillPath: string | undefined;
+    let spillFailed = false;
+    const openSpill = (): void => {
+      if (spill !== undefined || spillFailed) return;
+      try {
+        spill = (input.createSpillStream ?? createDefaultSpillStream)();
+        spill.stream.on("error", (error: Error) => {
+          spillFailed = true;
+          spillPath = undefined;
+          input.onSpillError?.(error);
+        });
+        spillPath = spill.path;
+        for (const chunk of chunks) spill.stream.write(chunk);
+      } catch (error) {
+        spillFailed = true;
+        spillPath = undefined;
+        spill = undefined;
+        input.onSpillError?.(error);
+      }
+    };
 
     const commandViaStdin = spec.commandTransport === "stdin";
     // detached（POSIX setsid）：子进程拿到新 session、没有控制终端——任何
@@ -488,11 +590,14 @@ export const runShellCommand = async (input: {
     if (child.pid !== undefined) trackedShellPids.add(child.pid);
 
     const append = (chunk: Buffer | string): void => {
-      if (truncated) return;
-      output += chunk.toString();
-      if (output.length > MAX_OUTPUT_CHARS) {
-        output = `${output.slice(0, MAX_OUTPUT_CHARS)}\n[output truncated at ${MAX_OUTPUT_CHARS} chars]`;
-        truncated = true;
+      const text = typeof chunk === "string" ? chunk : chunk.toString();
+      totalChars += text.length;
+      if (totalChars > MAX_OUTPUT_CHARS) openSpill();
+      spill?.stream.write(text);
+      chunks.push(text);
+      bufferedChars += text.length;
+      while (bufferedChars > MAX_ROLLING_CHARS && chunks.length > 1) {
+        bufferedChars -= chunks.shift()!.length;
       }
     };
 
@@ -509,19 +614,36 @@ export const runShellCommand = async (input: {
         (child.signalCode
           ? 128 + (osConstants.signals[child.signalCode] ?? 0)
           : 1);
-      const body = sanitizeBinaryOutput(output);
-      const lines = body.trimEnd().split("\n");
-      const cappedOutput =
-        lines.length > MAX_OUTPUT_LINES
-          ? `${lines.slice(0, MAX_OUTPUT_LINES).join("\n")}\n[output truncated at ${MAX_OUTPUT_LINES} lines]`
-          : body;
-      resolve({
-        command: input.command,
-        exitCode: resolvedCode,
-        output: cappedOutput,
-        timedOut,
-        truncated: truncated || lines.length > MAX_OUTPUT_LINES,
-      });
+      const body = sanitizeBinaryOutput(chunks.join(""));
+      const tail = truncateTail(body, MAX_OUTPUT_LINES, MAX_OUTPUT_CHARS);
+      if (tail.truncated) openSpill();
+      const settle = (path: string | undefined): void => {
+        resolve({
+          command: input.command,
+          exitCode: resolvedCode,
+          output: tail.content,
+          timedOut,
+          truncated: tail.truncated,
+          ...(tail.truncated && path ? { fullOutputPath: path } : {}),
+        });
+      };
+      if (!spill || spillFailed) {
+        settle(spillFailed ? undefined : spillPath);
+        return;
+      }
+      // 等 spill 落盘再交付路径：`wx` 异步打开，立即 resolve 会让
+      // fullOutputPath 指向尚未创建的文件。写失败丢弃路径，不影响命令结果。
+      const stream = spill.stream;
+      const pathAtEnd = spillPath;
+      let drained = false;
+      const drain = (failed: boolean): void => {
+        if (drained) return;
+        drained = true;
+        settle(failed ? undefined : pathAtEnd);
+      };
+      stream.once("error", () => drain(true));
+      stream.once("close", () => drain(spillFailed));
+      stream.end();
     };
 
     const killChild = (): void => {
