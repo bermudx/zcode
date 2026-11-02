@@ -815,6 +815,10 @@ global:
   acceptedUpstreamSnapshot: scripts/architecture/upstream-snapshot.json
 
 exceptions:
+  - id: compact-context-window-shared-append
+    rule: unmanaged-new-file
+    paths: [packages/shared/src/compact-context-window.ts]
+    reason: GLM 压缩窗口上限的常量与谓词需被 cli attach（下发）与 tui-pi（页脚分母收紧）同源引用，25 行纯函数无 IO；接管整个 shared 包不在本次范围内（同 shortcutCommands.ts 先例）。
   - id: side-pane-full-view-shortcut-command-edit
     rule: unmanaged-new-file
     paths: [packages/shared/src/shortcutCommands.ts]

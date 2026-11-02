@@ -377,12 +377,16 @@ projection 再 reset，种子整体被抹掉）。
 ### GLM 压缩窗口上限（262K）
 
 piz 对 GLM 系列模型（`modelId` 匹配 `/^glm-/i`）把 core 的 auto-compact 窗口压到
-262,000（≈228K 触发），其他模型不设。常量与谓词只在
-`attach/attach-compact-cap.ts`。`AttachSessionHandle.syncCompactContextWindow()` 在
+262,000（≈228K 触发），其他模型不设。常量与谓词的唯一来源是
+`@zcode/shared` `compact-context-window.ts`（`attach/attach-compact-cap.ts`
+re-export 兼容旧导入路径）——wire 下发与 tui-pi 页脚分母收紧同源，不会漂移。
+`AttachSessionHandle.syncCompactContextWindow()` 在
 会话绑定（启动 create/resume、`/new` `/resume` `/fork`）、`setModel` 成功后、以及
 `recoverSession` 的 resume 里下发——cap 跟随**当前**模型，切到非 GLM 会以 `null` 清除。
-core 侧契约与理由见 [compact/plan.md M2.1](./compact/plan.md)；此上限不改页脚 ctx 分母
-（那是模型的真实窗口）。
+core 侧契约与理由见 [compact/plan.md M2.1](./compact/plan.md)。2026-11-02 修订：
+原「此上限不改页脚 ctx 分母」不再成立——页脚/信息面板的 ctx 分母现在按同一
+谓词客户端侧收紧（见 [tui-pi-frontend.md](./tui-pi-frontend.md) 的 ctx 仪表条目）；
+协议与 core 侧窗口语义仍不动。
 
 ### 模型状态同步（mutation 快照 / state.updated）
 
