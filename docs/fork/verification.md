@@ -650,3 +650,42 @@ Same `patch/attach-footer-seed` branch, follow-up to the seed work above:
 
 NOT exercised live (unverified): rendered two-row footer in a real `piz`
 session — layout/widths verified against formatter + component tests only.
+
+## 2026-11-01 — merge + promotion of 158a31d2 (patch/compact-context-window)
+
+`main` merged `--no-ff` `158a31d2` from `patch/compact-context-window`
+(2 commits, 24 files: additive `compactContextWindow` on `session/create`/
+`session/resume` + `session/setCompactContextWindow`; core
+`compact.contextWindowCap` = min(cap, model window), compaction-only; piz
+attach sets 262_000 for `/^glm-/i` models, follows switches/resume; spec
+compact/plan.md M2.1). No conflicts. Battery on merged main, all green:
+
+- Root typecheck; root lint 0 errors / 96 warnings (baseline);
+  `architecture:check --changed` 0 violations.
+- CLI typecheck 34/34 (turbo, all cache hits — same tree verified on the
+  branch); CLI lint via `run-cli-lint.mjs` 0 errors / 71 warnings /
+  13 accepted (baseline).
+- bootstrap `zcode-protocol.test.ts` 131/131 (new: compactContextWindow on
+  create/resume ops + setCompactContextWindow dispatch incl. -32601 on old
+  cores); core `compact-policy` + `runtime-compact-context-window-cap`
+  33/33; cli `attach-adapter` + `attach-model-option` 67/67 under
+  `env -u ZCODE_WORKSPACE_IDENTITY` (new: GLM predicate, 262000下发 on
+  create/resume/setModel, null-clear on non-GLM, single-sync dedupe,
+  mid-switch cap follow with silent -32601); shared `zcodeProtocol.test.ts`
+  85/85 (root vitest; new field schema).
+- Fresh dist pair: `turbo run build --filter=@zcode/cli...` 12/12 (cache)
+  + `build:attach`; freshness greps — `compactContextWindow`×11,
+  `setCompactContextWindow`×7, `contextWindowCap`×5 in `zcode.cjs`;
+  `compactContextWindow`×6, `setCompactContextWindow`×1,
+  `GLM_COMPACT_CONTEXT_WINDOW = 262e3` in `zcode-attach.cjs` (esbuild
+  rewrites `262_000` as `262e3` — grep both spellings).
+- `promote-piz.sh` from clean `main`; identical greps confirm frozen
+  `dist-runtime` copies.
+
+NOT exercised live (unverified): a real `piz` GLM session showing
+auto-compact triggering at ~262K rather than the model's 1M window — needs
+an observed long session; the cap wire path is test-verified end-to-end
+(client → protocol → core policy) only. Old-core `-32601` fallback is
+unit-tested, not observed live. Full acceptance gate (signing against the
+real provider request, allowance evidence, Ctrl-C signal path, memory
+matrix) remains open and unchanged.

@@ -129,7 +129,7 @@ Count these interfaces when budgeting syncs.
 | App-server ready budget: 60s window starting at spawn completion | `6537f416` | P004 (app-server-spawn) |
 | Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
 | `--model` startup model selection (attach entry + banner) | `3db70344` | P004 (attach entry) |
-| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no usage/ctx denominators); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window` (this branch; not yet on main) | P004 (shared protocol + attach client) + core compact |
+| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no usage/ctx denominators); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2` | P004 (shared protocol + attach client) + core compact |
 
 At import, piz differed from the upstream base by 37 commits / 155 files /
 15,878 insertions / 443 deletions, before these maintenance documents. This is
@@ -158,7 +158,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the 8fd13a43 pair (24866159 contents + quota account-channel merge: zhipu-account core-side credential resolution, deduped/backed-off client failure diagnostics), promoted 2026-10-28 from main after the recorded verification — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `158a31d2` pair (bf6d3a16 contents + per-session compactContextWindow cap: piz attach caps GLM sessions at 262K; core `compact.contextWindowCap` = min(cap, model window)), promoted 2026-11-01 from main after the recorded verification — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -297,3 +297,21 @@ identity or enable inherited upload/update paths without a separate audit.
 - Added the [fork-deleted paths](docs/fork/upstream-sync.md#fork-deleted-paths)
   policy: modify/delete conflicts under those prefixes resolve to
   "stay deleted" mechanically during sync merges.
+
+### 2026-11-01 — promotion of 158a31d2 (per-session compactContextWindow cap)
+
+- Merge `158a31d2` carried `patch/compact-context-window` to `main` unchanged
+  (merge-commit only, no conflict edits; spec compact/plan.md M2.1 had landed
+  on the branch first). Build:
+  `turbo run build --filter=@zcode/cli...` from `apps/zcode-cli` — 12/12,
+  all cache hits (identical tree built on the branch); `build:attach` rerun.
+- Freshness spot-check: `compactContextWindow`/`setCompactContextWindow`/
+  `contextWindowCap` present in `cli/dist/zcode.cjs`; `compactContextWindow`,
+  `setCompactContextWindow`, `GLM_COMPACT_CONTEXT_WINDOW = 262e3` (esbuild's
+  spelling of 262_000) in `cli/dist/zcode-attach.cjs` and in the frozen
+  `dist-runtime` copies.
+- `sh apps/zcode-cli/scripts/promote-piz.sh` from clean `main`.
+- Live-core note: `session/setCompactContextWindow` is a new additive op;
+  a core still running the previous build answers `-32601` and clients treat
+  that as silent no-op (covered by the mid-switch test). The cap takes effect
+  on next `piz` launch against a restarted core.
