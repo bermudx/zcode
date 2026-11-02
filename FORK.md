@@ -130,6 +130,8 @@ Count these interfaces when budgeting syncs.
 | Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
 | `--model` startup model selection (attach entry + banner) | `3db70344` | P004 (attach entry) |
 | Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no protocol/snapshot denominators — 2026-11-02 revision: the footer ctx gauge clamps client-side via the same predicate, `patch/footer-compact-gauge`); cap constants/predicates live in `@zcode/shared` `compact-context-window.ts` (single source for wire + display); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2`; display clamp `25bf5e32`/`9fd03361` (post-rebase SHAs) | P004 (shared protocol + attach client) + core compact |
+| Attach exit-resume hint: after normal TUI exit (exit 0 + bound session id) the attach client prints `Resume this session with:` + `piz|zcode attach --resume <id>` to stdout once the terminal is restored; id follows /new /resume /fork via `getMainSessionId`; empty sessions print too (predictability over content-gating); signal exits and non-0 exits silent; opentui-frontend lane deviation recorded in spec | `patch/exit-resume-hint` `40e25506` + review fix-pass `c47d1e63`; suite-stability rides along in `6e16e0ce`; spec [tui-attach-shared-core.md](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md); 4 regressions `tests/attach-exit-resume-hint.test.ts` | P004 (attach client) |
+| Provider auth-failure log payload: 401/403 model failures log `providerErrorType/Message/Code` + cause-chain-extracted (TerminalStreamChunkError), credential-shape-redacted, 1500-char-capped `providerResponseBody`, plus the previously dropped `errorCode/errorPhase/exceptionType/providerRequestId`; log-only — status events, session events, classification, retry policy unchanged | `patch/auth-failure-diagnostics` `3cf8e1ff` (builder: second agent, operator-authorized; 4 regressions `runner-status-fanout.test.ts`); spec [stream-error-retry.md](apps/zcode-cli/docs/design/v2/model/stream-error-retry.md) | P001 (adapters model runner diagnostics) |
 
 At import, piz differed from the upstream base by 37 commits / 155 files /
 15,878 insertions / 443 deletions, before these maintenance documents. This is
@@ -158,7 +160,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `f1a0c45e` pair (bf6d3a16 contents + per-session compactContextWindow cap at 262K for GLM + footer/panel ctx gauge clamped to the cap + `!`/`!!` escape spill/aliases), promoted 2026-11-02 from main after the recorded verification — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `5f36e28b` pair (f1a0c45e contents + attach exit-resume hint after TUI teardown + provider auth-failure log payload on 401/403), promoted 2026-11-02 from main after the recorded verification — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -485,4 +487,44 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   (unverified): a real `!gs` in a piz session, the footer `%/262k (auto)`
   gauge in a live GLM session, auto-compact firing at ~262K; wire and
   display paths are test-verified end-to-end only.
+
+### 2026-11-02 — merges + promotion of 5f36e28b (exit-resume hint + auth-failure diagnostics)
+
+- Operator: "merge and promote", then "include it and promote" for a
+  concurrently built `patch/auth-failure-diagnostics`. Both merged `--no-ff`
+  into `main`: `74883fe1` (patch/exit-resume-hint: feature `40e25506`,
+  review fix-pass `c47d1e63`, cli suite stability `6e16e0ce`) and
+  `5f36e28b` (`3cf8e1ff`, builder report in operator message). No conflicts;
+  the checkout was briefly occupied by the auth branch mid-battery — promote
+  gate refused as designed, waited for the builder to commit, then proceeded.
+- Review: two independent subagent reviews of the exit-resume hint (no
+  blockers); accepted+fixed spec corrections and harness stdout sinks,
+  accepted-as-is items recorded in the spec section.
+- Battery on final main, all green — details in
+  [verification](docs/fork/verification.md): architecture 0; root
+  typecheck + lint (96 baseline); CLI turbo typecheck 34/34; CLI lint
+  0/71/13; cli suite 620/620 + attach-resume-target 11/11 (extended
+  env-stripping list); adapters vitest 2275 passed with 16 load-flaky
+  failures → green in single-file isolation (documented class); fresh dist
+  pair + `build:attach`; freshness greps on `dist` and frozen
+  `dist-runtime` (hint string, auth fields, compact cap).
+- Suite-stability note: the long-standing "3 known pre-existing failures"
+  set (build.test.mjs clientOnly deep-equal + 2 SEA asset tests) is fixed
+  by `6e16e0ce`; future batteries should expect a green cli suite instead.
+- `sh apps/zcode-cli/scripts/promote-piz.sh` from clean `main`.
+- Installed-pair smoke (real `piz`, util-linux `script` pty, scratch ws +
+  isolated `ZCODE_DATA_BASE_DIR`): boot → double Ctrl-C → exit 0 with the
+  hint printing `piz --resume sess_46a36f22…`; ran the printed command
+  verbatim → exit 0, same id re-hinted (resume bound the persisted session);
+  scratch core killed via its own pid file after `/proc/<pid>/cwd` check;
+  operator's live cores/clients untouched.
+- Live-core notes: the hint is client-side (attach-command) — effective on
+  the next `piz` launch, no core restart needed; the auth-failure payload
+  is core-side (model runner) — a live core keeps the previous logging
+  until the next core start; do not restart live cores. Not exercised live
+  (unverified): the hint after a real model turn, the monolith
+  `zcode attach` hint wording (unit-tested only), and the auth payload
+  against a real 401/403 (redaction test-verified only). Full acceptance
+  gate (signing, allowance evidence, Ctrl-C signal path, memory matrix)
+  unchanged.
 
