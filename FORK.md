@@ -158,7 +158,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `158a31d2` pair (bf6d3a16 contents + per-session compactContextWindow cap: piz attach caps GLM sessions at 262K; core `compact.contextWindowCap` = min(cap, model window)), promoted 2026-11-01 from main after the recorded verification — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `f1a0c45e` pair (bf6d3a16 contents + per-session compactContextWindow cap at 262K for GLM + footer/panel ctx gauge clamped to the cap + `!`/`!!` escape spill/aliases), promoted 2026-11-02 from main after the recorded verification — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -381,7 +381,6 @@ identity or enable inherited upload/update paths without a separate audit.
   clean; `architecture:check --changed` 0 new violations. Not promoted;
   awaits merge + verification matrix.
 
-=======
 ### 2026-11-02 — footer ctx gauge follows the compact cap (patch/footer-compact-gauge)
 
 - Operator: footer read `0.0%/1.0M` on GLM sessions whose auto-compact
@@ -453,3 +452,37 @@ Accepted as-is：tui-pi 首次值引入 @zcode/shared barrel（打包由 promoti
 基线 812 的 off-by-one 为既有状态，非本 patch。
 tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
 0 新增违规。
+
+### 2026-11-02 — merges + promotion of f1a0c45e (spill / aliases / footer gauge)
+
+- Operator asked for merge + promotion; explicit permission for the merges
+  to `main` (push not requested, none performed). Stack merged `--no-ff` in
+  order: `aaec6bcf` (patch/shell-output-spill) → `22036063`
+  (patch/shell-escape-aliases) → `f1a0c45e` (patch/footer-compact-gauge);
+  the aliases/footer branches carried their review fix-passes rebased onto
+  the previous merge. One conflict during the stack (both branches appended
+  EOF sections to FORK.md) resolved keeping both sections; a stray `=======`
+  marker from that resolution survived into main and is removed by this
+  records commit.
+- Verification battery on merged main, all green — details in
+  [verification](docs/fork/verification.md): architecture 0 violations;
+  tui-pi 265/265 + typecheck + oxlint; shared zcodeProtocol 85/85 (temp
+  config — root vitest is pre-existing-broken, below); cli attach 74/74
+  (env-stripped, below) + typecheck; turbo build 12/12 + `build:attach`;
+  freshness greps on `dist` and frozen `dist-runtime`.
+- `sh apps/zcode-cli/scripts/promote-piz.sh` from clean `main`.
+- Unrelated pre-existing breakage surfaced while verifying, not introduced
+  here: root `vitest.config.ts` references deleted
+  `packages/zcode-cua/vitest.config.ts` (root vitest cannot run);
+  zcode-family agent sessions leak ambient `ZCODE_*` env
+  (`ZCODE_SERVER_BIN`, `ZCODE_WORKSPACE_IDENTITY`, …) into cli
+  attach's spawned-core tests — pass with the vars stripped via `env -u`.
+- Live-core notes: `session/setCompactContextWindow` is additive; a core
+  still running the previous build answers `-32601` and the client treats
+  it as a silent no-op (unit-tested). Live cores keep the old footer
+  denominator + non-interactive `!` resolution until the next `piz` launch
+  against a restarted core — do not restart live cores. Not exercised live
+  (unverified): a real `!gs` in a piz session, the footer `%/262k (auto)`
+  gauge in a live GLM session, auto-compact firing at ~262K; wire and
+  display paths are test-verified end-to-end only.
+

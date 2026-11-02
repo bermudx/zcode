@@ -689,3 +689,47 @@ an observed long session; the cap wire path is test-verified end-to-end
 unit-tested, not observed live. Full acceptance gate (signing against the
 real provider request, allowance evidence, Ctrl-C signal path, memory
 matrix) remains open and unchanged.
+
+## 2026-11-02 — merges + promotion of f1a0c45e (spill / aliases / footer gauge)
+
+`main` merged `--no-ff` in stack order: `aaec6bcf`
+(patch/shell-output-spill) → `22036063` (patch/shell-escape-aliases, with
+both review fix-passes rebased) → `f1a0c45e` (patch/footer-compact-gauge,
+likewise). Battery on merged main, all green:
+
+- `architecture:check --changed` 0 violations.
+- tui-pi 265/265 + typecheck + oxlint (spill semantics + char/line
+  boundaries + control-char ordering, interactive `$SHELL +m -ic` alias
+  resolution + head-limited noise strip + fallback chain hermeticity,
+  `effectiveContextUsage` clamp + footer/panel gauge rendering).
+- shared `zcodeProtocol.test.ts` 85/85 — root vitest is pre-existing-broken
+  (`vitest.config.ts` references deleted `packages/zcode-cua/
+  vitest.config.ts`); ran via a temp config inside `packages/shared`
+  (removed after). Not caused by these merges; still open.
+- cli attach 74/74 (attach-model-option/attach-adapter/attach-client) +
+  CLI typecheck, under `env -u ZCODE_SERVER_BIN -u ZCODE_WORKSPACE_IDENTITY
+  -u ZCODE_ATTACH_CORE -u ZCODE_RUNTIME_ENV -u ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
+  -u ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE
+  -u ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` — ambient zcode-family session env
+  otherwise leaks into the spawned-core path and dooms the fake core
+  (pre-existing harness fragility, first hit while verifying this stack).
+- `mise exec -- ../../node_modules/.bin/turbo run build --filter=@zcode/cli...`
+  from `apps/zcode-cli` — 12/12 (10 cached) + `pnpm run build:attach` in
+  `packages/cli`.
+- Freshness greps on `cli/dist`, then identical greps on the frozen
+  `dist-runtime` copies after `sh apps/zcode-cli/scripts/promote-piz.sh`
+  from clean `main`: `"+m","-ic"`×1 and the job-control noise string ×1 in
+  `tui-pi/dist/index.js`; `262e3`×1 and `GLM_COMPACT_CONTEXT_WINDOW`×2 in
+  both `tui-pi/dist/index.js` and `zcode-attach.cjs`;
+  `compactContextWindow`×6 in `zcode-attach.cjs`; `contextWindowCap`×5 in
+  `zcode.cjs`.
+
+NOT exercised live (unverified): a real `!gs` in a piz session, the footer
+`%/262k (auto)` gauge in a live GLM session, auto-compact firing at ~262K
+in a live session, and the old-core `-32601` fallback against a genuinely
+old core — all are test-verified (client → protocol → core policy; runner →
+spill/block/display) but not observed live. Live cores keep the previous
+footer denominator and non-interactive `!` resolution until the next `piz`
+launch against a restarted core; do not restart live cores. Full acceptance
+gate (signing, allowance evidence, Ctrl-C, memory matrix) unchanged.
+
