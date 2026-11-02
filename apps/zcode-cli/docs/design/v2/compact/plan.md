@@ -193,8 +193,12 @@ shouldCompact = activeTokenEstimate >= autoThreshold
   `shouldAutoCompact`/`getEffectiveContextWindowSize`/`getAutoCompactThreshold` 与
   microcompact 阈值（由 full-compact 阈值推导）全部经同一个 `resolveCompactContextWindow`。
 - **只影响压缩决策**。不改变 provider 请求限制、preflight 预算、模型目录里的
-  `contextWindow`、snapshot/usage 的 `contextWindow`/`maxTokens`、页脚 ctx 分母：这些
-  是模型事实，cap 是 core 的压缩策略。`AutoCompactDecision.contextWindow` 与 compact 日志
+  `contextWindow`、snapshot/usage 的 `contextWindow`/`maxTokens`：这些
+  是模型事实，cap 是 core 的压缩策略。页脚 ctx 分母：2026-11-02 修订——
+  M2.1 原把页脚分母列入不动项，但 GLM 1M 窗口下仪表 100% 刻度落在压缩触发线
+  （~228K）的 ~4.4 倍处，读数误导；改为**客户端展示侧**按 cap 收紧仪表分母
+  （tui-pi 复用同一 cap 谓词，见 tui-pi-frontend.md）。协议与 core 侧的
+  窗口语义、snapshot/usage 分母仍不动。`AutoCompactDecision.contextWindow` 与 compact 日志
   里的 window 反映有效（含 cap）窗口。
 
 协议（additive，旧客户端不受影响）：
