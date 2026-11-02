@@ -146,7 +146,8 @@ async function startHarness(
         },
       } as never,
       stdin: process.stdin,
-      stdout: process.stdout,
+      // 退出续接提示走 ctx.stdout：接静默 sink，提示不污染测试输出。
+      stdout: { write: () => true } as never,
     } as RunContext;
     let tuiOptions: Record<string, unknown> | undefined;
     const deps = {

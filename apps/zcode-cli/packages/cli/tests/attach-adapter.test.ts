@@ -652,7 +652,8 @@ test("协议版本不匹配 → 退出码 2 与可操作错误", async () => {
       },
     } as never,
     stdin: process.stdin,
-    stdout: process.stdout,
+    // 退出续接提示走 ctx.stdout：接静默 sink，提示不污染测试输出。
+    stdout: { write: () => true } as never,
   };
   const deps = {
     cwd: () => workspace,
@@ -707,7 +708,8 @@ test("runAttachCommand 给传输接 stderr 诊断：畸形行有日志、连接�
       },
     } as never,
     stdin: process.stdin,
-    stdout: process.stdout,
+    // 退出续接提示走 ctx.stdout：接静默 sink，提示不污染测试输出。
+    stdout: { write: () => true } as never,
   };
   const deps = {
     cwd: () => workspace,
@@ -1931,7 +1933,7 @@ test("loadStartupOptions 的 slashCommands 含协议目录里的自定义命令"
   } as never;
   try {
     const exitCode = await runAttachCommand(
-      { argv: [], stderr: process.stderr, stdin: process.stdin, stdout: process.stdout } as never,
+      { argv: [], stderr: process.stderr, stdin: process.stdin, stdout: { write: () => true } } as never,
       {} as never,
       deps,
       "0.0.0-test",
