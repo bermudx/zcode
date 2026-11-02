@@ -13,9 +13,10 @@
 // - POSIX children spawn detached (new session, no controlling tty), so no
 //   interactive job-control tcsetpgrp can ever steal the client terminal.
 //   `-i` without a controlling tty still emits startup diagnostics on some
-//   shells (bash job-control/tty-pgrp lines); those known noise lines are
-//   stripped from the captured tail at finish for interactive shells only —
-//   the spill file keeps them (it stays the sanitized full stream).
+//   shells (bash job-control/tty-pgrp lines); the known leading lines (≤2)
+//   are stripped from the captured tail at finish for interactive shells
+//   only — lookalike user output lines survive, and the spill file keeps
+//   the stream verbatim (sanitized full stream, noise included).
 // - Timeout/abort kills the whole process tree (SIGKILL to -pgid, or
 //   taskkill /F /T on Windows); detached children are tracked so shutdown
 //   can reap them (see killTrackedShellChildren, wired in run-tui.ts).
@@ -213,16 +214,31 @@ export type EscapeShell = {
   interactive?: boolean;
 };
 
-/** 交互 shell 无控制 tty 时的启动期 stderr 诊断（job control / tty pgrp）：
- *  属 shell 启动噪声而非命令输出，从捕获尾部剔除；spill 文件保留。 */
+/**
+ * 交互 shell 无控制 tty 时的启动期 stderr 诊断（job control / tty pgrp）：
+ * bash 实测恰好两行、zsh（`+m`）静默。只从**流首**剔除、至多
+ * `MAX_INTERACTIVE_STARTUP_NOISE_LINES` 行：诊断只会出现在 shell 启动、
+ * 任何命令输出之前——限位后，用户输出里长得像诊断的行（如
+ * `!echo 'no job control in this shell'`）不会被无声吃掉；本地化措辞
+ * 不匹配时只是漏删（外观问题），限位反方向才是数据丢失。spill 文件保留
+ * 原始流首。
+ */
 const INTERACTIVE_STARTUP_NOISE =
-  /cannot set terminal process group|no job control in this shell|can't set tty pgrp|can't have job control/u;
+  /^(?:\S*(?:bash|zsh)):(?: cannot set terminal process group| no job control in this shell| can't set tty pgrp| can't have job control)\b/u;
+const MAX_INTERACTIVE_STARTUP_NOISE_LINES = 2;
 
-const stripInteractiveStartupNoise = (output: string): string =>
-  output
-    .split("\n")
-    .filter((line) => !INTERACTIVE_STARTUP_NOISE.test(line))
-    .join("\n");
+const stripInteractiveStartupNoise = (output: string): string => {
+  const lines = output.split("\n");
+  let stripped = 0;
+  while (
+    stripped < lines.length &&
+    stripped < MAX_INTERACTIVE_STARTUP_NOISE_LINES &&
+    INTERACTIVE_STARTUP_NOISE.test(lines[stripped]!)
+  ) {
+    stripped++;
+  }
+  return stripped === 0 ? output : lines.slice(stripped).join("\n");
+};
 
 const WINDOWS_SYSTEM32_BASH =
   /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/iu;

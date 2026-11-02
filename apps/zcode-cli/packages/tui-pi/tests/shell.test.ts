@@ -21,12 +21,18 @@ import {
   resolveEscapeShell,
   runShellCommand,
 } from "../src/shell.js";
+import { createShellEscapeRunner } from "../src/shell-prompt.js";
 import { MessageRow, piMarkdownTheme } from "../src/rows.js";
 import { createPiTheme } from "../src/theme.js";
 import { ENTER, createHarness } from "./harness.js";
 
 const promptText = (input: TuiPromptInput): string =>
   typeof input === "string" ? input : input.text;
+
+/** 直接调 runShellCommand 且不关心解析语义的用例统一走确定性回退链：
+ *  不注入 env 会落到 process.env——交互 $SHELL 分支会把跑测试者的真实
+ *  rc（输出噪声、PATH 覆盖、计时）带进这些截断/边界/中止用例。 */
+const CHAIN_ENV: NodeJS.ProcessEnv = { ...process.env, SHELL: "" };
 
 test("only `!cmd`/`!!cmd` are shell escapes, bare prefixes are text", () => {
   assert.equal(isShellCommand("!ls"), true);
@@ -41,13 +47,13 @@ test("only `!cmd`/`!!cmd` are shell escapes, bare prefixes are text", () => {
 test("runShellCommand captures stdout and the exit code", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-"));
   try {
-    const ok = await runShellCommand({ command: "printf 'a\\nb\\n'", cwd });
+    const ok = await runShellCommand({ command: "printf 'a\\nb\\n'", cwd, env: CHAIN_ENV });
     assert.equal(ok.exitCode, 0);
     assert.equal(ok.output, "a\nb\n");
-    const failed = await runShellCommand({ command: "sh -c 'echo boom >&2; exit 3'", cwd });
+    const failed = await runShellCommand({ command: "sh -c 'echo boom >&2; exit 3'", cwd, env: CHAIN_ENV });
     assert.equal(failed.exitCode, 3);
     assert.ok(failed.output.includes("boom"));
-    const missing = await runShellCommand({ command: "definitely-not-a-command-xyz", cwd });
+    const missing = await runShellCommand({ command: "definitely-not-a-command-xyz", cwd, env: CHAIN_ENV });
     assert.notEqual(missing.exitCode, 0);
   } finally {
     rmSync(cwd, { force: true, recursive: true });
@@ -72,6 +78,11 @@ test("resolveEscapeShell prefers an executable bash/zsh $SHELL, else the pi-mono
   // A non-bash/zsh $SHELL (fish) never goes interactive; chain applies.
   assert.deepEqual(
     resolveEscapeShell({ env: { SHELL: "/usr/bin/fish" }, exists: () => true }),
+    { args: ["-c"], commandTransport: "argv", file: "/bin/bash" },
+  );
+  // 空串 $SHELL（旧 f5241576 变体覆盖过的边界）：回退确定性链。
+  assert.deepEqual(
+    resolveEscapeShell({ env: { SHELL: "" }, exists: () => true }),
     { args: ["-c"], commandTransport: "argv", file: "/bin/bash" },
   );
   // No $SHELL, no /bin/bash → `which bash` on PATH.
@@ -174,6 +185,55 @@ test("interactive `!cmd` strips known shell startup noise from the tail", async 
     assert.equal(run.output, "probe-out\n");
     assert.ok(!run.output.includes("job control"), run.output);
     assert.ok(!run.output.includes("terminal process group"), run.output);
+
+    // 审查回归：用户输出里长得像诊断的行必须存活——旧的全文行过滤会把它
+    // 无声吃掉（echo 的行排在两行启动诊断之后，流首限位后不再命中）。
+    const lookalike = await runShellCommand({
+      command: "echo 'no job control in this shell'",
+      cwd,
+      env,
+    });
+    assert.ok(lookalike.output.includes("no job control in this shell"), lookalike.output);
+
+    // 审查回归：spill 保留流首噪声（清理后全文的定位不变）——尾部已剔除。
+    const big = await runShellCommand({ command: "seq 1 3000", cwd, env });
+    assert.equal(big.truncated, true);
+    assert.ok(!big.output.includes("job control"), big.output);
+    assert.ok(big.fullOutputPath);
+    const spilled = readFileSync(big.fullOutputPath!, "utf8");
+    assert.ok(spilled.includes("no job control in this shell"), "spill keeps startup noise");
+    assert.ok(spilled.includes("3000"), "spill keeps full output");
+    rmSync(big.fullOutputPath!, { force: true });
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+    rmSync(home, { force: true, recursive: true });
+  }
+});
+
+test("`!!cmd` resolves rc aliases via the interactive $SHELL and stays out of context", async (t) => {
+  // 审查回归：`!!` 与 `!` 共享同一条解析路径——排除上下文不得换 shell。
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-excl-"));
+  const home = mkdtempSync(join(tmpdir(), "zcode-shell-home-"));
+  try {
+    writeFileSync(join(home, ".bashrc"), "alias zz_piz_probe='echo rc-alias-ok'\n");
+    const rows: string[] = [];
+    const runner = createShellEscapeRunner({
+      appendMessage: (message) => rows.push((message as { content: string }).content),
+      clearDraft: () => {},
+      cwd: () => cwd,
+      env: { ...process.env, HOME: home, SHELL: "/bin/bash" },
+      setStatus: () => {},
+    });
+    await runner.run("!!zz_piz_probe");
+    const transcript = rows.join("\n");
+    assert.ok(transcript.includes("rc-alias-ok"), transcript);
+    assert.ok(transcript.includes("!!zz_piz_probe"), transcript);
+    // excluded run 不得把输出缓冲给下一条 prompt。
+    assert.equal(runner.consume("next message"), "next message");
   } finally {
     rmSync(cwd, { force: true, recursive: true });
     rmSync(home, { force: true, recursive: true });
@@ -212,7 +272,7 @@ test("oversized `!cmd` keeps the tail and spills the full output", async (t) => 
   const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-spill-"));
   try {
     // 20000 lines ≈ 109k chars：行数与字符双超限，spill 在流式阶段开启。
-    const run = await runShellCommand({ command: "seq 1 20000", cwd });
+    const run = await runShellCommand({ command: "seq 1 20000", cwd, env: CHAIN_ENV });
     assert.equal(run.exitCode, 0);
     assert.equal(run.truncated, true);
     assert.ok(run.fullOutputPath, "truncated run must expose the spill path");
@@ -244,7 +304,7 @@ test("line-count-only truncation opens the spill at finish", async (t) => {
   // 3000 行 ≈ 14k 字符：字符未越界，流式阶段不触发，finish 兜底开启。
   const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-lines-"));
   try {
-    const run = await runShellCommand({ command: "seq 1 3000", cwd });
+    const run = await runShellCommand({ command: "seq 1 3000", cwd, env: CHAIN_ENV });
     assert.equal(run.truncated, true);
     assert.ok(run.output.startsWith("1001\n1002"), run.output.slice(0, 40));
     assert.ok(run.fullOutputPath);
@@ -264,7 +324,7 @@ test("untruncated runs never create a spill file", async (t) => {
   }
   const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-nospill-"));
   try {
-    const run = await runShellCommand({ command: "seq 1 100", cwd });
+    const run = await runShellCommand({ command: "seq 1 100", cwd, env: CHAIN_ENV });
     assert.equal(run.truncated, false);
     assert.equal(run.fullOutputPath, undefined);
     // 未截断输出保留尾随换行（pi truncateTail 惯例）。
@@ -286,6 +346,7 @@ test("an oversize line is dropped unless it is the only kept content", async (t)
     const two = await runShellCommand({
       command: `awk 'BEGIN { for (i = 0; i < 70000; i++) printf "x" } END { printf "\\nEND-MARKER" }'`,
       cwd,
+      env: CHAIN_ENV,
     });
     assert.equal(two.truncated, true);
     assert.equal(two.output, "END-MARKER");
@@ -297,6 +358,7 @@ test("an oversize line is dropped unless it is the only kept content", async (t)
     const one = await runShellCommand({
       command: `awk 'BEGIN { for (i = 0; i < 70000; i++) printf "x" }'`,
       cwd,
+      env: CHAIN_ENV,
     });
     assert.equal(one.truncated, true);
     assert.equal(one.output.length, 64_000);
@@ -318,6 +380,7 @@ test("spill failure degrades to a pathless truncation notice", async (t) => {
     const run = await runShellCommand({
       command: "seq 1 3000",
       cwd,
+      env: CHAIN_ENV,
       createSpillStream: () => {
         throw new Error("disk full");
       },
@@ -415,23 +478,25 @@ test("boundary: exactly at cap does not truncate, one over does", async (t) => {
     const chars = await runShellCommand({
       command: `awk 'BEGIN { for (i = 0; i < 64000; i++) printf "x" }'`,
       cwd,
+      env: CHAIN_ENV,
     });
     assert.equal(chars.truncated, false);
     assert.equal(chars.output.length, 64_000);
     const charsOver = await runShellCommand({
       command: `awk 'BEGIN { for (i = 0; i < 64001; i++) printf "x" }'`,
       cwd,
+      env: CHAIN_ENV,
     });
     assert.equal(charsOver.truncated, true);
     assert.equal(charsOver.output.length, 64_000);
     rmSync(charsOver.fullOutputPath!, { force: true });
 
     // 行边界：2000 行恰好不截断，2001 行保尾。
-    const lines = await runShellCommand({ command: "seq 1 2000", cwd });
+    const lines = await runShellCommand({ command: "seq 1 2000", cwd, env: CHAIN_ENV });
     assert.equal(lines.truncated, false);
     assert.ok(lines.output.startsWith("1\n2\n"));
     assert.ok(lines.output.trimEnd().endsWith("2000"));
-    const linesOver = await runShellCommand({ command: "seq 1 2001", cwd });
+    const linesOver = await runShellCommand({ command: "seq 1 2001", cwd, env: CHAIN_ENV });
     assert.equal(linesOver.truncated, true);
     assert.ok(linesOver.output.startsWith("2\n3\n"), linesOver.output.slice(0, 20));
     rmSync(linesOver.fullOutputPath!, { force: true });
@@ -453,6 +518,7 @@ test("control-char-heavy output cannot silently beat the cap", async (t) => {
     const over = await runShellCommand({
       command: `awk 'BEGIN { for (i = 0; i < 70000; i++) printf "y"; for (i = 0; i < 150000; i++) printf "%c", 7 }'`,
       cwd,
+      env: CHAIN_ENV,
     });
     assert.equal(over.truncated, true);
     assert.equal(over.output.length, 64_000);
@@ -466,6 +532,7 @@ test("control-char-heavy output cannot silently beat the cap", async (t) => {
     const under = await runShellCommand({
       command: `awk 'BEGIN { for (i = 0; i < 30000; i++) printf "z"; for (i = 0; i < 50000; i++) printf "%c", 7; for (i = 0; i < 30000; i++) printf "z"; for (i = 0; i < 50000; i++) printf "%c", 7 }'`,
       cwd,
+      env: CHAIN_ENV,
     });
     assert.equal(under.truncated, false);
     assert.equal(under.fullOutputPath, undefined);
@@ -475,7 +542,7 @@ test("control-char-heavy output cannot silently beat the cap", async (t) => {
   }
 });
 
-test("`!cmd` resolves commands added to PATH by the user's profile", async (t) => {
+test("`!cmd` resolves commands added to the inherited PATH", async (t) => {
   if (!existsSync("/bin/bash")) {
     t.skip("bash not installed");
     return;
@@ -506,7 +573,7 @@ test("`!cmd` resolves when a detached grandchild keeps the output pipe open", as
   const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-grandchild-"));
   try {
     const startedAt = Date.now();
-    const run = await runShellCommand({ command: "sleep 3 & echo done", cwd });
+    const run = await runShellCommand({ command: "sleep 3 & echo done", cwd, env: CHAIN_ENV });
     assert.equal(run.exitCode, 0, run.output);
     assert.ok(run.output.includes("done"), run.output);
     assert.ok(Date.now() - startedAt < 3_000, "must not wait for the grandchild");
@@ -523,7 +590,7 @@ test("`!cmd` abort kills the detached process group", async (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-abort-"));
   try {
     const controller = new AbortController();
-    const promise = runShellCommand({ command: "sleep 60", cwd, signal: controller.signal });
+    const promise = runShellCommand({ command: "sleep 60", cwd, env: CHAIN_ENV, signal: controller.signal });
     setTimeout(() => controller.abort(), 50);
     const startedAt = Date.now();
     const run = await promise;
