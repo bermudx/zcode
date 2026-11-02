@@ -3879,6 +3879,122 @@ describe("ZCodeProtocolAgentServer", () => {
     expect(createdAppOptions[0]?.runtimeConfig?.toolDisallowlist).toEqual(["Bash"]);
   });
 
+  it("session/create passes compactContextWindow into runtimeConfig.compact.contextWindowCap only", async () => {
+    const createdAppOptions: ZCodeAppOptions[] = [];
+    const server = new ZCodeProtocolAgentServer({
+      createZCodeApp: (options) => {
+        createdAppOptions.push(options);
+        return createFakeApp(options);
+      },
+      cwd: workspace.workspacePath,
+      version: "test-version",
+    });
+
+    await requestResult(server, {
+      id: 1,
+      method: zcodeProtocolMethods.sessionCreate,
+      params: { workspace, compactContextWindow: 262_000 },
+    });
+    await requestResult(server, {
+      id: 2,
+      method: zcodeProtocolMethods.sessionCreate,
+      params: { workspace },
+    });
+
+    // cap 是收紧字段，不能借 contextWindow 覆盖语义去放大/替换模型窗口。
+    expect(createdAppOptions[0]?.runtimeConfig?.compact).toEqual({ contextWindowCap: 262_000 });
+    expect(createdAppOptions[1]?.runtimeConfig?.compact).toBeUndefined();
+  });
+
+  it("session/resume applies compactContextWindow on cold resume and on an already active record", async () => {
+    const createdAppOptions: ZCodeAppOptions[] = [];
+    const apps: ZCodeApp[] = [];
+    const server = new ZCodeProtocolAgentServer({
+      createZCodeApp: (options) => {
+        createdAppOptions.push(options);
+        const app = createFakeApp(options);
+        apps.push(app);
+        return app;
+      },
+      cwd: workspace.workspacePath,
+      version: "test-version",
+    });
+    const created = zcodeSessionStateSnapshotSchema.parse(
+      await requestResult(server, {
+        id: 1,
+        method: zcodeProtocolMethods.sessionCreate,
+        params: { workspace },
+      }),
+    );
+    const setCap = vi.spyOn(apps[0]!.runtime, "setCompactContextWindowCap");
+
+    await requestResult(server, {
+      id: 2,
+      method: zcodeProtocolMethods.sessionResume,
+      params: { sessionId: created.session.sessionId, compactContextWindow: 262_000 },
+    });
+    // 活跃 record 不重建 runtime：重连客户端的新上限必须直接落到现有 runtime。
+    expect(setCap).toHaveBeenCalledExactlyOnceWith(262_000);
+
+    await requestResult(server, {
+      id: 3,
+      method: zcodeProtocolMethods.sessionResume,
+      params: { sessionId: created.session.sessionId },
+    });
+    expect(setCap).toHaveBeenCalledTimes(1);
+  });
+
+  it("session/setCompactContextWindow sets and clears the cap without bumping stateRevision", async () => {
+    const apps: ZCodeApp[] = [];
+    const server = new ZCodeProtocolAgentServer({
+      createZCodeApp: (options) => {
+        const app = createFakeApp(options);
+        apps.push(app);
+        return app;
+      },
+      cwd: workspace.workspacePath,
+      version: "test-version",
+    });
+    const created = zcodeSessionStateSnapshotSchema.parse(
+      await requestResult(server, {
+        id: 1,
+        method: zcodeProtocolMethods.sessionCreate,
+        params: { workspace },
+      }),
+    );
+    const setCap = vi.spyOn(apps[0]!.runtime, "setCompactContextWindowCap");
+    const sessionId = created.session.sessionId;
+
+    await expect(
+      requestResult(server, {
+        id: 2,
+        method: zcodeProtocolMethods.sessionSetCompactContextWindow,
+        params: { sessionId, compactContextWindow: 262_000 },
+      }),
+    ).resolves.toEqual({ compactContextWindow: 262_000 });
+    await requestResult(server, {
+      id: 3,
+      method: zcodeProtocolMethods.sessionSetCompactContextWindow,
+      params: { sessionId, compactContextWindow: null },
+    });
+    expect(setCap.mock.calls).toEqual([[262_000], [undefined]]);
+
+    await expect(
+      requestResult(server, {
+        id: 4,
+        method: zcodeProtocolMethods.sessionSetCompactContextWindow,
+        params: { sessionId, compactContextWindow: -1 },
+      }),
+    ).rejects.toThrow();
+    await expect(
+      requestResult(server, {
+        id: 5,
+        method: zcodeProtocolMethods.sessionSetCompactContextWindow,
+        params: { sessionId: "sess_missing", compactContextWindow: 1000 },
+      }),
+    ).rejects.toThrow();
+  });
+
   it("远程 SSH/WSL workspace 默认禁用全部 Cron 工具并保留调用方 denylist", async () => {
     const createdAppOptions: ZCodeAppOptions[] = [];
     const server = new ZCodeProtocolAgentServer({

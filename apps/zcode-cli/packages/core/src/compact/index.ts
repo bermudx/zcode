@@ -24,6 +24,7 @@ export {
   getAutoCompactOutputReserveTokens,
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
+  resolveCompactContextWindow,
   shouldAutoCompact,
 } from "./policy.js";
 export {

@@ -209,6 +209,8 @@ export const runAttachCommand = async (
           throw new Error(`--model: ${message}`);
         }
       }
+      // 压缩窗口上限跟随当前模型；--model 走 setModel 已经同步过一次，不重复下发。
+      if (initialModel === undefined) await handle.syncCompactContextWindow();
       const promptHandler = createAttachPromptHandler({
         client,
         initialHandle: handle,

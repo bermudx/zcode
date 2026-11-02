@@ -6,7 +6,7 @@ import {
   updateConfig,
   setExecutionState,
 } from "./config.js";
-import { getMode, getPlanEnabled } from "./config.js";
+import { getMode, getPlanEnabled, setCompactContextWindowCap } from "./config.js";
 import { getSessionModelSelection, setSessionModelSelection } from "./config.js";
 import { getProjectId } from "./config.js";
 import { setWorkingDirectory } from "./config.js";
@@ -201,6 +201,7 @@ type AgentRuntimeConstructor = { prototype: object };
 export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void {
   const proto = ctor.prototype as Record<string, unknown>;
   proto.updateConfig = updateConfig;
+  proto.setCompactContextWindowCap = setCompactContextWindowCap;
   proto.setExecutionState = setExecutionState;
   proto.grantPermissionFullAccess = grantPermissionFullAccess;
   proto.initializeSessionShellEnvironmentIfNeeded = initializeSessionShellEnvironmentIfNeeded;

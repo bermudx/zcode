@@ -72,6 +72,18 @@ export function updateConfig(
   }
 }
 
+/**
+ * 设置/清除本会话 auto-compact 的窗口上限（协议客户端策略）。config.compact 是唯一状态，
+ * 下一次 auto-compact / microcompact 检查即读到新值（含在途 turn 的下一个 model step）。
+ */
+export function setCompactContextWindowCap(
+  this: AgentRuntimeInternal,
+  cap: number | undefined,
+): void {
+  const { contextWindowCap: _previous, ...rest } = this.config.compact ?? {};
+  this.config.compact = cap === undefined ? rest : { ...rest, contextWindowCap: cap };
+}
+
 export function initializeSessionShellEnvironmentIfNeeded(
   this: AgentRuntimeInternal,
   selection: SessionShellEnvironmentCandidate,

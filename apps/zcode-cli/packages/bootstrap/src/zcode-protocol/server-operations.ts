@@ -71,6 +71,7 @@ import {
   zcodeSessionResumeParamsSchema,
   zcodeSessionSendParamsSchema,
   zcodeSessionSetModeParamsSchema,
+  zcodeSessionSetCompactContextWindowParamsSchema,
   zcodeSessionSetModelParamsSchema,
   zcodeSessionSetThoughtLevelParamsSchema,
   zcodeSessionStopParamsSchema,
@@ -162,6 +163,7 @@ type ZCodeSessionRecordParams = (
       model?: ZCodeSessionCreateParams["model"];
       parentSessionId?: ZCodeSessionCreateParams["parentSessionId"];
       thoughtLevel?: ZCodeSessionCreateParams["thoughtLevel"];
+      compactContextWindow?: ZCodeSessionCreateParams["compactContextWindow"];
       // 自动化会话会在创建期关闭标题二次生成，而 create/resume
       // 共用 record 初始化函数；resume 兼容分支也必须声明该策略字段。
       titleGenerationEnabled?: ZCodeSessionCreateParams["titleGenerationEnabled"];
@@ -1526,6 +1528,7 @@ export async function activateSessionForResume(
   await context.sessionResidentPool?.waitForDeactivation(params.sessionId);
   const existing = context.sessions.get(params.sessionId);
   if (existing) {
+    applyResumeCompactContextWindow(existing, params);
     return { record: existing };
   }
   // 客户端断线后重连：session 常驻在 detached owner 上时收养到本连接，
@@ -1538,6 +1541,7 @@ export async function activateSessionForResume(
         module: "bootstrap.zcode_protocol",
         sessionId: params.sessionId,
       });
+      applyResumeCompactContextWindow(adopted, params);
       return { record: adopted };
     }
   }
@@ -3009,6 +3013,33 @@ export async function setModel(context: ZCodeProtocolAgentServerContext, rawPara
   return await afterStateMutation(context, record, "model_changed");
 }
 
+/**
+ * resume 命中已活跃/被收养的 record 时不会重建 runtime，create 路径的 runtimeConfig 不再生效；
+ * 重连客户端带来的新上限必须在这里落到同一个 runtime 状态上，否则被静默忽略。
+ */
+function applyResumeCompactContextWindow(
+  record: ZCodeProtocolSessionRecord,
+  params: ZCodeSessionResumeParams,
+): void {
+  if (params.compactContextWindow === undefined) return;
+  record.app.runtime.setCompactContextWindowCap(params.compactContextWindow);
+}
+
+/**
+ * 设置/清除会话 auto-compact 窗口上限。cap 属于 core runtime 配置（唯一状态），
+ * 不在 snapshot 里：不动 stateRevision、不发 state.updated，避免让其他客户端的
+ * expectedRevision 失效。下一次 compact 检查即生效。
+ */
+export async function setCompactContextWindow(
+  context: ZCodeProtocolAgentServerContext,
+  rawParams: unknown,
+) {
+  const params = parseParams(zcodeSessionSetCompactContextWindowParamsSchema, rawParams);
+  const record = requireSession(context, params.sessionId);
+  record.app.runtime.setCompactContextWindowCap(params.compactContextWindow ?? undefined);
+  return { compactContextWindow: params.compactContextWindow };
+}
+
 export async function setThoughtLevel(
   context: ZCodeProtocolAgentServerContext,
   rawParams: unknown,
@@ -3707,6 +3738,10 @@ async function createRecord(
       // 不能只依赖 prompt 文本约束，否则内置工具和动态 MCP 工具仍可能越过调用面。
       toolAllowlist: "toolAllowlist" in params ? params.toolAllowlist : undefined,
       toolDisallowlist: resolveSessionToolDenylist(params, workspace),
+      // fork: 客户端下发的每会话压缩窗口上限；只写 compact.contextWindowCap（只收紧，不覆盖模型窗口）。
+      ...(params.compactContextWindow !== undefined
+        ? { compact: { contextWindowCap: params.compactContextWindow } }
+        : {}),
       nativeSearchEnhancementsEnabled: startupPreferences.nativeSearchEnhancementsEnabled,
       toolSearch: { mode: startupPreferences.toolSearchMode },
       modelContextBudgetStrategy: startupPreferences.modelContextBudgetStrategy,
