@@ -323,13 +323,26 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
   缓冲，缓冲只交付一次）。core 没有「追加本地消息」的协议面，上下文交接只能
   在提交时发生；transcript 展示端把该块折叠为 `⤷ shell output:` 一行
   （截断时附 full output 路径），未闭合的手写标记原样保留。
-- 执行 shell 与 pi-mono 一致（`8888d7e9` 移植，取代早期 `env.SHELL` + `-ic`
-  交互式变体）：确定性 bash 链 —— Unix `/bin/bash` → `which bash` → `sh`，
-  Windows Git Bash → `where bash.exe`（旧 WSL bash.exe 走 stdin `-s`）——
-  绝不使用用户 $SHELL，非交互 `-c` 不加载 rc（alias 不生效、导出环境变量
-  继承）。POSIX detached（新 session、无控制终端）spawn，超时/中止按进程树
-  SIGKILL；completion 按 `exit` + idle-pipe grace 等待（pi#5303，detached
-  孙进程占住 stdout 管道不得挂起或截尾）。
+- 执行 shell（fork 有意偏离 pi-mono 的确定性 bash 解析，恢复早期
+  `80729ec8`/`f5241576` 交互式变体的动机：操作者的 rc alias/函数对 `!gs`
+  这类手敲命令必须生效）：Unix 下可执行 bash/zsh 的 `$SHELL` 优先，以
+  `+m -ic` 交互执行（交互 rc 加载——zsh 读 `.zshenv`/`.zshrc`、bash 读
+  `.bashrc`，login rc（`.zprofile`/`.bash_profile`）不读；alias、函数、
+  rc 导出的变量生效；不能用非交互 `-c` + 前缀注入替代——zsh 对 `-c` 串
+  整体先解析，串内定义的 alias 对串内命令不生效）；`$SHELL`
+  缺失/不可执行/非 bash-zsh 时回退 pi 链（`/bin/bash` → `which bash` →
+  `sh`，非交互 `-c`，不加载 rc）。`-i` 无控制 tty 时 bash/zsh 的启动期
+  stderr 诊断（job control / tty pgrp）属 shell 启动噪声：仅交互分支在
+  finish 时从流首剔除**至多 2 行**带 shell 名前缀的已知诊断行——诊断只
+  出现在启动、任何命令输出之前，限位保证长得像诊断的用户输出行（如
+  `!echo 'no job control in this shell'`）不被无声吃掉；本地化措辞不
+  匹配时漏删只是外观问题，反向才是数据丢失。spill 文件保留原始流首
+  （清理后全文的定位不变）。Windows 维持 Git Bash 链（`where bash.exe`、
+  旧 WSL bash.exe 走 stdin `-s`），绝不交互。POSIX detached（新 session、
+  无控制终端）spawn——`+m` 关 monitor 且 detached 根除启动期 tcsetpgrp
+  抢占（客户端 stdin read 不再 SIGTTIN 挂起）；超时/中止按进程树
+  SIGKILL；completion 按 `exit` + idle-pipe grace 等待（pi#5303，
+  detached 孙进程占住 stdout 管道不得挂起或截尾）。
 - 输出按 pi-mono bash-executor 语义「保尾 + 落盘」：超过 64k 字符 / 2000 行
   （先到者）截断，保留尾部完整行；首行（从尾往前第一个超限行）单独超限到
   字符上限时保留该行末尾 64k 字符。截断发生时完整输出在
