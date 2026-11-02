@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { APICallError } from "ai";
 import {
   createModelId,
   createModelProviderId,
@@ -114,5 +115,131 @@ describe("publishModelStatus", () => {
     ).resolves.toBeUndefined();
     expect(telemetryPublish).toHaveBeenCalledWith(event);
     expect(logger.warn).toHaveBeenCalledOnce();
+  });
+});
+
+describe("publishModelStatus auth failure logging", () => {
+  const failureEvent: ModelNetworkStatusEvent = {
+    ...event,
+    durationMs: 10,
+    errorCode: "provider_not_configured",
+    message: "Provider authentication failed.",
+    reason: "auth_failed",
+    retryable: false,
+    statusCode: 401,
+    type: "model_request_failed",
+  };
+
+  function createLogger() {
+    return {
+      debug: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+    };
+  }
+
+  function loggedFailureContext(logger: ReturnType<typeof createLogger>): Record<string, unknown> {
+    const [, context] = logger.warn.mock.calls.at(-1) as [string, Record<string, unknown>];
+    return context;
+  }
+
+  // 回归（2026-11-02）：z.ai SSE 中途 401 被归一成 “Provider authentication failed.” 后，
+  // 日志只剩状态码，provider 自己的 authentication_error 文案和响应正文全部丢失。
+  it("keeps the provider's own 401 payload in the failure log", async () => {
+    const logger = createLogger();
+    const error = new APICallError({
+      isRetryable: false,
+      message: "Provider authentication failed.",
+      responseBody: JSON.stringify({
+        type: "error",
+        error: {
+          type: "authentication_error",
+          message: "token expired at 2026-11-02T21:53:38Z",
+        },
+      }),
+      statusCode: 401,
+      url: "https://api.z.ai/api/anthropic/v1/messages",
+    });
+
+    await publishModelStatus(failureEvent, { failureError: error, logger: logger as never });
+
+    expect(loggedFailureContext(logger)).toMatchObject({
+      event: "model.request.failed",
+      providerErrorType: "authentication_error",
+      providerErrorMessage: "token expired at 2026-11-02T21:53:38Z",
+      statusCode: 401,
+    });
+    expect(loggedFailureContext(logger).providerResponseBody).toContain("authentication_error");
+  });
+
+  it("redacts credential-shaped text and bounds the body", async () => {
+    const logger = createLogger();
+    const error = new APICallError({
+      isRetryable: false,
+      message: "Forbidden",
+      responseBody: JSON.stringify({
+        error: {
+          message: `Bearer ${"a".repeat(40)} rejected`,
+          type: "permission_error",
+        },
+        padding: "x".repeat(4_000),
+      }),
+      statusCode: 403,
+    });
+
+    await publishModelStatus(
+      { ...failureEvent, reason: "auth_failed", statusCode: 403 },
+      { failureError: error, logger: logger as never },
+    );
+
+    const context = loggedFailureContext(logger);
+    const body = String(context.providerResponseBody);
+    expect(body).not.toContain("a".repeat(40));
+    expect(body).toContain("Bearer [redacted]");
+    expect(body.length).toBeLessThan(2_000);
+    expect(body).toContain("[truncated");
+  });
+
+  it("reads the provider payload through a terminal stream wrapper's cause", async () => {
+    const logger = createLogger();
+    const apiError = new APICallError({
+      isRetryable: false,
+      message: "Provider authentication failed.",
+      responseBody: JSON.stringify({
+        error: { message: "token expired", type: "authentication_error" },
+      }),
+      statusCode: 401,
+    });
+
+    await publishModelStatus(failureEvent, {
+      failureError: new Error("Provider authentication failed.", { cause: apiError }),
+      logger: logger as never,
+    });
+
+    expect(loggedFailureContext(logger)).toMatchObject({
+      providerErrorMessage: "token expired",
+      providerErrorType: "authentication_error",
+      statusCode: 401,
+    });
+  });
+
+  it("does not log provider bodies for non-auth failures", async () => {
+    const logger = createLogger();
+    const error = new APICallError({
+      isRetryable: true,
+      message: "Provider returned a server error.",
+      responseBody: JSON.stringify({ error: { message: "upstream exploded", type: "api_error" } }),
+      statusCode: 502,
+    });
+
+    await publishModelStatus(
+      { ...failureEvent, message: "Provider returned a server error.", statusCode: 502 },
+      { failureError: error, logger: logger as never },
+    );
+
+    const context = loggedFailureContext(logger);
+    expect(context.providerResponseBody).toBeUndefined();
+    expect(context.providerErrorType).toBeUndefined();
   });
 });
