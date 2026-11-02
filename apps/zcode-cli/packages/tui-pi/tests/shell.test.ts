@@ -2,10 +2,12 @@
 // transcript, and `!` output rides along with the next prompt (the core owns
 // history, so there is no protocol verb to append a local message). Execution
 // semantics mirror pi-mono: deterministic `bash -c` (never $SHELL, no rc),
-// detached spawn, process-tree kill, idle-pipe-grace wait.
+// detached spawn, process-tree kill, idle-pipe-grace wait, and pi
+// bash-execator output policy — tail truncation at 64k chars / 2000 lines
+// with the full output spilled to <tmpdir>/piz-shell-<hex>.log.
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -121,6 +123,277 @@ test("`!cmd` inherits exported env but not rc aliases", async (t) => {
   } finally {
     rmSync(cwd, { force: true, recursive: true });
     rmSync(home, { force: true, recursive: true });
+  }
+});
+
+test("oversized `!cmd` keeps the tail and spills the full output", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-spill-"));
+  try {
+    // 20000 lines ≈ 109k chars：行数与字符双超限，spill 在流式阶段开启。
+    const run = await runShellCommand({ command: "seq 1 20000", cwd });
+    assert.equal(run.exitCode, 0);
+    assert.equal(run.truncated, true);
+    assert.ok(run.fullOutputPath, "truncated run must expose the spill path");
+    assert.ok(
+      run.fullOutputPath!.startsWith(join(tmpdir(), "piz-shell-")),
+      run.fullOutputPath,
+    );
+    assert.ok(run.fullOutputPath!.endsWith(".log"), run.fullOutputPath);
+    // 保尾：上下文只留最后 2000 行完整行。
+    assert.ok(run.output.startsWith("18001\n18002"), run.output.slice(0, 40));
+    assert.ok(run.output.trimEnd().endsWith("20000"));
+    assert.ok(run.output.length <= 64_000);
+    // spill 文件保有完整输出（懒开启早于滚动淘汰，头部不丢）。
+    const spilled = readFileSync(run.fullOutputPath!, "utf8");
+    assert.ok(spilled.startsWith("1\n2\n3\n"), "spill must keep the head");
+    assert.ok(spilled.endsWith("20000\n"));
+    assert.equal(statSync(run.fullOutputPath!).mode & 0o777, 0o600);
+    rmSync(run.fullOutputPath!, { force: true });
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("line-count-only truncation opens the spill at finish", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  // 3000 行 ≈ 14k 字符：字符未越界，流式阶段不触发，finish 兜底开启。
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-lines-"));
+  try {
+    const run = await runShellCommand({ command: "seq 1 3000", cwd });
+    assert.equal(run.truncated, true);
+    assert.ok(run.output.startsWith("1001\n1002"), run.output.slice(0, 40));
+    assert.ok(run.fullOutputPath);
+    const spilled = readFileSync(run.fullOutputPath!, "utf8");
+    assert.ok(spilled.startsWith("1\n2\n3\n"));
+    assert.ok(spilled.endsWith("3000\n"));
+    rmSync(run.fullOutputPath!, { force: true });
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("untruncated runs never create a spill file", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-nospill-"));
+  try {
+    const run = await runShellCommand({ command: "seq 1 100", cwd });
+    assert.equal(run.truncated, false);
+    assert.equal(run.fullOutputPath, undefined);
+    // 未截断输出保留尾随换行（pi truncateTail 惯例）。
+    assert.equal(run.output, `${Array.from({ length: 100 }, (_, i) => i + 1).join("\n")}\n`);
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("an oversize line is dropped unless it is the only kept content", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-bigline-"));
+  try {
+    // 超限单行 + 末行：从尾往前保行，超限行整体让位（pi 语义，仅“一行都
+    // 没保住”时才切该行末尾）。
+    const two = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 70000; i++) printf "x" } END { printf "\\nEND-MARKER" }'`,
+      cwd,
+    });
+    assert.equal(two.truncated, true);
+    assert.equal(two.output, "END-MARKER");
+    assert.ok(two.fullOutputPath);
+    assert.equal(readFileSync(two.fullOutputPath!, "utf8").length, 70000 + "\nEND-MARKER".length);
+    rmSync(two.fullOutputPath!, { force: true });
+
+    // 仅一行且超限：保留该行末尾 64k 字符（pi lastLinePartial）。
+    const one = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 70000; i++) printf "x" }'`,
+      cwd,
+    });
+    assert.equal(one.truncated, true);
+    assert.equal(one.output.length, 64_000);
+    assert.ok(one.fullOutputPath);
+    rmSync(one.fullOutputPath!, { force: true });
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("spill failure degrades to a pathless truncation notice", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-spillfail-"));
+  const errors: unknown[] = [];
+  try {
+    const run = await runShellCommand({
+      command: "seq 1 3000",
+      cwd,
+      createSpillStream: () => {
+        throw new Error("disk full");
+      },
+      onSpillError: (error) => errors.push(error),
+    });
+    assert.equal(run.truncated, true);
+    assert.equal(run.fullOutputPath, undefined);
+    assert.equal(errors.length, 1);
+    const block = formatShellContextBlock(run);
+    assert.ok(block.includes("truncated=true"));
+    assert.ok(!block.includes("full_output="));
+    assert.ok(block.includes("[Output truncated. Full output: unavailable]"));
+    const collapsed = collapseShellContextBlocks(`${block}\n\nsummarize`);
+    assert.deepEqual(collapsed.notices, ["⤷ shell output: seq 1 3000 (exit 0) — truncated"]);
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("truncation notice travels in the block, transcript row and collapsed display", () => {
+  const run = {
+    command: "cat big.log",
+    exitCode: 0,
+    output: "tail-end\n",
+    timedOut: false,
+    truncated: true,
+    fullOutputPath: "/tmp/piz-shell-deadbeef.log",
+  };
+  const block = formatShellContextBlock(run);
+  assert.ok(
+    block.startsWith(
+      '<shell-output command="cat big.log" exit=0 truncated=true full_output="/tmp/piz-shell-deadbeef.log">',
+    ),
+  );
+  assert.ok(block.includes("[Output truncated. Full output: /tmp/piz-shell-deadbeef.log]"));
+  assert.ok(block.indexOf("tail-end") < block.indexOf("[Output truncated"));
+
+  const row = formatShellTranscriptRow(run);
+  assert.ok(row.includes("[Output truncated. Full output: /tmp/piz-shell-deadbeef.log]"));
+
+  const collapsed = collapseShellContextBlocks(`${block}\n\nsummarize`);
+  assert.equal(collapsed.text, "summarize");
+  assert.deepEqual(collapsed.notices, [
+    "⤷ shell output: cat big.log (exit 0) — truncated, full output: /tmp/piz-shell-deadbeef.log",
+  ]);
+});
+
+test("`!cmd` truncation reaches the next prompt block end to end", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "zcode-shell-app-spill-"));
+  const prompts: TuiPromptInput[] = [];
+  const h = createHarness({
+    submitPrompt: async (input) => {
+      prompts.push(input);
+      return { response: "ok" };
+    },
+    workspaceDirectory: workspace,
+  });
+  try {
+    h.feed("!seq 1 3000");
+    h.feed(ENTER);
+    await h.flush(() =>
+      h.store.state.messages.some(
+        (message) => message.role === "system" && message.content.startsWith("!seq"),
+      ),
+    );
+    const shellRow = h.store.state.messages.find(
+      (message) => message.role === "system" && message.content.startsWith("!seq"),
+    );
+    assert.ok(shellRow!.content.includes("[Output truncated. Full output: "));
+
+    await h.app.submitValue("summarize it");
+    const sent = promptText(prompts[0]!);
+    assert.ok(sent.startsWith('<shell-output command="seq 1 3000" exit=0 truncated=true'), sent.slice(0, 80));
+    assert.ok(sent.includes('full_output="'), sent.slice(0, 200));
+    assert.ok(sent.includes("[Output truncated. Full output: "));
+    assert.ok(sent.endsWith("summarize it"));
+    const spilled = /full_output="([^"]+)"/u.exec(sent);
+    assert.ok(spilled, "block must carry the spill path");
+    assert.ok(readFileSync(spilled[1]!, "utf8").startsWith("1\n2\n3\n"));
+    rmSync(spilled[1]!, { force: true });
+  } finally {
+    await h.stop();
+    rmSync(workspace, { force: true, recursive: true });
+  }
+});
+
+test("boundary: exactly at cap does not truncate, one over does", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-boundary-"));
+  try {
+    // 字符边界：64000 恰好不截断（保留尾随换行惯例不适用于无换行单行）。
+    const chars = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 64000; i++) printf "x" }'`,
+      cwd,
+    });
+    assert.equal(chars.truncated, false);
+    assert.equal(chars.output.length, 64_000);
+    const charsOver = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 64001; i++) printf "x" }'`,
+      cwd,
+    });
+    assert.equal(charsOver.truncated, true);
+    assert.equal(charsOver.output.length, 64_000);
+    rmSync(charsOver.fullOutputPath!, { force: true });
+
+    // 行边界：2000 行恰好不截断，2001 行保尾。
+    const lines = await runShellCommand({ command: "seq 1 2000", cwd });
+    assert.equal(lines.truncated, false);
+    assert.ok(lines.output.startsWith("1\n2\n"));
+    assert.ok(lines.output.trimEnd().endsWith("2000"));
+    const linesOver = await runShellCommand({ command: "seq 1 2001", cwd });
+    assert.equal(linesOver.truncated, true);
+    assert.ok(linesOver.output.startsWith("2\n3\n"), linesOver.output.slice(0, 20));
+    rmSync(linesOver.fullOutputPath!, { force: true });
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("control-char-heavy output cannot silently beat the cap", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  // 审查回归：清理必须先于计数/缓冲——否则控制字符把原始长度顶过滚动
+  // 淘汰线、清理后却低于截断阈值，真实内容被无声丢掉且不报告截断。
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-control-"));
+  try {
+    // 清理后 70k 可见字符 > 64k：必须按截断处理，spill 保有清理后全文。
+    const over = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 70000; i++) printf "y"; for (i = 0; i < 150000; i++) printf "%c", 7 }'`,
+      cwd,
+    });
+    assert.equal(over.truncated, true);
+    assert.equal(over.output.length, 64_000);
+    assert.ok(over.fullOutputPath);
+    const spilledOver = readFileSync(over.fullOutputPath!, "utf8");
+    assert.equal(spilledOver.length, 70_000);
+    assert.ok(/^y+$/u.test(spilledOver));
+    rmSync(over.fullOutputPath!, { force: true });
+
+    // 清理后 60k 可见字符 < 64k：不截断、无 spill、内容零丢失。
+    const under = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 30000; i++) printf "z"; for (i = 0; i < 50000; i++) printf "%c", 7; for (i = 0; i < 30000; i++) printf "z"; for (i = 0; i < 50000; i++) printf "%c", 7 }'`,
+      cwd,
+    });
+    assert.equal(under.truncated, false);
+    assert.equal(under.fullOutputPath, undefined);
+    assert.equal(under.output.length, 60_000);
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
   }
 });
 

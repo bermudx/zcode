@@ -161,6 +161,7 @@ export class PiTuiApp {
         this.store.setter("messages")((current) => [...current, message]),
       clearDraft: () => this.history.setDraftValue(""),
       cwd: () => this.options.workspaceDirectory ?? process.cwd(), env: deps.env,
+      stderr: this.options.stderr,
       setStatus: (status) => this.store.set("status", status),
     });
 
