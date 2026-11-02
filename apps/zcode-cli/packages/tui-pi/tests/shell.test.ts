@@ -142,7 +142,7 @@ test("oversized `!cmd` keeps the tail and spills the full output", async (t) => 
       run.fullOutputPath!.startsWith(join(tmpdir(), "piz-shell-")),
       run.fullOutputPath,
     );
-    assert.ok(/\.log$/u.test(run.fullOutputPath!), run.fullOutputPath);
+    assert.ok(run.fullOutputPath!.endsWith(".log"), run.fullOutputPath);
     // 保尾：上下文只留最后 2000 行完整行。
     assert.ok(run.output.startsWith("18001\n18002"), run.output.slice(0, 40));
     assert.ok(run.output.trimEnd().endsWith("20000"));
@@ -323,6 +323,77 @@ test("`!cmd` truncation reaches the next prompt block end to end", async () => {
   } finally {
     await h.stop();
     rmSync(workspace, { force: true, recursive: true });
+  }
+});
+
+test("boundary: exactly at cap does not truncate, one over does", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-boundary-"));
+  try {
+    // 字符边界：64000 恰好不截断（保留尾随换行惯例不适用于无换行单行）。
+    const chars = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 64000; i++) printf "x" }'`,
+      cwd,
+    });
+    assert.equal(chars.truncated, false);
+    assert.equal(chars.output.length, 64_000);
+    const charsOver = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 64001; i++) printf "x" }'`,
+      cwd,
+    });
+    assert.equal(charsOver.truncated, true);
+    assert.equal(charsOver.output.length, 64_000);
+    rmSync(charsOver.fullOutputPath!, { force: true });
+
+    // 行边界：2000 行恰好不截断，2001 行保尾。
+    const lines = await runShellCommand({ command: "seq 1 2000", cwd });
+    assert.equal(lines.truncated, false);
+    assert.ok(lines.output.startsWith("1\n2\n"));
+    assert.ok(lines.output.trimEnd().endsWith("2000"));
+    const linesOver = await runShellCommand({ command: "seq 1 2001", cwd });
+    assert.equal(linesOver.truncated, true);
+    assert.ok(linesOver.output.startsWith("2\n3\n"), linesOver.output.slice(0, 20));
+    rmSync(linesOver.fullOutputPath!, { force: true });
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
+});
+
+test("control-char-heavy output cannot silently beat the cap", async (t) => {
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  // 审查回归：清理必须先于计数/缓冲——否则控制字符把原始长度顶过滚动
+  // 淘汰线、清理后却低于截断阈值，真实内容被无声丢掉且不报告截断。
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-control-"));
+  try {
+    // 清理后 70k 可见字符 > 64k：必须按截断处理，spill 保有清理后全文。
+    const over = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 70000; i++) printf "y"; for (i = 0; i < 150000; i++) printf "%c", 7 }'`,
+      cwd,
+    });
+    assert.equal(over.truncated, true);
+    assert.equal(over.output.length, 64_000);
+    assert.ok(over.fullOutputPath);
+    const spilledOver = readFileSync(over.fullOutputPath!, "utf8");
+    assert.equal(spilledOver.length, 70_000);
+    assert.ok(/^y+$/u.test(spilledOver));
+    rmSync(over.fullOutputPath!, { force: true });
+
+    // 清理后 60k 可见字符 < 64k：不截断、无 spill、内容零丢失。
+    const under = await runShellCommand({
+      command: `awk 'BEGIN { for (i = 0; i < 30000; i++) printf "z"; for (i = 0; i < 50000; i++) printf "%c", 7; for (i = 0; i < 30000; i++) printf "z"; for (i = 0; i < 50000; i++) printf "%c", 7 }'`,
+      cwd,
+    });
+    assert.equal(under.truncated, false);
+    assert.equal(under.fullOutputPath, undefined);
+    assert.equal(under.output.length, 60_000);
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
   }
 });
 

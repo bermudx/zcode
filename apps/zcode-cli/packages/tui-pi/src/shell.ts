@@ -17,14 +17,15 @@
 //
 // Divergences kept for this thin client: no settings.shellPath override, no
 // pi bin-dir PATH prepend, no extension hooks/Esc-cancel. Output follows pi's
-// tail-truncation + temp-file spill (bash-executor.ts semantics, char units):
-// the tail rides a <shell-output> block on the next prompt, the full output
-// goes to <tmpdir>/piz-shell-<hex>.log — raw bytes, where pi writes sanitized
-// text because its executor is core-side. The core owns history and has no
-// "append local message" verb, so the block rides the next prompt rather than
-// a dedicated history message. `!` buffers output into the next prompt; `!!`
-// runs locally and is excluded from context — pi's own semantics (its spill
-// file still serves the operator).
+// tail-truncation + temp-file spill (bash-executor.ts semantics, sanitized
+// per chunk before accounting/buffer/spill, exactly pi's stream): the tail
+// rides a <shell-output> block on the next prompt, the full output goes to
+// <tmpdir>/piz-shell-<hex>.log. Caps count UTF-16 chars (64k/2000) where pi
+// counts bytes (50KB/2000). The core owns history and has no "append local
+// message" verb, so the block rides the next prompt rather than a dedicated
+// history message. `!` buffers output into the next prompt; `!!` runs
+// locally and is excluded from context — pi's own semantics (its spill file
+// still serves the operator).
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -590,7 +591,13 @@ export const runShellCommand = async (input: {
     if (child.pid !== undefined) trackedShellPids.add(child.pid);
 
     const append = (chunk: Buffer | string): void => {
-      const text = typeof chunk === "string" ? chunk : chunk.toString();
+      // 逐块先清理（pi bash-executor 同序）：计数、滚动缓冲、spill 落盘走同
+      // 一清理后文本——控制字符密集的输出不会让滚动淘汰跑赢截断阈值，也避免
+      // 懒开启回填（清理后）与后续写入（原始）在 spill 文件里混流。
+      const text = sanitizeBinaryOutput(
+        typeof chunk === "string" ? chunk : chunk.toString(),
+      );
+      if (text.length === 0) return;
       totalChars += text.length;
       if (totalChars > MAX_OUTPUT_CHARS) openSpill();
       spill?.stream.write(text);
@@ -614,7 +621,7 @@ export const runShellCommand = async (input: {
         (child.signalCode
           ? 128 + (osConstants.signals[child.signalCode] ?? 0)
           : 1);
-      const body = sanitizeBinaryOutput(chunks.join(""));
+      const body = chunks.join("");
       const tail = truncateTail(body, MAX_OUTPUT_LINES, MAX_OUTPUT_CHARS);
       if (tail.truncated) openSpill();
       const settle = (path: string | undefined): void => {
@@ -624,7 +631,9 @@ export const runShellCommand = async (input: {
           output: tail.content,
           timedOut,
           truncated: tail.truncated,
-          ...(tail.truncated && path ? { fullOutputPath: path } : {}),
+          // 只要有 spill 就交付路径（pi 同款）：raw 阈值擦边但最终未截断的
+          // 运行不会留下无人引用的 0600 文件。展示端仍按 truncated 门控。
+          ...(path ? { fullOutputPath: path } : {}),
         });
       };
       if (!spill || spillFailed) {

@@ -333,13 +333,21 @@ identity or enable inherited upload/update paths without a separate audit.
   one stderr diagnostic. `truncated=true full_output="…"` block attributes
   + `[Output truncated. Full output: …]` in block, transcript row, status
   line and collapsed display notice; `!!` still excluded from context but
-  spills for the operator. Divergence from pi kept: spill file holds raw
-  output (pi writes sanitized text core-side).
+  spills for the operator. Divergence from pi kept at first: spill file held
+  raw output (pi writes sanitized text core-side) — superseded by the review
+  fix below, which sanitizes the whole stream like pi.
 - Spec first (`b8868466` also corrected the design doc's stale
-  interactive-`-ic` section), then implementation `8fbbfba5`. tui-pi:
-  257/257 tests (7 new spill regressions incl. end-to-end block delivery),
-  typecheck + oxlint clean; `architecture:check --changed` green after
-  recording pre-existing `status-line.test.ts` (811 lines since main
+  interactive-`-ic` section), then implementation `8fbbfba5`, then the
+  2026-11-02 subagent review fix: sanitize per chunk BEFORE accounting,
+  rolling buffer and spill writes (one sanitized stream, exact pi
+  semantics; the raw-file divergence is dropped — mixing a sanitized
+  backfill with raw tail writes would corrupt the file), and deliver
+  `fullOutputPath` whenever a spill exists so threshold-edge untruncated
+  runs leave no unreferenced 0600 file. tui-pi: 259/259 tests (9 spill
+  regressions incl. end-to-end block delivery, char/line boundary
+  off-by-one pins, control-char-heavy output), typecheck + oxlint clean;
+  `architecture:check --changed` green after recording pre-existing
+  `status-line.test.ts` (812 lines per the tool's counting, since main
   `c7bb87c1`; invisible to main's empty-diff gate, surfaced by this
   branch's reverse-dependency closure) in `.architecture-baseline.json`.
   Not promoted; awaits merge + verification matrix.
