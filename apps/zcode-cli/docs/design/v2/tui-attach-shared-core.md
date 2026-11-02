@@ -502,6 +502,40 @@ core，用户无感。detached session 仍在收养窗口内时池非空，core 
 opentui 前端无三选一 UI：busy 退出统一先 `session/stop` 再退，保持
 旧"退出即终止"语义而不是静默 detach。
 
+### 退出续接提示（exit resume hint，2026-11-02）
+
+客户端正常退出（TUI 拆屏、`runTui` 返回 0）后，attach 客户端在 stdout 打
+两行恢复指引，让会话 id 不必事后翻 session/list：
+
+```
+Resume this session with:
+piz --resume sess_…
+```
+
+- **命令名跟随入口**：zcode-attach（piz wrapper）入口打
+  `piz --resume <id>`（判据：`attachHerdrAgent === "piz"`，与进程/产品名同源）；
+  monolith 入口（`zcode attach`，argv 重写透传全局旗标）打
+  `zcode attach --resume <id>`。两条命令都真实可解析、可恢复。
+- **会话 id 取当前绑定**：`promptHandler.getMainSessionId()` 跟随
+  /new /resume /fork 换绑后的当前会话，不用启动 snapshot 的陈旧 id。
+- **打印门槛**：`runTui` 返回 0 且存在绑定会话 id。`runTui` 非 0 返回
+  （non-TTY 拒绝）与启动期失败（版本不匹配等 throw，exit 2）都没有
+  "这个会话"可续接；SIGTERM/SIGHUP 走 reap-then-reraise，进程直接
+  终止，到不了打印点。空会话（开了就退）也打印——提示恒定可预测，
+  刻意不做"有无输入"的内容判断。
+- **时序**：写在 `runAttachCommand` 的 `await runTui` 之后、
+  `finally { runtime.close() }` 之前。此时 pi-tui 已 `app.stop()` 恢复
+  终端，stdout 回到主屏缓冲，提示不会被备用屏吞掉；协议走 socket，
+  与此 stdout 无涉。
+- **范围**：仅 attach 通道（runAttachCommand）。monolith 独立
+  `zcode tui`（opentui 前端）不在 piz 产品线，不加。opentui 前端经
+  `--tui-frontend opentui --shared-core` 走同一通道：终端恢复点在
+  `renderer.destroy()`（DESTROY 路径），提示同样打印，但命令名恒为
+  `zcode attach`——该命令 argv 重写固定落回 pi 前端（同会话 id、换
+  UI）。monolith-only 开发通道，接受此偏差（2026-11-02 评审记录）。
+- 回归：`tests/attach-exit-resume-hint.test.ts`（假 core + 假 runTui：
+  piz/monolith 命令名、非 0 退出不打提示、/new 换绑后提示跟随新 id）。
+
 ### 审批与提问反向请求（interaction/*）
 
 in-process 模式下 core 的 permission broker 直接调用 TUI requester；attach
