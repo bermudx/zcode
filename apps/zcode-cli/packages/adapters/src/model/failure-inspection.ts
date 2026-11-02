@@ -91,6 +91,144 @@ export function getApiCallErrorData(error: unknown): unknown {
   return APICallError.isInstance(error) ? error.data : undefined;
 }
 
+/**
+ * 原始响应正文（未解析）：诊断日志需要保留 provider 自己的错误形状，而
+ * `getApiCallResponseBody` 在 JSON 解析失败时直接返回 undefined。
+ * 流终止包装器（如 TerminalStreamChunkError）只复制 cause，所以这里沿 cause 向下查找。
+ */
+export function getApiCallResponseBodyText(error: unknown): string | undefined {
+  return getApiCallResponseBodyTextFromError(error, new WeakSet<object>());
+}
+
+function getApiCallResponseBodyTextFromError(
+  error: unknown,
+  seen: WeakSet<object>,
+): string | undefined {
+  if (markSeen(error, seen)) {
+    return undefined;
+  }
+
+  if (APICallError.isInstance(error) && typeof error.responseBody === "string") {
+    return error.responseBody.trim().length > 0 ? error.responseBody : undefined;
+  }
+
+  const record = asRecord(error);
+  const body = record.responseBody;
+  if (typeof body === "string" && body.trim().length > 0) {
+    return body;
+  }
+
+  const cause = record.cause;
+  return cause && cause !== error ? getApiCallResponseBodyTextFromError(cause, seen) : undefined;
+}
+
+const AUTH_FAILURE_STATUS_CODES: ReadonlySet<number> = new Set([401, 403]);
+const MAX_PROVIDER_AUTH_BODY_CHARS = 1_500;
+
+/**
+ * 凭据形状兜底脱敏。provider 认证失败正文理论上只含它自己的错误描述，但一旦上游回显
+ * 请求头或密钥片段，日志就会变成泄漏面；这里按形状擦除，不依赖具体 provider。
+ */
+const PROVIDER_AUTH_REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, "Bearer [redacted]"],
+  [/\bsk-[A-Za-z0-9_-]{8,}/gu, "sk-[redacted]"],
+  [
+    /("(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization[_-]?token)"\s*:\s*")[^"]*(")/giu,
+    "$1[redacted]$2",
+  ],
+];
+
+export interface ProviderAuthFailureLogFields {
+  providerErrorType?: string;
+  providerErrorMessage?: string;
+  providerErrorCode?: string;
+  providerResponseBody?: string;
+}
+
+/**
+ * 401/403 会被归一成 "Provider authentication failed."，provider 自己的 error.type/message
+ * 和响应正文全部丢失，线上只能看到一个状态码（2026-11-02 z.ai SSE 中途 401 的排查现场）。
+ * 这里在日志边界补回有界、脱敏的原始 payload；只进日志，不进 status event / session 事件。
+ */
+export function providerAuthFailureLogFields(error: unknown): ProviderAuthFailureLogFields {
+  if (error === undefined || error === null) return {};
+
+  const unwrapped = unwrapRetryError(error);
+  const statusCode = getStatusCode(unwrapped);
+  if (statusCode === undefined || !AUTH_FAILURE_STATUS_CODES.has(statusCode)) return {};
+
+  const bodyText = getApiCallResponseBodyText(unwrapped);
+  const parsedBody = firstNonEmptyRecord(
+    parseJsonRecord(bodyText),
+    getApiCallResponseBody(unwrapped),
+    getApiCallErrorData(unwrapped),
+  );
+  const providerError = firstNonEmptyRecord(parsedBody?.error) ?? parsedBody;
+
+  const providerErrorType = scalarText(providerError?.type);
+  const providerErrorMessage = scalarText(providerError?.message);
+  const providerErrorCode = scalarText(providerError?.code);
+  const bodyPayload = bodyText ?? safeJson(parsedBody);
+  const providerResponseBody = bodyPayload ? boundProviderAuthBody(bodyPayload) : undefined;
+
+  return {
+    ...(providerErrorType === undefined ? {} : { providerErrorType }),
+    ...(providerErrorMessage === undefined ? {} : { providerErrorMessage }),
+    ...(providerErrorCode === undefined ? {} : { providerErrorCode }),
+    ...(providerResponseBody === undefined ? {} : { providerResponseBody }),
+  };
+}
+
+function boundProviderAuthBody(body: string): string {
+  const redacted = PROVIDER_AUTH_REDACTIONS.reduce(
+    (text, [pattern, replacement]) => text.replace(pattern, replacement),
+    body,
+  );
+  return redacted.length > MAX_PROVIDER_AUTH_BODY_CHARS
+    ? `${redacted.slice(0, MAX_PROVIDER_AUTH_BODY_CHARS)}…[truncated ${
+        redacted.length - MAX_PROVIDER_AUTH_BODY_CHARS
+      } chars]`
+    : redacted;
+}
+
+function scalarText(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim().length > 0) return value.trim().slice(0, 256);
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+function safeJson(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function parseJsonRecord(text: string | undefined): Record<string, unknown> | undefined {
+  if (!text) return undefined;
+  try {
+    return optionalRecord(JSON.parse(text) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+function optionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> | undefined {
+  for (const value of values) {
+    const record = optionalRecord(value);
+    if (record && Object.keys(record).length > 0) return record;
+  }
+  return undefined;
+}
+
 export function getResponseHeaders(error: unknown): Record<string, string> | undefined {
   return getResponseHeadersFromError(error, new WeakSet<object>());
 }
