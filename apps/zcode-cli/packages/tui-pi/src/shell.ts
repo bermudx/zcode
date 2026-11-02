@@ -1,13 +1,21 @@
 // Local shell escape for the composer (`!command`, `!!command`).
 //
 // Execution semantics are ported from pi-mono
-// (packages/coding-agent/src/utils/shell.ts + core/tools/bash.ts):
-// - bash is resolved deterministically (/bin/bash → `bash` on PATH → sh; Git
-//   Bash → `where bash.exe` on Windows), never the user's $SHELL, and always
-//   non-interactive `-c`. Same shell the model's bash tool uses; no rc, so
-//   aliases/functions do not apply, but exported env (PATH etc.) does.
+// (packages/coding-agent/src/utils/shell.ts + core/tools/bash.ts), with one
+// deliberate fork divergence in shell resolution:
+// - an executable bash/zsh $SHELL wins and runs the command interactively
+//   (`+m -ic`) so the operator's rc aliases/functions apply (`!gs` etc.);
+//   non-interactive `-c` + prefix injection cannot substitute — zsh parses
+//   the whole `-c` string before executing, so aliases defined in it never
+//   apply to commands in the same string. Anything else falls back to
+//   pi-mono's deterministic chain: /bin/bash → `bash` on PATH → sh; Git
+//   Bash → `where bash.exe` on Windows (never interactive there).
 // - POSIX children spawn detached (new session, no controlling tty), so no
 //   interactive job-control tcsetpgrp can ever steal the client terminal.
+//   `-i` without a controlling tty still emits startup diagnostics on some
+//   shells (bash job-control/tty-pgrp lines); those known noise lines are
+//   stripped from the captured tail at finish for interactive shells only —
+//   the spill file keeps them (it stays the sanitized full stream).
 // - Timeout/abort kills the whole process tree (SIGKILL to -pgid, or
 //   taskkill /F /T on Windows); detached children are tracked so shutdown
 //   can reap them (see killTrackedShellChildren, wired in run-tui.ts).
@@ -38,7 +46,7 @@ import {
 } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { constants as osConstants, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 export const SHELL_ROW_PREFIX = "!";
 export const SHELL_EXCLUDED_PREFIX = "!!";
@@ -201,7 +209,20 @@ export type EscapeShell = {
    *  to stdin when commandTransport === "stdin". */
   args: string[];
   commandTransport: "argv" | "stdin";
+  /** `$SHELL` 分支：交互 rc 已加载，finish 时按已知行剔除启动噪声。 */
+  interactive?: boolean;
 };
+
+/** 交互 shell 无控制 tty 时的启动期 stderr 诊断（job control / tty pgrp）：
+ *  属 shell 启动噪声而非命令输出，从捕获尾部剔除；spill 文件保留。 */
+const INTERACTIVE_STARTUP_NOISE =
+  /cannot set terminal process group|no job control in this shell|can't set tty pgrp|can't have job control/u;
+
+const stripInteractiveStartupNoise = (output: string): string =>
+  output
+    .split("\n")
+    .filter((line) => !INTERACTIVE_STARTUP_NOISE.test(line))
+    .join("\n");
 
 const WINDOWS_SYSTEM32_BASH =
   /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/iu;
@@ -269,11 +290,12 @@ const isExecutableFile = (path: string): boolean => {
 };
 
 /**
- * Resolve the `!` escape shell. Deterministic bash, same chain as pi-mono:
- * Windows — Git Bash in ProgramFiles → `where bash.exe` → throw with install
- * instructions. Unix — /bin/bash → `which bash` → `sh`. The user's $SHELL is
- * deliberately not consulted: `!` uses non-interactive `-c`, so a zsh/fish
- * login shell would only add divergence, not rc/aliases.
+ * Resolve the `!` escape shell. Fork divergence from pi-mono: an executable
+ * bash/zsh `$SHELL` wins with `+m -ic` so the operator's rc aliases/functions
+ * apply. Otherwise pi-mono's deterministic chain: Windows — Git Bash in
+ * ProgramFiles → `where bash.exe` → throw with install instructions (never
+ * interactive). Unix — /bin/bash → `which bash` → `sh`, non-interactive `-c`
+ * (no rc; exported env still applies).
  */
 export const resolveEscapeShell = (
   options: {
@@ -301,6 +323,17 @@ export const resolveEscapeShell = (
         `  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n\n` +
         `Searched Git Bash in:\n${candidates.map((path) => `  ${path}`).join("\n")}`,
     );
+  }
+
+  // `+m` 关闭 monitor/job control：交互 shell 的 job control 会对 /dev/tty
+  // tcsetpgrp 抢占前台进程组（退出恢复不可靠，客户端下一次 stdin read 即
+  // SIGTTIN 挂起）。zsh 用 `+m` 即静默；bash 启动期先抢再读选项，残余噪声
+  // 由 detached spawn 根除 + 已知行剔除兜底。fish 等其它 shell 不走交互
+  // 分支——`-ic` 语义未验证，回退确定性链。
+  const loginShell = env.SHELL ?? "";
+  const loginName = basename(loginShell);
+  if ((loginName.includes("bash") || loginName.includes("zsh")) && exists(loginShell)) {
+    return { args: ["+m", "-ic"], commandTransport: "argv", file: loginShell, interactive: true };
   }
 
   if (exists("/bin/bash")) return bashShellSpec("/bin/bash");
@@ -621,7 +654,9 @@ export const runShellCommand = async (input: {
         (child.signalCode
           ? 128 + (osConstants.signals[child.signalCode] ?? 0)
           : 1);
-      const body = chunks.join("");
+      const body = spec.interactive
+        ? stripInteractiveStartupNoise(chunks.join(""))
+        : chunks.join("");
       const tail = truncateTail(body, MAX_OUTPUT_LINES, MAX_OUTPUT_CHARS);
       if (tail.truncated) openSpill();
       const settle = (path: string | undefined): void => {

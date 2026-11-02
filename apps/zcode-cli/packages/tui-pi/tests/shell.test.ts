@@ -1,9 +1,10 @@
 // `!command`/`!!command` escape: runs in the client workspace, prints into the
 // transcript, and `!` output rides along with the next prompt (the core owns
 // history, so there is no protocol verb to append a local message). Execution
-// semantics mirror pi-mono: deterministic `bash -c` (never $SHELL, no rc),
-// detached spawn, process-tree kill, idle-pipe-grace wait, and pi
-// bash-execator output policy — tail truncation at 64k chars / 2000 lines
+// shell: an executable bash/zsh `$SHELL` runs `+m -ic` (fork divergence from
+// pi-mono — rc aliases/functions apply), otherwise pi's deterministic `bash -c`
+// chain; detached spawn, process-tree kill, idle-pipe-grace wait, and pi
+// bash-executor output policy — tail truncation at 64k chars / 2000 lines
 // with the full output spilled to <tmpdir>/piz-shell-<hex>.log.
 
 import assert from "node:assert/strict";
@@ -53,16 +54,30 @@ test("runShellCommand captures stdout and the exit code", async () => {
   }
 });
 
-test("resolveEscapeShell follows the pi-mono bash chain, never $SHELL", () => {
-  // Unix: /bin/bash wins even when $SHELL points elsewhere.
+test("resolveEscapeShell prefers an executable bash/zsh $SHELL, else the pi-mono chain", () => {
+  // Fork divergence: an executable bash/zsh $SHELL runs interactively so rc
+  // aliases apply; zsh wins even though /bin/bash exists.
   assert.deepEqual(
     resolveEscapeShell({ env: { SHELL: "/usr/bin/zsh" }, exists: () => true }),
-    { args: ["-c"], commandTransport: "argv", file: "/bin/bash" },
+    { args: ["+m", "-ic"], commandTransport: "argv", file: "/usr/bin/zsh", interactive: true },
   );
-  // /bin/bash missing → `which bash` hit; $SHELL still ignored.
+  // $SHELL not executable → deterministic chain (no interactive branch).
   assert.deepEqual(
     resolveEscapeShell({
       env: { SHELL: "/usr/bin/zsh" },
+      exists: (path) => path !== "/usr/bin/zsh",
+    }),
+    { args: ["-c"], commandTransport: "argv", file: "/bin/bash" },
+  );
+  // A non-bash/zsh $SHELL (fish) never goes interactive; chain applies.
+  assert.deepEqual(
+    resolveEscapeShell({ env: { SHELL: "/usr/bin/fish" }, exists: () => true }),
+    { args: ["-c"], commandTransport: "argv", file: "/bin/bash" },
+  );
+  // No $SHELL, no /bin/bash → `which bash` on PATH.
+  assert.deepEqual(
+    resolveEscapeShell({
+      env: {},
       exists: (path) => path !== "/bin/bash",
       which: () => "/usr/local/bin/bash",
     }),
@@ -70,13 +85,14 @@ test("resolveEscapeShell follows the pi-mono bash chain, never $SHELL", () => {
   );
   // No bash anywhere → bare `sh` (PATH-resolved, like pi-mono).
   assert.deepEqual(
-    resolveEscapeShell({ exists: () => false, which: () => null }),
+    resolveEscapeShell({ env: {}, exists: () => false, which: () => null }),
     { args: ["-c"], commandTransport: "argv", file: "sh" },
   );
 });
 
 test("resolveEscapeShell on Windows prefers Git Bash, then `where bash.exe`", () => {
-  const env = { ProgramFiles: "C:\\Program Files" };
+  // $SHELL is never consulted on Windows — Git Bash wins even with a zsh set.
+  const env = { ProgramFiles: "C:\\Program Files", SHELL: "/usr/bin/zsh" };
   const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";
   assert.deepEqual(
     resolveEscapeShell({ env, exists: () => true, platform: "win32" }),
@@ -102,9 +118,69 @@ test("resolveEscapeShell on Windows prefers Git Bash, then `where bash.exe`", ()
   );
 });
 
-test("`!cmd` inherits exported env but not rc aliases", async (t) => {
-  // pi-mono `bash -c` semantics: no rc, so aliases never apply — but exported
-  // environment (PATH additions, vars) still does because the child inherits it.
+test("`!cmd` resolves rc aliases via the interactive $SHELL; exports still inherit", async (t) => {
+  const zsh = ["/usr/bin/zsh", "/bin/zsh", "/usr/local/bin/zsh"].find((p) => existsSync(p));
+  const bash = existsSync("/bin/bash") ? "/bin/bash" : undefined;
+  if (!zsh && !bash) {
+    t.skip("no bash/zsh installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-env-"));
+  const home = mkdtempSync(join(tmpdir(), "zcode-shell-home-"));
+  try {
+    for (const shell of [zsh, bash]) {
+      if (!shell) continue;
+      const rcName = shell.includes("zsh") ? ".zshrc" : ".bashrc";
+      writeFileSync(
+        join(home, rcName),
+        "alias zz_piz_probe='echo rc-alias-ok'\n",
+      );
+      const env = {
+        ...process.env,
+        HOME: home,
+        ZDOTDIR: home,
+        SHELL: shell,
+        ZZ_PIZ_VAR: "env-inherited",
+      };
+      const alias = await runShellCommand({ command: "zz_piz_probe", cwd, env });
+      assert.equal(alias.exitCode, 0, `${shell}: ${alias.output}`);
+      assert.ok(alias.output.includes("rc-alias-ok"), `${shell}: ${alias.output}`);
+      const inherited = await runShellCommand({ command: "echo $ZZ_PIZ_VAR", cwd, env });
+      assert.equal(inherited.exitCode, 0);
+      assert.equal(inherited.output, "env-inherited\n");
+    }
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+    rmSync(home, { force: true, recursive: true });
+  }
+});
+
+test("interactive `!cmd` strips known shell startup noise from the tail", async (t) => {
+  // bash `-i` without a controlling tty emits job-control diagnostics on
+  // stderr; they are shell startup noise, not command output, and must not
+  // reach the transcript/model context. zsh is naturally quiet (`+m`), so the
+  // bash branch is the one that exercises the strip under a real spawn.
+  if (!existsSync("/bin/bash")) {
+    t.skip("bash not installed");
+    return;
+  }
+  const cwd = mkdtempSync(join(tmpdir(), "zcode-shell-noise-"));
+  const home = mkdtempSync(join(tmpdir(), "zcode-shell-home-"));
+  try {
+    writeFileSync(join(home, ".bashrc"), "");
+    const env = { ...process.env, HOME: home, SHELL: "/bin/bash" };
+    const run = await runShellCommand({ command: "echo probe-out", cwd, env });
+    assert.equal(run.exitCode, 0, run.output);
+    assert.equal(run.output, "probe-out\n");
+    assert.ok(!run.output.includes("job control"), run.output);
+    assert.ok(!run.output.includes("terminal process group"), run.output);
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+    rmSync(home, { force: true, recursive: true });
+  }
+});
+
+test("fallback chain keeps pi-mono semantics: env inherits, rc aliases do not", async (t) => {
   if (!existsSync("/bin/bash")) {
     t.skip("bash not installed");
     return;
@@ -113,7 +189,9 @@ test("`!cmd` inherits exported env but not rc aliases", async (t) => {
   const home = mkdtempSync(join(tmpdir(), "zcode-shell-home-"));
   try {
     writeFileSync(join(home, ".bashrc"), "alias zz_piz_probe='echo rc-alias-ok'\n");
-    const env = { ...process.env, HOME: home, ZZ_PIZ_VAR: "env-inherited" };
+    // fish $SHELL never takes the interactive branch; the chain's bash -c
+    // loads no rc.
+    const env = { ...process.env, HOME: home, SHELL: "/usr/bin/fish", ZZ_PIZ_VAR: "env-inherited" };
     const alias = await runShellCommand({ command: "zz_piz_probe", cwd, env });
     assert.notEqual(alias.exitCode, 0, alias.output);
     assert.ok(!alias.output.includes("rc-alias-ok"), alias.output);
