@@ -318,24 +318,32 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 
 - composer 内 `!cmd`（trim 后以 `!` 开头且长度 > 1）不进入模型回合：在客户端
   workspace（`workspaceDirectory ?? cwd`）本地执行；`!cmd` 头行 + 退出状态 +
-  输出（stdout/stderr 合并、120s 超时、64k 字符 / 2000 行截断）作为 system
-  消息行写入 transcript；捕获输出以 `<shell-output …>` 块前置到下一条真实
-  prompt（slash 命令不消费缓冲，缓冲只交付一次）。core 没有「追加本地消息」的
-  协议面，上下文交接只能在提交时发生；transcript 展示端把该块折叠为
-  `⤷ shell output:` 一行，未闭合的手写标记原样保留。
-- 执行 shell：POSIX 下取 `env.SHELL` 且 basename 为 bash/zsh 的可执行文件，
-  否则回退 `/bin/sh`；Windows 保持 `ComSpec ?? cmd.exe`（`/d /s /c`）。
-- bash/zsh 以 `-ic` 执行：交互模式加载真实 rc 路径，使 `!` 与用户交互 shell
-  里的 alias、函数、初始化一致（`!gd` == `git diff`）。不能用非交互 `-c` +
-  前缀注入替代：zsh 对 `-c` 串整体先解析再执行，同一串内定义的 alias 对串内
-  命令不生效（bash 按完整命令逐段解析才可行，且依赖 expand_aliases）。
-- `-i` 在无控制 tty 时产生启动期 stderr 诊断（bash 的
-  `cannot set terminal process group` / `no job control in this shell`，
-  zsh 同类 tty/job-control 警告）：属 shell 启动噪声而非命令输出，从捕获
-  输出中剔除；其余 stderr 原样保留进输出。
-- rc 的副作用（噪声输出、慢初始化、阻塞读）与用户在自己终端里执行同一命令
-  的暴露面一致；stdin 置 ignore，120s 超时兜底。
-- 非 bash/zsh 的 SHELL 走原 `/bin/sh -c` 语义：不读 rc、无 alias。
+  输出（stdout/stderr 合并、120s 超时）作为 system 消息行写入 transcript；
+  捕获输出以 `<shell-output …>` 块前置到下一条真实 prompt（slash 命令不消费
+  缓冲，缓冲只交付一次）。core 没有「追加本地消息」的协议面，上下文交接只能
+  在提交时发生；transcript 展示端把该块折叠为 `⤷ shell output:` 一行
+  （截断时附 full output 路径），未闭合的手写标记原样保留。
+- 执行 shell 与 pi-mono 一致（`8888d7e9` 移植，取代早期 `env.SHELL` + `-ic`
+  交互式变体）：确定性 bash 链 —— Unix `/bin/bash` → `which bash` → `sh`，
+  Windows Git Bash → `where bash.exe`（旧 WSL bash.exe 走 stdin `-s`）——
+  绝不使用用户 $SHELL，非交互 `-c` 不加载 rc（alias 不生效、导出环境变量
+  继承）。POSIX detached（新 session、无控制终端）spawn，超时/中止按进程树
+  SIGKILL；completion 按 `exit` + idle-pipe grace 等待（pi#5303，detached
+  孙进程占住 stdout 管道不得挂起或截尾）。
+- 输出按 pi-mono bash-executor 语义「保尾 + 落盘」：超过 64k 字符 / 2000 行
+  （先到者）截断，保留尾部完整行；首行（从尾往前第一个超限行）单独超限到
+  字符上限时保留该行末尾 64k 字符。截断发生时完整输出在
+  `<tmpdir>/piz-shell-<hex>.log`（0600、`wx`）：累计越过 64k 字符阈值时懒
+  开启并回填已缓冲块，行数超限而字符未越界时在完成时兜底开启；内存滚动
+  缓冲上限 128k 字符（阈值 2 倍，与 pi 相同）。spill 文件写原始输出（pi 写
+  清理后文本，核心侧执行；我们客户端落盘保留原样）。
+- 截断告知三处同步：`<shell-output>` 块头加 `truncated=true` 与
+  `full_output="<path>"` 属性，块尾与 transcript 行追加
+  `[Output truncated. Full output: <path>]`（状态行同样提示）；展示折叠的
+  `⤷ shell output:` 通知在截断时附路径。spill 写失败降级为无路径的截断
+  标记并写单行 stderr 诊断，不影响命令结果本身。
+- `!!cmd` 输出不进上下文（pi excludeFromContext 语义），但同样截断/落盘，
+  transcript 行与状态行照常给出 full output 路径供操作者查看。
 
 ## 图片粘贴与草稿附件
 
