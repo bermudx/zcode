@@ -176,6 +176,54 @@ shouldCompact = activeTokenEstimate >= autoThreshold
 - `compact.started`、`compact.completed`、`compact.failed` 都带 pre/post token、threshold、willRetriggerNextTurn。
 - auto compact 失败时当前 turn 可以继续使用原 messages，除非 provider 后续真实返回 context overflow。
 
+### M2.1: 每会话的 auto-compact 窗口上限（fork: `patch/compact-context-window`）
+
+动机：GLM-5.3 系列上报 1,000,000 token 窗口，但 LLM 在更精简的上下文上表现更好；
+运营者希望把会话保持在与 Devin SWE-2 sidekick 相同的 262,000 token 上限。需要一个
+由协议客户端按会话设置的"压缩窗口上限"，让 core 自己（含 turn 中途）按更小的窗口压缩。
+
+契约：
+
+- `AutoCompactPolicyConfig.contextWindowCap?: number`（正整数）。**与既有
+  `contextWindow` 是两个字段**：`contextWindow` 是"覆盖"（会替换模型窗口，测试与
+  host 配置在用），不能表达 `min(cap, model)`；cap 只能收紧，不能放大。
+- 有效窗口 = `min(contextWindowCap, contextWindow ?? 模型窗口)`；`contextWindowCap`
+  缺失/非正 = 与之前完全一致。阈值公式不变：
+  `window − min(maxOutputTokens, 21_000) − 13_000`（262_000 → 约 228K）。
+  `shouldAutoCompact`/`getEffectiveContextWindowSize`/`getAutoCompactThreshold` 与
+  microcompact 阈值（由 full-compact 阈值推导）全部经同一个 `resolveCompactContextWindow`。
+- **只影响压缩决策**。不改变 provider 请求限制、preflight 预算、模型目录里的
+  `contextWindow`、snapshot/usage 的 `contextWindow`/`maxTokens`、页脚 ctx 分母：这些
+  是模型事实，cap 是 core 的压缩策略。`AutoCompactDecision.contextWindow` 与 compact 日志
+  里的 window 反映有效（含 cap）窗口。
+
+协议（additive，旧客户端不受影响）：
+
+- `session/create`、`session/resume` 增加可选 `compactContextWindow`（正整数）：
+  初始值，写入该会话 runtime 的 `config.compact.contextWindowCap`。resume 命中已
+  活跃/被收养的 record 时同样应用（否则重连客户端的新值会被忽略）。
+- 新 mutation `session/setCompactContextWindow { sessionId, compactContextWindow:
+  正整数 | null }`：设置/清除（`null`）。归属：core 会话 runtime 的
+  `config.compact` 是唯一状态；下一次 auto-compact/microcompact 检查即生效（包括正在运行
+  的 turn 的下一个 model step）。不改 `stateRevision`、不发 `state.updated`（cap 不在
+  snapshot 里，没有投影需要刷新，也不应让其他客户端的 `expectedRevision` 失效）。
+- cap **不持久化**，进程重启/空闲回收后 record 消失。持有该策略的客户端负责在
+  绑定会话、切换模型、恢复（`session/resume`）后重新下发——模型归属客户端的策略，core 不
+  猜测"哪些模型该被 cap"。
+- v4 `createSession` 命令（官方桌面客户端）**不加**该字段：piz 走 legacy
+  `session/*`，桌面没有这个需求；加字段会扩大 v4 命令契约且无使用者。
+
+piz attach 默认策略（`cli/src/attach/attach-compact-cap.ts`，常量与谓词唯一来源）：
+当前模型 `modelId` 匹配 `/^glm-/i`（覆盖 `GLM-5.3`、`GLM-5.3-Flash`、内置小写 id）→
+cap = 262_000；其他模型 → 不设 cap（若之前设过则以 `null` 清除）。事件顺序：
+
+```text
+create/resume 返回快照 → 客户端读 settings.model.current → 算 cap
+   → session/setCompactContextWindow（失败不致命：旧 core 无此方法则静默，其他错误出 session_notice）
+setModel 成功 → 用新模型重新算 cap → 同一 mutation
+core 重启 / 空闲回收 → recoverSession 的 session/resume 带上 handle 当前模型对应的 cap
+```
+
 ### M3: Prompt-too-long 与 overflow 兜底
 
 目标：处理两种最容易卡死用户的情况。
