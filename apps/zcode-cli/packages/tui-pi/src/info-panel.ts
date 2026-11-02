@@ -9,6 +9,7 @@ import { truncateToWidth, visibleWidth, type Component, type Focusable, type TUI
 import type { TuiOptions } from "@zcode/tui/internals";
 import type { McpServerStatus } from "@zcode/contracts";
 import type { AppStore } from "./store.js";
+import { effectiveContextUsage } from "./status-line.js";
 import type { PiTheme } from "./theme.js";
 
 const MAX_SECTION_ITEMS = 8;
@@ -72,7 +73,8 @@ export class SessionInfoPanel implements Component, Focusable {
       .filter(Boolean)
       .join("  ·  ");
     lines.push(`    ${theme.text(truncate(meta, inner))}`);
-    const ctx = s.contextUsage;
+    // ctx 行与页脚仪表同一终态（GLM cap 收紧分母），两处读数不漂移。
+    const ctx = effectiveContextUsage(s).usage;
     if ((ctx.contextWindow ?? 0) > 0) {
       lines.push(
         `    ${theme.muted("ctx")} ${theme.text(`${ctx.contextUsed ?? 0}/${ctx.contextWindow}`)}`,

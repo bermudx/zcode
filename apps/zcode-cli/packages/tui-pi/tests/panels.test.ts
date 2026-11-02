@@ -310,3 +310,25 @@ test("SessionInfoPanel clamps CJK-heavy rows to the panel width", async () => {
     }
   }
 });
+
+test("SessionInfoPanel ctx row uses the compact-capped window like the footer", async () => {
+  // 两处读数同一终态：GLM 会话面板 ctx 行是 262k 预算，不是 1M 模型窗口。
+  const { SessionInfoPanel } = await import("../src/info-panel.js");
+  const store = new AppStore();
+  store.set("model", "zai/glm-5.3");
+  store.set("contextUsage", { contextUsed: 36_000, contextWindow: 1_000_000 });
+  const panel = new SessionInfoPanel(
+    { requestRender: () => {} } as never,
+    store,
+    theme(),
+    {} as never,
+    () => {},
+    () => {},
+  );
+  const lines = panel.render(80).join("\n");
+  assert.ok(lines.includes("36000/262000"), lines);
+  assert.ok(!lines.includes("1000000"), lines);
+  store.set("model", "kimi/k2");
+  const uncapped = panel.render(80).join("\n");
+  assert.ok(uncapped.includes("36000/1000000"), uncapped);
+});

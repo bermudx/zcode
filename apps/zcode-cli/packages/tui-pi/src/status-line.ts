@@ -6,6 +6,7 @@
 // 按剩余宽度截断（无标记）。
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { resolveCompactContextWindowForModel } from "@zcode/shared";
 import type { ContextUsage } from "@zcode/tui/internals";
 import type { PiTheme } from "./theme.js";
 import type { AppStore, UsageTotals } from "./store.js";
@@ -120,6 +121,33 @@ function contextUsageWithModelWindow(s: AppStore["state"]): ContextUsage {
 }
 
 /**
+ * 展示用 ctx 终态 = 目录回退窗口再按每会话压缩上限收紧：GLM 会话分母 =
+ * `min(cap, 窗口)`，窗口缺失时直接取 cap（`?/262k` 仍可比 `?/1.0M` 诚实）。
+ * core 在 有效窗口−21K−13K ≈ 228K 触发 auto-compact——不收紧的话 1M 分母
+ * 把 100% 刻度放到触发线 ~4.4 倍处。cap 谓词与 attach 下发同源
+ * （`@zcode/shared`），发送与展示不会漂移。info-panel 的 ctx 行同用此终态。
+ */
+export function effectiveContextUsage(s: AppStore["state"]): {
+  usage: ContextUsage;
+  compactCapped: boolean;
+} {
+  const usage = contextUsageWithModelWindow(s);
+  const cap = resolveCompactContextWindowForModel(
+    s.model ? splitModelLabel(s.model).model : undefined,
+  );
+  if (cap === undefined) return { usage, compactCapped: false };
+  const window = usage.contextWindow;
+  return {
+    usage: {
+      ...usage,
+      contextWindow:
+        window === undefined || window <= 0 ? cap : Math.min(cap, window),
+    },
+    compactCapped: true,
+  };
+}
+
+/**
  * 可用 provider 数：modelOptions 里去重后的 providerId 数（pi
  * `getAvailableProviderCount()` 同角色）。快照缺席时按 1 处理——不凭空
  * 显示 provider 前缀。
@@ -213,7 +241,12 @@ const formatStatsLeftSegments = (
   if (usage) segments.push({ text: usage });
   const cost = formatCostSegment(s.usageTotals?.costUsd);
   if (cost) segments.push({ text: cost });
-  const ctx = contextSegmentParts(contextUsageWithModelWindow(s), { autoCompact: s.autoCompact });
+  // (auto)：pi 语义是 auto-compact 设置态；piz 的 GLM cap 激活时分母即
+  // 压缩预算，同样渲染（见 tui-pi-frontend.md `(auto)` 条目）。
+  const ctxSource = effectiveContextUsage(s);
+  const ctx = contextSegmentParts(ctxSource.usage, {
+    autoCompact: s.autoCompact || ctxSource.compactCapped,
+  });
   if (ctx.text) {
     segments.push({
       isContext: true,

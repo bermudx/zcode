@@ -9,12 +9,33 @@ import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { TurnId } from "@zcode/contracts";
 import type { PiTuiApp } from "../src/app.js";
+import type { AppStore } from "../src/store.js";
+import { effectiveContextUsage, formatStatsLine } from "../src/status-line.js";
+import type { PiTheme } from "../src/theme.js";
 import { createHarness } from "./harness.js";
 
 const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
 
 /** formatter 输出内嵌着色段：内容断言前剥掉 SGR。 */
 const strip = (text: string): string => text.replace(/\x1b\[[0-9;:]*m/g, "");
+
+// 真 ANSI 包装：pi-tui visibleWidth/truncateToWidth 按可见宽度计算，零宽。
+const testTheme = {
+  danger: (text: string) => `\x1b[31m${text}\x1b[0m`,
+  dim: (text: string) => `\x1b[2m${text}\x1b[0m`,
+  warning: (text: string) => `\x1b[33m${text}\x1b[0m`,
+} as unknown as PiTheme;
+
+const totals = (inputTokens: number, outputTokens: number, cacheReadTokens: number) => ({
+  cacheReadTokens,
+  cacheWriteTokens: 0,
+  costUsd: 0,
+  inputTokens,
+  outputTokens,
+});
+
+const state = (over: Partial<AppStore["state"]>): AppStore["state"] =>
+  ({ contextUsage: {}, ...over }) as AppStore["state"];
 
 const footerRows = (app: PiTuiApp, width = 80): string[] =>
   (app as unknown as { statusBox: { render(w: number): string[] } }).statusBox.render(
@@ -102,4 +123,77 @@ test("busy with empty status shows the interrupt hint; long status never wraps",
   } finally {
     await h.stop();
   }
+});
+
+test("effectiveContextUsage clamps the gauge to the GLM compact cap", () => {
+  // GLM + 1M 投影窗口 → min(262k, 1M)；provider 前缀剥掉后按 bare id 匹配。
+  const glm = effectiveContextUsage(
+    state({
+      model: "zai/glm-5.3",
+      contextUsage: { contextUsed: 36_000, contextWindow: 1_000_000 },
+    }),
+  );
+  assert.deepEqual(glm, {
+    usage: { contextUsed: 36_000, contextWindow: 262_000 },
+    compactCapped: true,
+  });
+  // 目录窗口比 cap 小 → 不放大（min 语义，与 core resolveCompactContextWindow 一致）。
+  const smaller = effectiveContextUsage(
+    state({ model: "glm-5.3-flash", contextUsage: { contextUsed: 1_000, contextWindow: 200_000 } }),
+  );
+  assert.equal(smaller.usage.contextWindow, 200_000);
+  assert.equal(smaller.compactCapped, true);
+  // 投影/目录窗口全缺 → 直接取 cap：`?/262k` 仍比 `?/1.0M` 诚实。
+  const noWindow = effectiveContextUsage(state({ model: "glm-5.3", contextUsage: {} }));
+  assert.deepEqual(noWindow, { usage: { contextWindow: 262_000 }, compactCapped: true });
+  // 目录回退先算再收紧。
+  const catalogOnly = effectiveContextUsage(
+    state({
+      model: "zai/glm-5.3",
+      modelOptions: [
+        { ref: { providerId: "zai", modelId: "glm-5.3" }, contextWindow: 1_000_000 },
+      ],
+    }),
+  );
+  assert.equal(catalogOnly.usage.contextWindow, 262_000);
+  // 非 GLM → 原样：不收紧、不标 (auto)。
+  const other = effectiveContextUsage(
+    state({
+      model: "anthropic/claude-x",
+      contextUsage: { contextUsed: 1_000, contextWindow: 255_000 },
+    }),
+  );
+  assert.deepEqual(other, {
+    usage: { contextUsed: 1_000, contextWindow: 255_000 },
+    compactCapped: false,
+  });
+});
+
+test("stats gauge follows the compact cap: GLM 262k (auto), others keep the model window", () => {
+  // 未收紧的 1M 分母会把 100% 刻度放到压缩触发线（~228K）的 ~4.4 倍处。
+  const glm = strip(
+    formatStatsLine({
+      state: state({
+        contextUsage: { contextUsed: 36_000, contextWindow: 1_000_000 },
+        model: "zai/glm-5.3",
+        usageTotals: totals(4_000_000, 36_000, 3_900_000),
+      }),
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(glm.includes("13.7%/262k (auto)"), glm);
+  const other = strip(
+    formatStatsLine({
+      state: state({
+        contextUsage: { contextUsed: 36_000, contextWindow: 1_000_000 },
+        model: "kimi/k2",
+        usageTotals: totals(4_000_000, 36_000, 3_900_000),
+      }),
+      theme: testTheme,
+      width: 200,
+    }),
+  );
+  assert.ok(other.includes("3.6%/1.0M"), other);
+  assert.ok(!other.includes("(auto)"), other);
 });
