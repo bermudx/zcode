@@ -53,6 +53,7 @@ import {
   recordInputHistory,
   resumeSession,
   sendPrompt,
+  setCompactContextWindow,
   setMode,
   setModel,
   setThoughtLevel,
@@ -795,6 +796,8 @@ export class ZCodeProtocolAgentServer {
         return await setModel(this.context, request.params);
       case zcodeProtocolMethods.sessionSetThoughtLevel:
         return await setThoughtLevel(this.context, request.params);
+      case zcodeProtocolMethods.sessionSetCompactContextWindow:
+        return await setCompactContextWindow(this.context, request.params);
       case zcodeProtocolMethods.sessionSetMode:
         return await setMode(this.context, request.params);
       case zcodeProtocolMethods.sessionClose:

@@ -14,6 +14,7 @@ import {
   zcodeModelFormatPropertiesSchema,
   zcodeMcpTelemetryEventSchema,
   zcodeSessionCreateParamsSchema,
+  zcodeSessionSetCompactContextWindowParamsSchema,
   zcodeSessionCompactParamsSchema,
   zcodeSessionEventSchema,
   zcodeSessionEventsResultSchema,
@@ -766,6 +767,36 @@ describe("ZCode Protocol", () => {
         titleGenerationEnabled: "false",
       }),
     ).toThrow();
+  });
+
+  it("accepts an optional per-session compactContextWindow on create/resume and rejects garbage", () => {
+    for (const schema of [zcodeSessionCreateParamsSchema, zcodeSessionResumeParamsSchema]) {
+      const base =
+        schema === zcodeSessionCreateParamsSchema ? { workspace } : { sessionId: "sess_1" };
+      expect(schema.parse(base)).not.toHaveProperty("compactContextWindow");
+      expect(schema.parse({ ...base, compactContextWindow: 262_000 })).toMatchObject({
+        compactContextWindow: 262_000,
+      });
+      for (const bad of [0, -1, 1.5, "262000", null, Number.NaN]) {
+        expect(() => schema.parse({ ...base, compactContextWindow: bad })).toThrow();
+      }
+    }
+    expect(
+      zcodeSessionSetCompactContextWindowParamsSchema.parse({
+        sessionId: "sess_1",
+        compactContextWindow: null,
+      }).compactContextWindow,
+    ).toBeNull();
+    expect(
+      zcodeSessionSetCompactContextWindowParamsSchema.parse({
+        sessionId: "sess_1",
+        compactContextWindow: 262_000,
+      }).compactContextWindow,
+    ).toBe(262_000);
+    for (const bad of [{ sessionId: "sess_1" }, { sessionId: "sess_1", compactContextWindow: 0 },
+      { sessionId: "sess_1", compactContextWindow: 1, extra: true }]) {
+      expect(() => zcodeSessionSetCompactContextWindowParamsSchema.parse(bad)).toThrow();
+    }
   });
 
   it("validates the paged session subagent projection", () => {

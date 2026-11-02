@@ -1978,6 +1978,9 @@ export const zcodeSessionCreateParamsSchema = z
     // 灰度 mode 随布尔同行下发（launch.md「On demand: activation」）：`onDemand` 让 CLI 把十个
     // 工具推迟到会话首次 `/workflow` 才注册；缺席 = 按布尔行事（alwaysOn），供旧 Host 配对。
     dynamicWorkflowMode: zcodeDynamicWorkflowModeSchema.optional(),
+    // fork: 每会话 auto-compact 窗口上限（additive；缺省 = 不设，沿用模型窗口）。
+    // 有效窗口 = min(cap, 模型窗口)，语义见 compact/plan.md M2.1。
+    compactContextWindow: z.number().int().positive().optional(),
   })
   .strict();
 export type ZCodeSessionCreateParams = z.infer<typeof zcodeSessionCreateParamsSchema>;
@@ -1998,6 +2001,9 @@ export const zcodeSessionResumeParamsSchema = z
     // 与 create 同语义；resume 不带会导致冷恢复丢工作流工具簇。
     dynamicWorkflowEnabled: z.boolean().optional(),
     dynamicWorkflowMode: zcodeDynamicWorkflowModeSchema.optional(),
+    // fork: 每会话 auto-compact 窗口上限（additive；缺省 = 不设，沿用模型窗口）。
+    // 有效窗口 = min(cap, 模型窗口)，语义见 compact/plan.md M2.1。
+    compactContextWindow: z.number().int().positive().optional(),
   })
   .strict();
 export type ZCodeSessionResumeParams = z.infer<typeof zcodeSessionResumeParamsSchema>;
@@ -2484,6 +2490,17 @@ export const zcodeSessionSetModelParamsSchema = z
   })
   .strict();
 export type ZCodeSessionSetModelParams = z.infer<typeof zcodeSessionSetModelParamsSchema>;
+
+export const zcodeSessionSetCompactContextWindowParamsSchema = z
+  .object({
+    sessionId: nonEmptyString,
+    // null = 清除上限（回到模型窗口）。
+    compactContextWindow: z.number().int().positive().nullable(),
+  })
+  .strict();
+export type ZCodeSessionSetCompactContextWindowParams = z.infer<
+  typeof zcodeSessionSetCompactContextWindowParamsSchema
+>;
 
 export const zcodeSessionSetThoughtLevelParamsSchema = z
   .object({
@@ -4350,6 +4367,7 @@ export const zcodeProtocolMethods = {
   // 桌面 v4 UI 收口清零）与 setMode 的 auto 值残留（v4 值域刻意排除 auto）。
   sessionSetThoughtLevel: "session/setThoughtLevel",
   sessionSetMode: "session/setMode",
+  sessionSetCompactContextWindow: "session/setCompactContextWindow",
   workspaceReadPresentation: "workspace/readPresentation",
   workspaceHookTrustGrant: "workspace/hooks/trustGrant",
   // 进程级 Account Provider Config 与 workspace 运行目录分离。

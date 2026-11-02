@@ -107,6 +107,7 @@ export function createFakeApp(
         return { kind: "acquired", leaseId };
       },
       emitModelSelected: async () => undefined,
+      setCompactContextWindowCap: () => undefined,
       getProjection: async () =>
         ({
           activeToolCalls: [],

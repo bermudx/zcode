@@ -129,6 +129,7 @@ Count these interfaces when budgeting syncs.
 | App-server ready budget: 60s window starting at spawn completion | `6537f416` | P004 (app-server-spawn) |
 | Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
 | `--model` startup model selection (attach entry + banner) | `3db70344` | P004 (attach entry) |
+| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no usage/ctx denominators); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window` (this branch; not yet on main) | P004 (shared protocol + attach client) + core compact |
 
 At import, piz differed from the upstream base by 37 commits / 155 files /
 15,878 insertions / 443 deletions, before these maintenance documents. This is

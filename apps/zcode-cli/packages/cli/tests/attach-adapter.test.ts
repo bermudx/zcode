@@ -896,6 +896,70 @@ test("sendInput '/model …' 经 commandCenter → session/setModel，不发 ses
   }
 });
 
+test("会话中途 /model 切换：压缩上限跟随当前模型；旧 core（-32601）静默", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let currentModelId = "glm-5.3";
+  let legacyCore = false;
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/setModel") {
+      currentModelId = (request.params as { model: { modelId: string } }).model.modelId;
+      const snapshot = makeSnapshot() as ReturnType<typeof makeSnapshot> & {
+        settings: { model: { current: unknown } };
+      };
+      snapshot.settings.model.current = { modelId: currentModelId, providerId: "zai" };
+      return snapshot;
+    }
+    if (request.method === "session/setCompactContextWindow" && legacyCore) {
+      return Promise.reject(Object.assign(new Error("Method not found"), { code: -32601 }));
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const snapshot = makeSnapshot() as ReturnType<typeof makeSnapshot> & {
+    settings: { model: { available: unknown[]; current: unknown } };
+  };
+  snapshot.settings.model.current = { modelId: "glm-5.3", providerId: "zai" };
+  snapshot.settings.model.available = [
+    modelOption("glm-5.3"),
+    modelOption("claude-sonnet-4"),
+  ];
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: snapshot as never,
+  });
+  const caps = () =>
+    core.requests
+      .filter((r) => r.method === "session/setCompactContextWindow")
+      .map((r) => (r.params as { compactContextWindow: unknown }).compactContextWindow);
+  try {
+    assert.equal(handle.getCompactContextWindow(), 262_000);
+    await handle.setModel("zai/claude-sonnet-4");
+    assert.equal(handle.getCompactContextWindow(), undefined);
+    await handle.setModel("zai/glm-5.3");
+    assert.deepEqual(caps(), [null, 262_000]);
+
+    // 旧 core 不认识该方法：不抛、不出 notice。
+    legacyCore = true;
+    const notices: unknown[] = [];
+    handle.addSink((event) => {
+      if ((event.type as string) === "session_notice") notices.push(event);
+    });
+    await handle.syncCompactContextWindow();
+    assert.deepEqual(notices, []);
+  } finally {
+    client.close();
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 // 回归证据（2026-10-22，`piz` 实测）：首行是绝对路径的多行输入被当成 `/home/daniel/...`
 // slash 命令，只回一句 "Unknown command" —— 整段正文根本没发出去。attach 是交互式客户端，
 // 解析不出来的 `/...` 必须原样按普通 prompt 提交给 core。
