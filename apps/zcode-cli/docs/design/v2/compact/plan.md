@@ -217,7 +217,7 @@ shouldCompact = activeTokenEstimate >= autoThreshold
 - v4 `createSession` 命令（官方桌面客户端）**不加**该字段：piz 走 legacy
   `session/*`，桌面没有这个需求；加字段会扩大 v4 命令契约且无使用者。
 
-piz attach 默认策略（`cli/src/attach/attach-compact-cap.ts`，常量与谓词唯一来源）：
+piz attach 默认策略（`@zcode/shared` `compact-context-window.ts`，常量与谓词唯一来源；`cli/src/attach/attach-compact-cap.ts` re-export 兼容旧导入路径）：
 当前模型 `modelId` 匹配 `/^glm-/i`（覆盖 `GLM-5.3`、`GLM-5.3-Flash`、内置小写 id）→
 cap = 262_000；其他模型 → 不设 cap（若之前设过则以 `null` 清除）。事件顺序：
 

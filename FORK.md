@@ -129,7 +129,7 @@ Count these interfaces when budgeting syncs.
 | App-server ready budget: 60s window starting at spawn completion | `6537f416` | P004 (app-server-spawn) |
 | Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
 | `--model` startup model selection (attach entry + banner) | `3db70344` | P004 (attach entry) |
-| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no protocol/snapshot denominators — 2026-11-02 revision: the footer ctx gauge clamps client-side via the same predicate, `patch/footer-compact-gauge`); cap constants/predicates live in `@zcode/shared` `compact-context-window.ts` (single source for wire + display); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2`; display clamp `8507771b`/`890a085f` | P004 (shared protocol + attach client) + core compact |
+| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no protocol/snapshot denominators — 2026-11-02 revision: the footer ctx gauge clamps client-side via the same predicate, `patch/footer-compact-gauge`); cap constants/predicates live in `@zcode/shared` `compact-context-window.ts` (single source for wire + display); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2`; display clamp `25bf5e32`/`9fd03361` (post-rebase SHAs) | P004 (shared protocol + attach client) + core compact |
 
 At import, piz differed from the upstream base by 37 commits / 155 files /
 15,878 insertions / 443 deletions, before these maintenance documents. This is
@@ -431,3 +431,25 @@ Two independent subagent reviews (no blockers). Accepted + fixed:
 Accepted as-is（记录在案）：噪声正则仅英文（本地化漏删为外观问题，限位
 后不再可能误删）；`$SHELL` 相对路径/basename 子串匹配与旧变体逐字一致。
 tui-pi 262/262，typecheck + oxlint 清洁。
+
+### 2026-11-02 — review fix-pass on patch/footer-compact-gauge
+
+Subagent review (no blockers; branch rebased onto the aliases fix-pass,
+records SHAs repointed). Accepted + fixed:
+- 第三份 spec（tui-attach-shared-core.md 的 GLM 压缩窗口上限节）仍写着
+  「此上限不改页脚 ctx 分母」——与本 patch 直接矛盾，按 M2.1 修订口径
+  改写（谓词唯一来源 @zcode/shared；页脚/信息面板客户端侧收紧）。
+- compact/plan.md 里「attach-compact-cap.ts 唯一来源」的括注改指
+  @zcode/shared（原文件是 re-export）。
+- 「触发线落在 ~87% warning 区」加限定：已知窗口 ≥ cap 时成立；窗口
+  未知 cap-only 分支里 core 对缺失窗口回退 200K 默认，比例更低且仅在
+  首个 model_complete 前存在。
+- 信息面板 ctx 行 used 未知渲染 `?/262000`（原 `0/262000` 伪造；与页脚
+  `?/{win}` 同口径）+ 回归；无窗口 GLM 会话由此 cap-only 分母可见。
+- 补 provider 前缀负例：`glm-labs/claude-x` 不 cap（谓词作用于剥前缀后
+  bare modelId）；modelId 自身含斜杠的极端边界记录为已知限制。
+Accepted as-is：tui-pi 首次值引入 @zcode/shared barrel（打包由 promotion
+矩阵的 bundle/no-plugin startup 检查把关）；status-line.test.ts 811 vs
+基线 812 的 off-by-one 为既有状态，非本 patch。
+tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
+0 新增违规。

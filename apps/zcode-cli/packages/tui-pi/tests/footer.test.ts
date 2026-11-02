@@ -156,7 +156,10 @@ test("effectiveContextUsage clamps the gauge to the GLM compact cap", () => {
     }),
   );
   assert.equal(catalogOnly.usage.contextWindow, 262_000);
-  // 非 GLM → 原样：不收紧、不标 (auto)。
+  // 非 GLM → 原样：不收紧、不标 (auto)。provider 前缀以 glm- 开头也不算——
+  // 谓词作用于剥前缀后的 bare modelId（wire 侧同判）；modelId 自身含斜杠
+  // （如 provider/x/foo-glm-y 组合出 provider/x/foo/glm-y）时 last-slash 剥离
+  // 会与 wire 的整串 modelId 判定分叉，属已知极端边界，catalog 路径不受影响。
   const other = effectiveContextUsage(
     state({
       model: "anthropic/claude-x",
@@ -167,6 +170,13 @@ test("effectiveContextUsage clamps the gauge to the GLM compact cap", () => {
     usage: { contextUsed: 1_000, contextWindow: 255_000 },
     compactCapped: false,
   });
+  const glmProvider = effectiveContextUsage(
+    state({
+      model: "glm-labs/claude-x",
+      contextUsage: { contextUsed: 1_000, contextWindow: 255_000 },
+    }),
+  );
+  assert.equal(glmProvider.compactCapped, false);
 });
 
 test("stats gauge follows the compact cap: GLM 262k (auto), others keep the model window", () => {

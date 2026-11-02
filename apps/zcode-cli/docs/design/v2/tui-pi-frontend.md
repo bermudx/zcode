@@ -191,8 +191,10 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     漂移）时，分母 = `min(cap, 窗口)`（262_000 → `262k`），投影/目录窗口
     均缺失时直接取 cap。动机：auto-compact 在有效窗口 − 21K − 13K ≈ 228K
     触发，未收紧的 1M 分母把仪表 100% 刻度放到触发线的 ~4.4 倍处——读数
-    误导而非保守。`?`/降级分支与 pi 阈值着色不变（按收紧后的百分比计算，
-    触发线落在 ~87% warning 区）。非 GLM/无 cap 会话保持模型窗口分母。
+    误导而非保守。`?`/降级分支与 pi 阈值着色不变（按收紧后的百分比计算；已知窗口
+    ≥ cap 时触发线落在 ~87% warning 区——窗口未知的 cap-only 分支里 core
+    对缺失窗口回退 200K 默认，触发线比例更低，且只存在于首个
+    model_complete 之前）。非 GLM/无 cap 会话保持模型窗口分母。
     边界：收紧是纯客户端展示，core/协议侧窗口语义不变；老 core（对
     `session/setCompactContextWindow` 答 -32601、静默跳过）不会应用 cap 而
     仪表仍按 cap 显示——matched-pair 部署下仅 promotion 过渡期存在。
