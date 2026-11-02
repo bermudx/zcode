@@ -192,9 +192,13 @@ export function appendFooterRightZone(input: {
   const { line, right, theme, width } = input;
   if (!right || width < 1) return line;
   const styled = theme.dim(right);
-  const gap = width - visibleWidth(line) - visibleWidth(styled);
+  // 调用方传入的是 Loader/Text.render 已补到满宽的行（尾部填充空格是
+  // 装饰不是内容）：直接量 line 宽 gap 恒 <2，右区永不落位——必须按
+  // 去尾填充后的内容宽计算间距。
+  const content = line.replace(/ +$/, "");
+  const gap = width - visibleWidth(content) - visibleWidth(styled);
   if (gap < 2) return line;
-  return `${line}${" ".repeat(gap)}${styled}`;
+  return `${content}${" ".repeat(gap)}${styled}`;
 }
 
 /** stats 行左区：用量簇 + $ + ctx 仪表（pi footer 同序），空段跳过。 */

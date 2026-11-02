@@ -179,6 +179,32 @@ test("activity row right-aligns the quota cluster; drops it when no room", () =>
   assert.ok(strip(line).endsWith("5h: 99% ↻4h"), line);
   assert.ok(strip(line).startsWith("  Ready."), line);
   assert.equal(visibleWidth(line), 40);
+  // 回归：运行时 ActivityLine 传入的是 Loader/Text.render 已补到满宽的
+  // 行（尾部填充空格非内容）——右区须按内容宽对齐，不能因满宽填充丢读数。
+  const padded = appendFooterRightZone({
+    ...base,
+    line: "  Ready." + " ".repeat(32),
+    right: "5h: 99% ↻4h",
+    width: 40,
+  });
+  assert.ok(strip(padded).endsWith("5h: 99% ↻4h"), padded);
+  assert.equal(visibleWidth(padded), 40);
+  // idle 兜底行（" ".repeat(width)）：同样落右区。
+  const idle = appendFooterRightZone({
+    ...base,
+    line: " ".repeat(40),
+    right: "5h: 99% ↻4h",
+    width: 40,
+  });
+  assert.ok(strip(idle).endsWith("5h: 99% ↻4h"), idle);
+  // 内容真实占满行宽：仍丢额度读数而不是截断 status/spinner 文本。
+  const full = appendFooterRightZone({
+    ...base,
+    line: "x".repeat(40),
+    right: "5h: 99% ↻4h",
+    width: 40,
+  });
+  assert.equal(strip(full), "x".repeat(40));
   // 余量 <2 列：丢额度读数而不是截断 status/spinner 文本。
   const tight = appendFooterRightZone({
     ...base,
