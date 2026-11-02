@@ -29,8 +29,7 @@ test("footer stays two rows across idle → busy → idle", async () => {
     assert.equal(rows.length, 2);
     assert.match(rows[0] ?? "", /Ready\./);
     assert.doesNotMatch(rows[0] ?? "", SPINNER);
-    // meta 行：cwd 标签常驻（无 branch 时无括号段），行尾是身份簇
-    // （pi 语法：model • mode；单 provider 无前缀）。
+    // meta 行：session 统计 + 身份簇（cwd 已上移活动行行首）。
     assert.ok((visibleWidth(rows[1] ?? "") > 0));
     assert.match(strip(rows[1] ?? ""), /model • build/);
     assert.doesNotMatch(strip(rows[1] ?? ""), /\(prov\)/);
@@ -54,24 +53,26 @@ test("footer stays two rows across idle → busy → idle", async () => {
   }
 });
 
-test("workspaceGitBranch lands in the meta row only", async () => {
+test("cwd label and workspaceGitBranch anchor the activity row, not the meta row", async () => {
   const h = createHarness({ workspaceDirectory: "/home/u/proj" });
   try {
     h.store.set("workspaceGitBranch", "main");
     const rows = footerRows(h.app);
-    assert.match(strip(rows[1] ?? ""), /\(main\)/);
-    assert.doesNotMatch(rows[0] ?? "", /\(main\)/);
+    const top = strip(rows[0] ?? "");
+    assert.ok(top.startsWith("/home/u/proj (main)"), top);
+    assert.doesNotMatch(strip(rows[1] ?? ""), /proj|\(main\)/);
   } finally {
     await h.stop();
   }
 });
 
-test("startup options deliver the branch to the meta row", async () => {
+test("startup options deliver the branch to the activity row", async () => {
   const h = createHarness({ workspaceDirectory: "/home/u/proj" });
   try {
     await h.app.applyStartupOptions({ workspaceGitBranch: "feature/x" });
     const rows = footerRows(h.app);
-    assert.match(strip(rows[1] ?? ""), /\(feature\/x\)/);
+    assert.match(strip(rows[0] ?? ""), /\/home\/u\/proj \(feature\/x\)/);
+    assert.doesNotMatch(strip(rows[1] ?? ""), /\(feature\/x\)/);
   } finally {
     await h.stop();
   }

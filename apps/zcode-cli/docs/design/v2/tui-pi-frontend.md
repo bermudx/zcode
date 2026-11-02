@@ -153,30 +153,33 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - Footer 恒定两行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
   `Container`）唯一 own：高度不随 busy 变化，挂载/卸载 spinner 不再把整屏
   内容顶起/落下；`update({state, status, cwdLabel, quotaText})` 一行委托
-  两行。操作者口径为两行（2026-10-29 起恢复 3324315f 前的双行布局）：
-  活动行 + meta 行（cwd 并入 stats 左区，额度簇右移到活动行尾）。
-  - 活动行（`ActivityLine`，Loader 单行形态）：busy 或 `activeTurnId` 在场
-    时动画 spinner + `status`（status 为空回退 `input.activeStatusHint`，
-    "esc to interrupt"，与 React 前端同文案）；空闲时 spinner 位留空格对齐、
-    显示 `status` 或留白。`activeTurnId` 并入活动判定与
-    `quitChoice.turnBusy` 同口径——attach 会话远端发起的 turn 也可见
-    spinner；指示切换只在 busy 沿变化时发生。行尾右对齐额度簇（pi
-    provider-balance 同式，`appendFooterRightZone`）：账号级读数不占
-    meta 行的 session 左区；`theme.dim`，间距 ≥2 列，余量不足丢额度
-    读数不截 status/spinner。
-  - meta 行（`MetaLine` + `status-line.ts` 纯格式化 `formatMetaLine`）：
-    左区 `~/cwd (branch)` + `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}]
+  两行。操作者口径为两行（2026-10-29 起恢复 3324315f 前的双行布局；
+  2026-11-01 起 cwd 上移到活动行行首，meta 行只剩 stats 左区）：
+  活动行 + meta 行。
+  - 活动行（`ActivityLine`，Loader 单行形态）：行首 `~/cwd (branch)`
+    （`formatPwdLine`，`$HOME` 折叠为 `~`，branch 取
+    `TuiStartupOptions.workspaceGitBranch`——CLI 组合层启动快照，与
+    React sidebar 同一来源；无 live watcher，会话内切分支不刷新；非
+    git 目录只显 cwd），其后 `spinner + status`：busy 或 `activeTurnId`
+    在场时动画 spinner + `status`（status 为空回退
+    `input.activeStatusHint`，"esc to interrupt"，与 React 前端同文案）；
+    空闲时 spinner 位留空格对齐、显示 `status` 或留白。`activeTurnId`
+    并入活动判定与 `quitChoice.turnBusy` 同口径——attach 会话远端发起
+    的 turn 也可见 spinner；指示切换只在 busy 沿变化时发生。行尾右对齐
+    额度簇（pi provider-balance 同式，`appendFooterRightZone`）：账号级
+    读数不占 meta 行的 session 左区；`theme.dim`，间距 ≥2 列，余量不足
+    丢额度读数不截 status/spinner。pwd 与 status 两空格分隔；pwd 超宽
+    行尾 "..." 截断（cwd 存活最久，status/额度先行收缩——与原 meta 行
+    「cwd 在左区最前、最后丢」同优先级）。
+  - meta 行（`MetaLine` + `status-line.ts` 纯格式化 `formatStatsLine`）：
+    左区 `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}]
     [CH{hit}%] [$cost] {ctxPct}%/{ctxWindow}(auto)`（pi footer 同构同序；
-    `$HOME` 折叠为 `~`，branch 取 `TuiStartupOptions.workspaceGitBranch`
-    ——CLI 组合层启动快照，与 React sidebar 同一来源；无 live watcher，
-    会话内切分支不刷新；非 git 目录只显 cwd。窗口缺失降级
-    `ctx {compact(used)}`；`W` 仅 cacheWrite>0 时显示），右区
-    `(provider) model • thought • mode • agents:N`（pi 用 `•` 分隔；
-    provider 前缀仅当可用 provider 数 >1 时显示，与 pi
+    窗口缺失降级 `ctx {compact(used)}`；`W` 仅 cacheWrite>0 时显示），
+    右区 `(provider) model • thought • mode • agents:N`（pi 用 `•`
+    分隔；provider 前缀仅当可用 provider 数 >1 时显示，与 pi
     `getAvailableProviderCount()>1` 同规约；mode/agents 为 piz 扩展段，
     附着在 pi 段之后），两区间距 ≥2 空格。宽度收缩顺序：左区行尾 "..."
-    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）；cwd
-    在左区最前、最后丢，用量/ctx 读数先收缩。
+    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）。
     早期「右区余窗 <4 列整体退场」的防碎片守卫已移除，以 pi 行为为准。
   - ctx 百分比按 pi 阈值着色：>90% `theme.danger`、>70% `theme.warning`、
     其余随行 `theme.muted`；`(auto)` 直接拼在窗口紧凑计数之后

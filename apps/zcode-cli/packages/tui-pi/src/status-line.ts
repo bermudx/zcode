@@ -1,9 +1,9 @@
-// Footer meta 行布局（pi-mono footer 同构）：左区 `~/cwd (branch)` + session
-// 用量簇（↑in ↓out R… [W…] [CH%] [$cost]）+ ctx 仪表 `{pct}%/{win}(auto)`，
-// 右区身份簇 `(provider) model • thought • mode • agents:N`；额度簇右对齐
-// 在活动行尾（appendFooterRightZone）。分段门与分隔符、右对齐最小间距、
-// 截断标记均对齐 pi footer：左区行尾 "..." 截断 → 右区按剩余宽度截断
-// （无标记）。
+// Footer 布局（pi-mono footer 同构）：活动行行首 `~/cwd (branch)`（formatPwdLine）
+// + 行尾右对齐额度簇（appendFooterRightZone）；meta 行左区 session 用量簇
+// （↑in ↓out R… [W…] [CH%] [$cost]）+ ctx 仪表 `{pct}%/{win}(auto)`，右区
+// 身份簇 `(provider) model • thought • mode • agents:N`。分段门与分隔符、
+// 右对齐最小间距、截断标记均对齐 pi footer：左区行尾 "..." 截断 → 右区
+// 按剩余宽度截断（无标记）。
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ContextUsage } from "@zcode/tui/internals";
@@ -271,42 +271,12 @@ const composeFooterZones = (input: {
   return `${left}${theme.dim(padding + right)}`;
 };
 
-/** stats 行（无 cwd 前缀）：用量簇 + ctx | 身份簇。 */
+/** stats 行（meta 行，无 cwd 前缀——cwd 已上移到活动行行首）：用量簇 + ctx | 身份簇。 */
 export function formatStatsLine(input: { state: AppStore["state"]; width: number; theme: PiTheme }): string {
   const { state, width, theme } = input;
   if (width < 1) return "";
   return composeFooterZones({
     left: renderStatsLeft(state, theme),
-    right: formatIdentityCluster(state) ?? "",
-    theme,
-    width,
-  });
-}
-
-/**
- * meta 行（footer 第二行）：`~/cwd (branch)` 前缀 + stats 左区 | 身份簇。
- * cwd 与用量簇之间两空格；左区超宽从行尾 "..." 截断——cwd 在最前最后丢，
- * 用量/ctx 读数先行收缩（与原 stats 行同序）。
- */
-export function formatMetaLine(input: {
-  branch?: string;
-  cwdLabel?: string;
-  state: AppStore["state"];
-  width: number;
-  theme: PiTheme;
-}): string {
-  const { state, width, theme } = input;
-  if (width < 1) return "";
-  const pwd = formatPwdLine({ branch: input.branch, cwdLabel: input.cwdLabel, width });
-  const statsLeft = renderStatsLeft(state, theme);
-  const left = [
-    pwd ? theme.dim(pwd) : "",
-    statsLeft,
-  ]
-    .filter((part) => part.length > 0)
-    .join("  ");
-  return composeFooterZones({
-    left,
     right: formatIdentityCluster(state) ?? "",
     theme,
     width,

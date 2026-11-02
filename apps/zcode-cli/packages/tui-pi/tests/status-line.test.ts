@@ -13,7 +13,6 @@ import {
   formatIdentityCluster,
   formatModelLabel,
   appendFooterRightZone,
-  formatMetaLine,
   formatPwdLine,
   formatStatsLine,
   formatTokens,
@@ -220,7 +219,7 @@ test("activity row right-aligns the quota cluster; drops it when no room", () =>
   );
 });
 
-test("meta line composes cwd + usage + ctx | identity", () => {
+test("meta line is stats + ctx | identity only (cwd moved to the activity row)", () => {
   const s = state({
     cacheHitRate: 1,
     contextUsage: { contextUsed: 103_000, contextWindow: 255_000 },
@@ -228,32 +227,21 @@ test("meta line composes cwd + usage + ctx | identity", () => {
     model: "zai/glm-5.3",
     thoughtLevel: "max",
     usageTotals: totals(463_000, 118_000, 27_000_000),
+    workspaceGitBranch: "dev",
   });
   const line = strip(
-    formatMetaLine({
-      branch: "dev",
-      cwdLabel: "~/build/piz",
+    formatStatsLine({
       state: s,
       theme: testTheme,
       width: 200,
     }),
   );
-  assert.ok(line.startsWith("~/build/piz (dev)"), line);
+  // cwd/branch 不在 meta 行（已上移到活动行行首）。
+  assert.ok(line.startsWith("↑463k"), line);
+  assert.doesNotMatch(line, /cwd|build\/piz|\(dev\)/);
   assert.ok(line.includes("↑463k ↓118k R27M CH100.0%"), line);
   assert.ok(line.includes("40.4%/255k"), line);
   assert.ok(line.endsWith("glm-5.3 • max • yolo"), line);
-  // 超宽：行尾 "..." 截断先收缩用量读数，cwd 前缀存活最久。
-  const narrow = strip(
-    formatMetaLine({
-      branch: "dev",
-      cwdLabel: "~/build/piz",
-      state: s,
-      theme: testTheme,
-      width: 40,
-    }),
-  );
-  assert.equal(visibleWidth(narrow), 40);
-  assert.ok(narrow.startsWith("~/build/piz (dev)"), narrow);
 });
 
 test("stats line lays out left cluster + ctx gauge and right identity (pi separators)", () => {
