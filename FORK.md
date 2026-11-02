@@ -129,7 +129,7 @@ Count these interfaces when budgeting syncs.
 | App-server ready budget: 60s window starting at spawn completion | `6537f416` | P004 (app-server-spawn) |
 | Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
 | `--model` startup model selection (attach entry + banner) | `3db70344` | P004 (attach entry) |
-| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no usage/ctx denominators); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2` | P004 (shared protocol + attach client) + core compact |
+| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no protocol/snapshot denominators — 2026-11-02 revision: the footer ctx gauge clamps client-side via the same predicate, `patch/footer-compact-gauge`); cap constants/predicates live in `@zcode/shared` `compact-context-window.ts` (single source for wire + display); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2`; display clamp `8507771b`/`890a085f` | P004 (shared protocol + attach client) + core compact |
 
 At import, piz differed from the upstream base by 37 commits / 155 files /
 15,878 insertions / 443 deletions, before these maintenance documents. This is
@@ -380,6 +380,39 @@ identity or enable inherited upload/update paths without a separate audit.
   tests stay deterministic. tui-pi: 261/261 tests, typecheck + oxlint
   clean; `architecture:check --changed` 0 new violations. Not promoted;
   awaits merge + verification matrix.
+
+=======
+### 2026-11-02 — footer ctx gauge follows the compact cap (patch/footer-compact-gauge)
+
+- Operator: footer read `0.0%/1.0M` on GLM sessions whose auto-compact
+  fires at ~228K — the gauge's 100% mark sat at ~4.4x the trigger; worse
+  than useless, misleading. M2.1 had deliberately scoped the footer
+  denominator out; operator overruled, spec amended (decision recorded in
+  M2.1 and tui-pi-frontend.md). Stacked on `patch/shell-escape-aliases`.
+- Design: display-side clamp only — protocol/core window semantics
+  untouched. The GLM cap predicate moved to `@zcode/shared`
+  (`compact-context-window.ts`; `attach-compact-cap.ts` re-exports) so the
+  wire value attach sends and the footer denominator come from one source
+  and cannot drift. `effectiveContextUsage()` (tui-pi status-line):
+  payload window → catalog fallback → `min(cap, window)`, cap alone when
+  no window is known (`?/262k`); `(auto)` renders while a cap is active
+  (was a never-set dead flag); pi threshold coloring on the clamped
+  percent puts the trigger (~87%) in the warning zone. SessionInfoPanel
+  ctx row uses the same finalizer.
+- architecture-policy.yaml: unmanaged-new-file exception for the shared
+  append (shortcutCommands.ts precedent); status-line.test.ts stays at its
+  accepted baseline — new tests live in footer.test.ts (800-line cap).
+- Verification: tui-pi 264/264 + typecheck + oxlint; cli
+  attach-model-option/attach-adapter/attach-client 74/74; shared module
+  oxlint clean (4 pre-existing warnings elsewhere in the package);
+  `architecture:check --changed` 0 new violations. Harness fragility
+  found while verifying: running cli attach tests from inside a
+  zcode-family agent session leaks ambient `ZCODE_SERVER_BIN` /
+  `ZCODE_WORKSPACE_IDENTITY` env into the spawned-core path — the client
+  resolves a different socket (identity hash), misses the fake core and
+  spawns a doomed core. Pre-existing; tests pass with the vars stripped
+  (`env -u ZCODE_SERVER_BIN -u ZCODE_WORKSPACE_IDENTITY …`). Not
+  promoted; awaits merge + verification matrix.
 
 ### 2026-11-02 — review fix-pass on patch/shell-escape-aliases
 
