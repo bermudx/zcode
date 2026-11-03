@@ -7,24 +7,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
-  formatContextSegment,
-  formatCostSegment,
-  formatCwdLabel,
-  formatIdentityCluster,
-  formatModelLabel,
-  appendFooterRightZone,
-  formatPwdLine,
-  formatStatsLine,
-  formatTokens,
-  formatUsageCluster,
+  formatContextSegment, formatCostSegment, formatCwdLabel, formatIdentityCluster, formatModelLabel,
+  appendFooterRightZone, formatPwdLine, formatStatsLine, formatTokens, formatUsageCluster,
 } from "../src/status-line.js";
 import type { PiTheme } from "../src/theme.js";
-import {
-  bareModelId,
-  cacheExclusiveInputTokens,
-  lookupModelRates,
-  requestCostUsd,
-} from "../src/pricing.js";
+import { bareModelId, cacheExclusiveInputTokens, lookupModelRates, requestCostUsd } from "../src/pricing.js";
 import type { AppStore } from "../src/store.js";
 import { createHarness, sessionEvent } from "./harness.js";
 

@@ -11,6 +11,7 @@ import {
   type TraceContext,
 } from "@zcode/contracts";
 import type { McpTelemetryTracker } from "@zcode/adapters";
+import type { SessionDataFilesPort } from "@zcode/adapters/storage";
 import type { ProviderRuntimeHeadersPort, WorkspaceHookPolicyProvider } from "@zcode/core";
 import type { AccountProviderConfigSnapshot } from "@zcode/provider";
 import {
@@ -60,6 +61,8 @@ export interface ZCodeProtocolAgentDependencies {
   /** 兼容旧测试/嵌入调用；新代码应通过 sessionResidentPoolOptions 设置 low-water。 */
   sessionResidentTargetCount?: number;
   sessionStore?: SessionStorePort;
+  /** 会话与目录在 CLI 存储根下的文件；只用于「删除项目数据」的测量与删除。 */
+  sessionDataFiles?: SessionDataFilesPort;
   version?: string;
   /** 受信 Host 管理的 Hook policy；workspace/project 配置不得覆盖。 */
   workspaceHookPolicyProvider?: WorkspaceHookPolicyProvider;
@@ -228,6 +231,9 @@ export interface ZCodeProtocolDetachedSessionOwner {
 }
 
 export interface ZCodeProtocolAgentServerContext {
+  /** 本 stdio Host 已确认能接收目录来源字段；随进程关闭失效，不存目录缓存。 */
+  sessionDirectorySourceEnabled?: boolean;
+  sessionWorkspaceRoutingEnabled?: boolean;
   /** 进程退出期间，迟到的异步物化不能重新登记 session。 */
   assertServing?: () => void;
   deps: ZCodeProtocolAgentResolvedDependencies;
@@ -258,6 +264,7 @@ export interface ZCodeProtocolAgentServerContext {
   // 单 CLI resident session 池。冷恢复入口经 waitForDeactivation 等待旧 app.close 收尾，
   // 协议请求则持有 operation lease，禁止异步 handler 与容量回收交错。
   sessionResidentPool?: SessionResidentPool;
+  sessionLifecycle?: import("../session-lifecycle/index.js").SessionLifecycleController;
   sessions: Map<string, ZCodeProtocolSessionRecord>;
   /**
    * 已转出（被收养）的 session record 只读回查：claimSessionRecord 摘除后
@@ -447,6 +454,17 @@ export function requireSession(
   let record = context.sessions.get(sessionId);
   if (!record && context.claimDetachedSession?.(sessionId)) {
     record = context.sessions.get(sessionId);
+  }
+  // 同步收养之后再查 lifecycle：claim 会把 runtime 移入本 server 的 sessions，
+  // 未收养前 lifecycle 对他属/未知 session 一律视作 unloaded，先守卫会拒掉
+  // 断线重连的 resume 收养路径。收养成功后 controller 无 entry → hasRuntime
+  // 即 ready，守卫只拦真正 mid-stop/restart 的 session。
+  if (context.sessionLifecycle && !context.sessionLifecycle.isReady(sessionId)) {
+    throw new ProtocolRequestError(
+      zcodeProtocolErrorCodes.sessionUnavailable,
+      "Session runtime is not ready",
+      { code: "runtimeNotReady" },
+    );
   }
   if (!record) {
     // 诊断：readSession 只读取活跃 runtime；记录缺失时要区分“冷会话尚未恢复”和“ID 已失效”，

@@ -104,12 +104,16 @@ test("zcode-attach.cjs boots under a pty, spawns core, renders TUI status line",
   const deadline = Date.now() + WAIT_MS;
   let logText = "";
   let pid: number | undefined;
+  // 模式词元只在首帧渲染后出现；workspace 子串会被 script 回显的命令行
+  // （`cd '<workspace>' && …`）误配，不能单独当"已渲染"信号——合并 3.17.1 后
+  // core 启动变慢，首帧晚于 pid 文件落盘，旧条件会在渲染前提前退出轮询。
+  const modeToken = /\b(build|yolo|plan)\b/;
   try {
     while (Date.now() < deadline) {
       logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
       pid = await serverPid();
-      // footer pwd 行渲染 workspace 路径 = TUI 状态行已挂载。
-      if (logText.includes(workspace) && pid !== undefined) break;
+      // footer pwd 行渲染 workspace 路径 + 模式词元 = TUI 首帧已挂载。
+      if (logText.includes(workspace) && pid !== undefined && modeToken.test(logText)) break;
       await delay(POLL_MS);
     }
 

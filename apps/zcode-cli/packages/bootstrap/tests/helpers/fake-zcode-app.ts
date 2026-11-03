@@ -99,6 +99,7 @@ export function createFakeApp(
       traceId,
     }),
     runtime: {
+      beginShutdown: () => {},
       acquireForegroundPromotionLease: ({ leaseId }) => {
         if (foregroundPromotionLeaseId && foregroundPromotionLeaseId !== leaseId) {
           return { kind: "conflict", leaseId: foregroundPromotionLeaseId };
