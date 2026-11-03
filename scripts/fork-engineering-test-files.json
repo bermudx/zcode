@@ -1,0 +1,9 @@
+[
+  "packages/desktop/test/credentialFault.test.ts",
+  "packages/desktop/test/customOpenAIProviderStore.test.ts",
+  "packages/desktop/test/modelProviderRestartConfig.test.ts",
+  "packages/shared/src/app-server-attach/contract.test.ts",
+  "packages/shared/src/request-security-edition/contract.test.ts",
+  "packages/shared/test/usageCodingPlanQuotaSchema.test.ts",
+  "packages/shared/test/zcodeProtocol.test.ts"
+]

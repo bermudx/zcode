@@ -136,6 +136,59 @@ mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full
   vitest is broken (see the 2026-11-01 battery). A selected run is never a
   full-suite result.
 
+### Lean fork gates: typecheck, engineering subset, plugin tier (2026-11-03)
+
+Desktop/Web/Electron tests are already excluded from every fork gate (root
+Vitest discovers no app unit tests; the 644 desktop WebdriverIO E2E files run
+only under the desktop package's own `test:e2e`). Do not delete them. The lean
+gates below shrink what patch/pre-promote runs *select*; sync branches still
+run the upstream sets in full.
+
+**A — piz typecheck** (`pnpm typecheck:piz`, `scripts/fork-typecheck.mjs`):
+CLI-workspace turbo typecheck (35 packages) plus the root shared surface the
+CLI core actually imports (`packages/shared` incl. its testing fixtures,
+`rpc`, `provider`, `provider-node`, `model-option-map` via `tsc -b`). It does
+not compile desktop (main/host/e2e/remote-main), ui, web, e2e-report,
+dev-docs or zcode-cua. This replaces root `pnpm typecheck` on patch and
+pre-promote gates; root typecheck remains the sync-branch gate.
+
+**B — engineering subset** (`pnpm test:engineering:piz-affected`,
+`scripts/run-affected-engineering-tests.mjs --set piz`): the upstream
+engineering list has 161 files, 151 of them desktop. The fork default runs
+only `scripts/fork-engineering-test-files.json` (7 files). A file earns its
+place only when its *subject* is in the shipped/shared surface — not because
+it transitively imports `@zcode/shared/test-ids`, and not when it tests a
+desktop E2E helper under `packages/desktop/test/e2e/helpers/` (coding-plan
+mock servers, provider seed writers, upstream-model fixtures are E2E
+harness, excluded on that basis). Keepers: the 4 `packages/shared` contract/
+schema tests (attach P004, signing-policy P001, coding-plan quota, protocol),
+`credentialFault` (subject is `@zcode/shared/node` atomic private write +
+file lock), `customOpenAIProviderStore` and `modelProviderRestartConfig`
+(subjects are `@zcode/provider` / `@zcode/provider-node` config round-trips).
+The runner validates the manifest against the upstream list (unknown or
+duplicate entries are a script error, never a silent pass). The upstream
+`--set all` behaviour is the default and unchanged; run
+`pnpm test:engineering` in full on sync branches. `verify:pre-push` uses the
+piz-affected variant.
+
+**C — plugin tier in `fork-tests.mjs`** (`--full --exclude-plugins`,
+pre-promote only): excludes the test tasks of plugin packages the no-plugin
+shared core does not load — `@zcode/android-emulator-plugin`,
+`@zcode/ios-simulator-plugin`, `@zcode/browser-use-plugin`,
+`@zcode/office-runtime`, `@zcode/zcode-site-plugin`,
+`@zcode/plugin-creator-plugin`, `@zcode/zcode-cua-plugin`. Excluded packages
+are printed, never silently skipped. Bootstrap's bundled-plugin *seeding*
+tests are not in this tier (seeding still runs at startup) and
+`@zcode/node-repl-host` stays (built-in host, not a plugin package). Sync
+branches run plain `--full`.
+
+Measured on this machine (warm caches, 2026-11-03): the piz engineering
+subset runs 7 files / 101 tests in ~7s; `typecheck:piz` took ~54s (turbo 36
+tasks, 29 cached) against ~12s for the incremental root `tsc -b` — the saving
+is not running *both* gates plus the desktop projects on patch branches, not
+beating warm `tsc -b`; cold-cache figures are unmeasured. `--full
+--exclude-plugins` plans 14 packages against 21 for plain `--full`.
+
 ## Build and artifact checks
 
 Observed CLI scripts (not a complete clean-bootstrap recipe):
