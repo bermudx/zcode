@@ -803,3 +803,55 @@ next start; do not restart live cores. Full acceptance gate (signing
 against the real provider request, allowance evidence, Ctrl-C signal
 path, memory matrix) remains open and unchanged.
 
+
+## 2026-11-03 — SendMessage queue no longer drops messages (patch/subagent-sendmessage-queue)
+
+Branch `patch/subagent-sendmessage-queue` from `main` `610d1fd3` (not merged,
+not promoted — `piz` still runs the previous frozen pair; no core restarted).
+Spec: [tool/07-subagent.md](../../apps/zcode-cli/docs/design/v2/tool/07-subagent.md)
+"被拒收的消息与终态收口（fork）".
+
+Defect (from reading the code, not observed live): a SendMessage steer that the
+winding-down child turn rejected (`turn_not_steerable` / `no_active_turn`) was
+queued and reported `queued`; the queue was only flushed at sink registration
+and stripped at terminal, so the message was lost. The no-sink case had the
+same fate: the registration flush retries `no_active_turn` for about 200ms,
+but the first turn does context init, SessionStart hooks and submission state
+before `beginActiveTurn`. The 200ms figure comes from reading
+`message-steering.ts`; startup latency was not measured.
+
+Checks actually run and observed:
+
+- New `core/tests/subagent-sendmessage-queue.test.ts`: 9/9 pass. All 9 fail
+  with the `src` diff reverse-applied (queued text, 4× no redelivery timeout,
+  2× missing not-delivered note, 2× steer-retry race returning `queued`).
+- Core typecheck (`turbo run typecheck --filter=@zcode/core`, deps from
+  turbo cache): clean.
+- CLI lint (`npm_execpath=…/pnpm/10.33.2/…/pnpm.cjs mise exec -- node
+  scripts/run-cli-lint.mjs` from the repo root; `pnpm --dir apps/zcode-cli
+  lint` overrides `npm_execpath` back to the ELF and fails): 0 errors,
+  71 warnings (same count as 2026-10-29), none in touched files.
+- `pnpm architecture:check --changed` (after commit): OK, 0 violations.
+- Core vitest full suite: 4177 passed, 22 skipped, 4 failed. All 4 failures
+  were 5s timeouts under load:
+  - `deferred-call-todo-runtime`: 2 tests. Re-run alone, `stream=on` still
+    times out. With the fix reverse-applied it also times out: run 1 failed
+    both modes, run 2 failed `stream=on`. So this failure predates the change
+    and comes from load or timing.
+  - `mcp-tool-bridge` (oversized image): 1 test, passes on rerun.
+  - `tool-search-local-runtime` (`stream=off`): 1 test, passes on rerun.
+- `git merge-tree` against `patch/lead-sidekick`: the merge is clean after
+  moving the `undeliveredMessages` option below the session callbacks.
+  The merged tree was not typechecked. Sidekick queued messages carry no
+  redelivery context, so terminal drain only logs them, which leaves
+  sidekick behavior unchanged.
+
+NOT exercised live (unverified): a real child turn rejecting a steer and
+the background resume that follows; the model's reading of the new
+`queued` text and notification notes; the startup window timing.
+
+Open items:
+- Rewind drops, conservatively, every message queued on an older branch
+  generation.
+- A not-delivered notice for a task whose own branch generation is stale is
+  dropped by the existing per-taskId branch fence.
