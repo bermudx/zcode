@@ -44,6 +44,28 @@ async function ensureTestServer(
   return result;
 }
 
+/** .pid/.info/.marker-env 由 server 在 listen 回调里异步自写（真 server 合同：
+ *  bind 成功者才是 owner），socket 可连不代表登记文件已落盘；ensureServer 的
+ *  就绪信号只有 socket。负载下立即 readFile 曾 ENOENT。且 writeFile 是
+ *  先建空文件再写内容——只等「文件存在」会读到空串（曾实测 '' !== '1'），
+ *  必须等「内容非空」。三个登记文件按合同都不为空。 */
+async function waitForRegistrationFile(path: string, timeoutMs = 5_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let content = "";
+    try {
+      content = await readFile(path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (content.trim() !== "") return content;
+    if (Date.now() > deadline) {
+      throw new Error(`registration file never became non-empty: ${path}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 /** 假 server：按 --socket 参数 bind 一个 unix socket 并自登记 .pid/.info（与真 server
  *  的 listen 后自登记合同一致：bind 成功者才是 owner），随后保持进程存活。 */
 async function writeFakeServerScript(directory: string): Promise<string> {
@@ -140,10 +162,10 @@ test("ensureServer spawns a detached server, writes .pid/.info, and reuses a liv
   assert.equal(result.socketPath, socketPath);
   assert.ok(result.pid && result.pid > 0);
 
-  const pidFile = (await readFile(`${socketPath}.pid`, "utf8")).trim();
+  const pidFile = (await waitForRegistrationFile(`${socketPath}.pid`)).trim();
   assert.equal(pidFile, String(result.pid));
   const info = appServerInfoSchema.parse(
-    JSON.parse(await readFile(`${socketPath}.info`, "utf8")),
+    JSON.parse(await waitForRegistrationFile(`${socketPath}.info`)),
   );
   assert.equal(info.version, "9.9.9-test");
   assert.equal(info.workspaceIdentity, "/workspace/demo");
@@ -339,7 +361,7 @@ test("ensureServer marks spawned attach cores with ZCODE_ATTACH_CORE=1", async (
   // 标记随 spawn env 烘焙：~/.zcode/herdr-hook.sh 见此即 no-op，避免共享
   // core 的 zcode 钩子冒领后续 attach 客户端的 pane（含 piz）。
   assert.equal(
-    (await readFile(`${socketPath}.marker-env`, "utf8")).trim(),
+    (await waitForRegistrationFile(`${socketPath}.marker-env`)).trim(),
     "1",
   );
 });

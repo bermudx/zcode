@@ -72,6 +72,11 @@ provider completion -> adapter 检查终止原因
 - SSE idle timeout 触发时必须发布 `model_stream_stalled`，abort 当前 provider 请求，并归一为 `stream_idle_timeout`。如果尚未越过重试边界，则复用 adapter 统一 retry budget；如果已经产出非空 `reasoning_delta`、非空 `text_delta`、`tool_call` 或 `finish`，adapter 不得自动重放，本次 stream 失败交给 core runtime recovery 判断是否重新发起新的 SSE streaming request。
 - v1 不新增 `stream_reset` 事件；adapter 在达到重试边界或 stream 成功结束前不向上游释放不可见的 retry-safe 前奏。非空 `reasoning_delta` 已是实时可见边界，core 通过现有 `stream_recovery_tail_discarded` 让投影把失败行收口为 interrupted，再由新 assistant message id 承接恢复流。
 - 非可重试错误或重试预算耗尽时，应包装为稳定的 adapter error，保留原始 cause、statusCode、attempt、requestId、traceId 和 model 信息。
+- 401/403 一律归一成 `Provider authentication failed.`，provider 自己的 `error.type`/`error.message`/`error.code`
+  和响应正文都会丢失，线上只剩一个状态码（2026-11-02 z.ai SSE 中途 401 只能靠 SSH 到会话日志逐条比对）。
+  因此认证失败时，`model_request_failed` 日志与 stream failure 日志必须额外记录
+  `providerErrorType`/`providerErrorMessage`/`providerErrorCode`，并附带一份按凭据形状脱敏、上限 1500 字符的
+  `providerResponseBody`。这些字段只写本地日志，不进入 status event、session 事件或协议载荷，不改变错误分类和重试策略。
 - 重试预算档位 `modelRetryBudget` 由 runtime 绑定在模型句柄上，adapter 只读不改：`default` 用 adapter 解析出的 `maxAttempts`；`unbounded` 给 workflow actor，瞬态失败无上限；`single-attempt` 把本次请求的 `maxAttempts` 收敛为 1，瞬态失败不重试、首次失败即上抛给 core。`single-attempt` 只用于带 `selectionFallback` 声明的执行作用域 Selection（如 Highspeed 加速卡），由 core 在失败后退回会话模型继续本轮；它不改变退避曲线、失败分类、鉴权刷新/签名修复的额外尝试和 compact 边界，状态事件的 `maxAttempts` 如实上报 1。
 - adapter 内部 retry 是新的物理 provider 请求，每次新的 `model_request_started` 都必须带新的 `requestId` 和 `x-request-id`，通过相同 `traceId` 与递增 `attempt` 串联；`model_retry_scheduled` 仍归属于刚失败的旧 request。
 - 每个因 provider、网络或流读取错误而结束的物理 stream attempt，都必须在进入下一次 retry 或抛出最终错误前 abort 自己的请求信号，并在同一个有界屏障内等待 iterator 的异步关闭和 AI SDK `fullStream` tee 保留分支的消费清理完成；该清理不依赖 `preserveProviderStreamBoundaries`。关闭异常或超时仅记录低频 warn，不得覆盖原始 provider 错误或无限阻塞重试。自然 EOF 不额外 abort；普通 consumer 主动提前结束和 caller stop 继续异步 best-effort 关闭，不能被内部清理超时拖慢。

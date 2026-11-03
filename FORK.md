@@ -101,7 +101,7 @@ submission/acceptance status is **unverified**; no fork PR links have been recor
 |---|---|---|---|
 | P001 | Extra-usage request path: signing and auth/security error policy in adapters request-security-edition and root shared policy; code presence does not prove allowance eligibility | `86ab5b13`, `df8bc4a7`; adapters `client-request-signing.test.ts`; [design](apps/zcode-cli/docs/design/v2/model/client-request-signing.md) | Only retire the local implementation when a verified replacement preserves mandatory signing and the supported extra-usage request path |
 | P002 | Original TUI controls, paste routing, live transcript echo of drained queue inputs (`TurnSteerDrained.drainedInputs` → user rows in the shared reducer, idempotent by messageId with pendingInputId fallback, sensitive-prompt redaction on echo, visibility aligned with both resume authorities — no intent/text-based skip, `/compact` text not re-interpreted as visibility) and extracted frontend interfaces: CLI tui package | `090276d9`, `31a770cc`, `c0abfcb1`, `6ee50f58`, `c0527374` + `f4780a2b` review fixups; the 2026-10-27 merge into main supersedes the earlier id-less echo variant (`a40b6960`); tui keymap/paste/exit tests, `tui-events.test.ts` (drained row, duplicate delivery, pendingInputId fallback, compact intent renders like resume, `/compact`-looking text) | No remaining piz dependency, or upstream equivalent passes relevant regressions; no wholesale deletion without dependency audit |
-| P003 | pi frontend: tui-pi, CLI selection/build wiring, architecture registration, clipboard image paste (`ctrl+v`/`alt+v`), `/skill` argument completion, kitty key-release filtering in chord dispatch, constant three-row footer (activity + pwd/branch row + two-zone stats row; 2026-10-27 verbatim pi parity: `↑↓R[W] CH% $cost ctx(auto)` segment gates + ctx threshold coloring + `•` identity separators + provider-prefix rule + provider-balance-style pwd-row quota slot), startup `PiBanner` (logo/version/hints/model scope), `userBg` user message block, `markdown*` terminal theme, transcript rendering polish (borderless volume-balanced markdown tables with fence-aware scanning + narrow-table width guard, `json`-fence pretty-printing for provider tool narration, thought/tool part-row restyle + inter-part rhythm; `TranscriptMarkdown` in tui-pi), `!` shell escape (HEAD semantics: deterministic non-interactive `/bin/bash -c` in an isolated session/process group with `!!` opt-out — supersedes the earlier `80729ec8`/`f5241576` interactive-shell variant) | `570ebd20` through `7e859585` and later skills/image-paste commits plus `b0468c92`, `76335676`, `4422deb7`, `058685af`, `4163f747`, `63f379a2`, `f4780a2b`, `!` port `80729ec8`→`8888d7e9`; tui-pi tests incl. projection, composer, history (incl. kitty press/repeat/release), panels, terminal-drain, mentions, shell, wrapping, image-paste, banner, footer and transcript-markdown; [design](apps/zcode-cli/docs/design/v2/tui-pi-frontend.md) | Upstream frontend meets our interaction and resource requirements |
+| P003 | pi frontend: tui-pi, CLI selection/build wiring, architecture registration, clipboard image paste (`ctrl+v`/`alt+v`), `/skill` argument completion, kitty key-release filtering in chord dispatch, constant three-row footer (activity + pwd/branch row + two-zone stats row; 2026-10-27 verbatim pi parity: `↑↓R[W] CH% $cost ctx(auto)` segment gates + ctx threshold coloring + `•` identity separators + provider-prefix rule + provider-balance-style pwd-row quota slot), startup `PiBanner` (logo/version/hints/model scope), `userBg` user message block, `markdown*` terminal theme, transcript rendering polish (borderless volume-balanced markdown tables with fence-aware scanning + narrow-table width guard, `json`-fence pretty-printing for provider tool narration, thought/tool part-row restyle + inter-part rhythm; `TranscriptMarkdown` in tui-pi), `!` shell escape (interactive bash/zsh `$SHELL` `+m -ic` in an isolated session/process group so rc aliases/functions apply, non-bash/zsh, missing or non-executable `$SHELL` falls back to deterministic non-interactive `/bin/bash -c`; `!!` opt-out; output keeps the tail at 64k chars / 2000 lines and spills the full output to `<tmpdir>/piz-shell-<hex>.log` (0600) with a `[Output truncated. Full output: …]` notice in block, transcript row, status line and collapsed display — resolution history: interactive `80729ec8`/`f5241576` → deterministic `8888d7e9` (pi port) → interactive again `07e8b06a` on the hardened runner; `8888d7e9`'s head truncation superseded by `8fbbfba5`) | `570ebd20` through `7e859585` and later skills/image-paste commits plus `b0468c92`, `76335676`, `4422deb7`, `058685af`, `4163f747`, `63f379a2`, `f4780a2b`, `!` port `80729ec8`→`8888d7e9`→`8fbbfba5`, interactive resolution `4d0b7a5a`/`07e8b06a`; tui-pi tests incl. projection, composer, history (incl. kitty press/repeat/release), panels, terminal-drain, mentions, shell, wrapping, image-paste, banner, footer and transcript-markdown; [design](apps/zcode-cli/docs/design/v2/tui-pi-frontend.md) | Upstream frontend meets our interaction and resource requirements |
 | P004 | Shared core and thin attach client: bootstrap socket listener, CLI attach/spawn/build, root shared protocol; attach `/skill` list + suggestions via `skills/referenceCatalog` additive fields; attach custom-command catalog via new `commands/referenceCatalog` (composer `/` panel + `/help`; expansion stays in the core input facade, local `listAttachCustomCommands` scan removed); coding-plan quota read via new `usage/codingPlanQuota` (account-level snapshot fetched core-side from the Registry's coding-plan provider — API-key access from provider config **or** zhipu-account individual-coding-plan entitlement via the account credential port `providerRuntimeHeadersPort` (2026-10-28; same owner as model-request auth, manual plan key or OAuth-derived project token), feeding the tui-pi footer quota cluster; readUsageQuota absent → cluster silent; tui-pi failure diagnostics deduped per message + 60s idle-tick backoff so permanent no-credential states log exactly once per episode); herdr pane lifecycle reporter for `zcode-attach` (bounded retry + 30s heartbeat re-assert + always-on throttled stderr diagnostics, since a single lost `working` report pins herdr idle/done for a whole turn) plus `ZCODE_ATTACH_CORE` spawn marker suppressing the shared core's zcode hook | `32dc8799` through later attach fixes including `61abbc11`, plus `887668fb`..`d68db6ab` and the 2026-10-24 reporter-durability commit; CLI attach tests, bootstrap socket-listener + skill-reference-catalog, root shared attach contract, `attach-herdr-reporter` (incl. retry/argv-reuse/heartbeat regressions) + `app-server-spawn` marker tests; [design](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md) | Upstream shared-core mode covers no-plugin isolation, matched builds, sessions, reconnect and low per-client cost |
 | P005 | Interactive unresolved slash input routed as a normal prompt | piz `2f55f457`; allowance has a different patch `c6b36ad5`; coverage (audited 2026-10-26): verbatim forward incl. attachments + default no-opt-in "Unknown command" + headless e2e `--prompt /nope` + attach e2e via real command center asserting exactly one `session/send` + custom-command expansion precedence + recognized builtins staying local (cli.unit / attach-adapter); TUI-lane wiring pinned by `ff7bf885` (2026-10-26); still open: attach unresolved-slash **with attachments** over a real socket | Upstream equivalent verified on piz, including recognized slash commands |
 
@@ -119,7 +119,7 @@ Count these interfaces when budgeting syncs.
 |---|---|---|
 | Shell aliases loaded into exec startup snapshots + eval-wrap for sourced commands | `3b2f3eb4` | adapters exec (bash-startup-script, shell-init-snapshot) |
 | Session plan overlay projected into `settings.mode.current` | `508d1c77` | protocol/bootstrap |
-| tui-pi `!` shell escape (deterministic `/bin/bash -c`, tree kill, `!!` opt-out; supersedes interactive-shell variant) | `80729ec8`, `f5241576` → `8888d7e9` | P003 |
+| tui-pi `!` shell escape (interactive bash/zsh `$SHELL` `+m -ic` so rc aliases apply — resolution restored by `patch/shell-escape-aliases`, other/missing `$SHELL` falls back to deterministic `/bin/bash -c`; tree kill, `!!` opt-out; tail truncation + `<tmpdir>/piz-shell-*.log` spill, pi bash-executor parity) | `80729ec8`, `f5241576` → `8888d7e9` → `8fbbfba5` → `4d0b7a5a`, `07e8b06a` | P003 |
 | ExitPlanMode plan rendered as readable markdown | `4f6d847b` | tui |
 | Detach/adopt lifecycle: detach keeps sessions alive, adopt-on-resume, bounded orphan window, busy-fact reaper | `f95b9b29`, `3d6c2785`, `04a0c046`, `b9e4b0b8` | P004 (attach-core lifecycle) |
 | Busy-quit choice (detach vs stop & quit) + ctrl-d decision fold | `68b5043b`, `87f433f8` | tui / tui-pi |
@@ -129,7 +129,9 @@ Count these interfaces when budgeting syncs.
 | App-server ready budget: 60s window starting at spawn completion | `6537f416` | P004 (app-server-spawn) |
 | Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
 | `--model` startup model selection (attach entry + banner) | `3db70344` | P004 (attach entry) |
-| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no usage/ctx denominators); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2` | P004 (shared protocol + attach client) + core compact |
+| Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no protocol/snapshot denominators — 2026-11-02 revision: the footer ctx gauge clamps client-side via the same predicate, `patch/footer-compact-gauge`); cap constants/predicates live in `@zcode/shared` `compact-context-window.ts` (single source for wire + display); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2`; display clamp `25bf5e32`/`9fd03361` (post-rebase SHAs) | P004 (shared protocol + attach client) + core compact |
+| Attach exit-resume hint: after normal TUI exit (exit 0 + bound session id) the attach client prints `Resume this session with:` + `piz|zcode attach --resume <id>` to stdout once the terminal is restored; id follows /new /resume /fork via `getMainSessionId`; empty sessions print too (predictability over content-gating); signal exits and non-0 exits silent; opentui-frontend lane deviation recorded in spec | `patch/exit-resume-hint` `40e25506` + review fix-pass `c47d1e63`; suite-stability rides along in `6e16e0ce`; spec [tui-attach-shared-core.md](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md); 4 regressions `tests/attach-exit-resume-hint.test.ts` | P004 (attach client) |
+| Provider auth-failure log payload: 401/403 model failures log `providerErrorType/Message/Code` + cause-chain-extracted (TerminalStreamChunkError), credential-shape-redacted, 1500-char-capped `providerResponseBody`, plus the previously dropped `errorCode/errorPhase/exceptionType/providerRequestId`; log-only — status events, session events, classification, retry policy unchanged | `patch/auth-failure-diagnostics` `3cf8e1ff` (builder: second agent, operator-authorized; 4 regressions `runner-status-fanout.test.ts`); spec [stream-error-retry.md](apps/zcode-cli/docs/design/v2/model/stream-error-retry.md) | P001 (adapters model runner diagnostics) |
 
 At import, piz differed from the upstream base by 37 commits / 155 files /
 15,878 insertions / 443 deletions, before these maintenance documents. This is
@@ -158,7 +160,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `158a31d2` pair (bf6d3a16 contents + per-session compactContextWindow cap: piz attach caps GLM sessions at 262K; core `compact.contextWindowCap` = min(cap, model window)), promoted 2026-11-01 from main after the recorded verification — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `5f36e28b` pair (f1a0c45e contents + attach exit-resume hint after TUI teardown + provider auth-failure log payload on 401/403), promoted 2026-11-02 from main after the recorded verification — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -315,3 +317,214 @@ identity or enable inherited upload/update paths without a separate audit.
   a core still running the previous build answers `-32601` and clients treat
   that as silent no-op (covered by the mid-switch test). The cap takes effect
   on next `piz` launch against a restarted core.
+
+### 2026-11-02 — `!` escape output spill (patch/shell-output-spill)
+
+- Operator asked for pi's oversized-output behavior on `!cmd`; investigation
+  showed no core patch is needed — the client runs the command, owns the
+  filesystem and composes the `<shell-output>` block, so the spill is
+  entirely tui-pi-side (`8888d7e9`'s "no append-local-message verb" blocker
+  only ever applied to history placement, not to referencing a file path in
+  the block text).
+- Semantics ported from pi-mono bash-executor: tail truncation at 64k
+  chars / 2000 lines (oversize sole line keeps its last 64k chars), full
+  output streamed to `<tmpdir>/piz-shell-<hex>.log` (0600, `wx`, lazy open
+  + backfill at the 64k threshold, finish-time fallback for lines-only
+  overflow, 128k-char rolling buffer), `fullOutputPath` delivered only
+  after the stream drains, failed spill degrades to a pathless notice +
+  one stderr diagnostic. `truncated=true full_output="…"` block attributes
+  + `[Output truncated. Full output: …]` in block, transcript row, status
+  line and collapsed display notice; `!!` still excluded from context but
+  spills for the operator. Divergence from pi kept at first: spill file held
+  raw output (pi writes sanitized text core-side) — superseded by the review
+  fix below, which sanitizes the whole stream like pi.
+- Spec first (`b8868466` also corrected the design doc's stale
+  interactive-`-ic` section), then implementation `8fbbfba5`, then the
+  2026-11-02 subagent review fix: sanitize per chunk BEFORE accounting,
+  rolling buffer and spill writes (one sanitized stream, exact pi
+  semantics; the raw-file divergence is dropped — mixing a sanitized
+  backfill with raw tail writes would corrupt the file), and deliver
+  `fullOutputPath` whenever a spill exists so threshold-edge untruncated
+  runs leave no unreferenced 0600 file. tui-pi: 259/259 tests (9 spill
+  regressions incl. end-to-end block delivery, char/line boundary
+  off-by-one pins, control-char-heavy output), typecheck + oxlint clean;
+  `architecture:check --changed` green after recording pre-existing
+  `status-line.test.ts` (812 lines per the tool's counting, since main
+  `c7bb87c1`; invisible to main's empty-diff gate, surfaced by this
+  branch's reverse-dependency closure) in `.architecture-baseline.json`.
+  Not promoted; awaits merge + verification matrix.
+
+### 2026-11-02 — `!` escape interactive `$SHELL` resolution (patch/shell-escape-aliases)
+
+- Operator: `!cmd` ignored rc aliases — want `!gs` instead of `!git status`.
+  Stacked on `patch/shell-escape-aliases` (branched from
+  `patch/shell-output-spill`, same file).
+- Re-flip of a recorded decision, with cause: `8888d7e9` replaced the
+  `80729ec8`/`f5241576` interactive `$SHELL -ic` resolution as collateral
+  of the pi-mono execution port (tree kill, idle-pipe grace, sanitize,
+  `!!`) — not as a rejection of alias support. This restores the
+  interactive resolution on top of the hardened runner: executable
+  bash/zsh `$SHELL` → `+m -ic` (argv transport); other/missing
+  `$SHELL` → the pi chain unchanged; Windows never interactive. The
+  core-side shell-init-snapshot route (`3b2f3eb4`, model bash tool) was
+  considered and rejected for the client: the thin client must not own
+  core storage/snapshot lifecycle, and `-ic` is always-current where a
+  snapshot can go stale.
+- Startup noise: `zsh +m -ic` under setsid is silent (measured ~50ms with
+  the full rc; operator's `gs` alias resolves); bash emits two known
+  job-control/tty-pgrp stderr lines — stripped from the captured tail at
+  finish, spill file keeps them (stays the sanitized full stream).
+- Spec first (`4d0b7a5a`), then implementation + regressions (`07e8b06a`):
+  resolution precedence (incl. `env:{}` pins against host `SHELL` leak,
+  fish never interactive), real rc-alias runs for zsh+bash with seeded
+  temp-HOME rc (+ZDOTDIR), noise strip under a real detached spawn,
+  fallback keeps no-rc semantics. UI harness env omits SHELL so panel
+  tests stay deterministic. tui-pi: 261/261 tests, typecheck + oxlint
+  clean; `architecture:check --changed` 0 new violations. Not promoted;
+  awaits merge + verification matrix.
+
+### 2026-11-02 — footer ctx gauge follows the compact cap (patch/footer-compact-gauge)
+
+- Operator: footer read `0.0%/1.0M` on GLM sessions whose auto-compact
+  fires at ~228K — the gauge's 100% mark sat at ~4.4x the trigger; worse
+  than useless, misleading. M2.1 had deliberately scoped the footer
+  denominator out; operator overruled, spec amended (decision recorded in
+  M2.1 and tui-pi-frontend.md). Stacked on `patch/shell-escape-aliases`.
+- Design: display-side clamp only — protocol/core window semantics
+  untouched. The GLM cap predicate moved to `@zcode/shared`
+  (`compact-context-window.ts`; `attach-compact-cap.ts` re-exports) so the
+  wire value attach sends and the footer denominator come from one source
+  and cannot drift. `effectiveContextUsage()` (tui-pi status-line):
+  payload window → catalog fallback → `min(cap, window)`, cap alone when
+  no window is known (`?/262k`); `(auto)` renders while a cap is active
+  (was a never-set dead flag); pi threshold coloring on the clamped
+  percent puts the trigger (~87%) in the warning zone. SessionInfoPanel
+  ctx row uses the same finalizer.
+- architecture-policy.yaml: unmanaged-new-file exception for the shared
+  append (shortcutCommands.ts precedent); status-line.test.ts stays at its
+  accepted baseline — new tests live in footer.test.ts (800-line cap).
+- Verification: tui-pi 264/264 + typecheck + oxlint; cli
+  attach-model-option/attach-adapter/attach-client 74/74; shared module
+  oxlint clean (4 pre-existing warnings elsewhere in the package);
+  `architecture:check --changed` 0 new violations. Harness fragility
+  found while verifying: running cli attach tests from inside a
+  zcode-family agent session leaks ambient `ZCODE_SERVER_BIN` /
+  `ZCODE_WORKSPACE_IDENTITY` env into the spawned-core path — the client
+  resolves a different socket (identity hash), misses the fake core and
+  spawns a doomed core. Pre-existing; tests pass with the vars stripped
+  (`env -u ZCODE_SERVER_BIN -u ZCODE_WORKSPACE_IDENTITY …`). Not
+  promoted; awaits merge + verification matrix.
+
+### 2026-11-02 — review fix-pass on patch/shell-escape-aliases
+
+Two independent subagent reviews (no blockers). Accepted + fixed:
+- 噪声剔除改为**流首限位**（带 shell 名前缀的已知诊断行、至多 2 行）：
+  旧的全文行过滤会把用户输出里长得像诊断的行无声吃掉（`!echo 'no job
+  control in this shell'` 丢行、无 spill 时彻底丢失），与 spec「启动期
+  诊断」承诺相悖。本地化措辞不匹配时漏删属外观问题，反向才是数据丢失。
+- 直接调 runShellCommand 的 16 处用例统一 `CHAIN_ENV`（SHELL=""）：此前
+  会随跑测试者的真实 rc 走交互分支，greenness 宿主相关。
+- 补回归：空串 `$SHELL` 回退（旧变体覆盖、移植时丢失）、诊断长相行存活、
+  spill 保留流首噪声、`!!cmd` 交互 alias + 不进上下文；PATH 测试更名
+  （继承 PATH，非 profile）。
+- Spec 措辞收敛：「rc 全量加载」→ 交互 rc（.zshrc/.bashrc，login rc 不读）；
+  P003 行补「non-executable」回退条件。
+Accepted as-is（记录在案）：噪声正则仅英文（本地化漏删为外观问题，限位
+后不再可能误删）；`$SHELL` 相对路径/basename 子串匹配与旧变体逐字一致。
+tui-pi 262/262，typecheck + oxlint 清洁。
+
+### 2026-11-02 — review fix-pass on patch/footer-compact-gauge
+
+Subagent review (no blockers; branch rebased onto the aliases fix-pass,
+records SHAs repointed). Accepted + fixed:
+- 第三份 spec（tui-attach-shared-core.md 的 GLM 压缩窗口上限节）仍写着
+  「此上限不改页脚 ctx 分母」——与本 patch 直接矛盾，按 M2.1 修订口径
+  改写（谓词唯一来源 @zcode/shared；页脚/信息面板客户端侧收紧）。
+- compact/plan.md 里「attach-compact-cap.ts 唯一来源」的括注改指
+  @zcode/shared（原文件是 re-export）。
+- 「触发线落在 ~87% warning 区」加限定：已知窗口 ≥ cap 时成立；窗口
+  未知 cap-only 分支里 core 对缺失窗口回退 200K 默认，比例更低且仅在
+  首个 model_complete 前存在。
+- 信息面板 ctx 行 used 未知渲染 `?/262000`（原 `0/262000` 伪造；与页脚
+  `?/{win}` 同口径）+ 回归；无窗口 GLM 会话由此 cap-only 分母可见。
+- 补 provider 前缀负例：`glm-labs/claude-x` 不 cap（谓词作用于剥前缀后
+  bare modelId）；modelId 自身含斜杠的极端边界记录为已知限制。
+Accepted as-is：tui-pi 首次值引入 @zcode/shared barrel（打包由 promotion
+矩阵的 bundle/no-plugin startup 检查把关）；status-line.test.ts 811 vs
+基线 812 的 off-by-one 为既有状态，非本 patch。
+tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
+0 新增违规。
+
+### 2026-11-02 — merges + promotion of f1a0c45e (spill / aliases / footer gauge)
+
+- Operator asked for merge + promotion; explicit permission for the merges
+  to `main` (push not requested, none performed). Stack merged `--no-ff` in
+  order: `aaec6bcf` (patch/shell-output-spill) → `22036063`
+  (patch/shell-escape-aliases) → `f1a0c45e` (patch/footer-compact-gauge);
+  the aliases/footer branches carried their review fix-passes rebased onto
+  the previous merge. One conflict during the stack (both branches appended
+  EOF sections to FORK.md) resolved keeping both sections; a stray `=======`
+  marker from that resolution survived into main and is removed by this
+  records commit.
+- Verification battery on merged main, all green — details in
+  [verification](docs/fork/verification.md): architecture 0 violations;
+  tui-pi 265/265 + typecheck + oxlint; shared zcodeProtocol 85/85 (temp
+  config — root vitest is pre-existing-broken, below); cli attach 74/74
+  (env-stripped, below) + typecheck; turbo build 12/12 + `build:attach`;
+  freshness greps on `dist` and frozen `dist-runtime`.
+- `sh apps/zcode-cli/scripts/promote-piz.sh` from clean `main`.
+- Unrelated pre-existing breakage surfaced while verifying, not introduced
+  here: root `vitest.config.ts` references deleted
+  `packages/zcode-cua/vitest.config.ts` (root vitest cannot run);
+  zcode-family agent sessions leak ambient `ZCODE_*` env
+  (`ZCODE_SERVER_BIN`, `ZCODE_WORKSPACE_IDENTITY`, …) into cli
+  attach's spawned-core tests — pass with the vars stripped via `env -u`.
+- Live-core notes: `session/setCompactContextWindow` is additive; a core
+  still running the previous build answers `-32601` and the client treats
+  it as a silent no-op (unit-tested). Live cores keep the old footer
+  denominator + non-interactive `!` resolution until the next `piz` launch
+  against a restarted core — do not restart live cores. Not exercised live
+  (unverified): a real `!gs` in a piz session, the footer `%/262k (auto)`
+  gauge in a live GLM session, auto-compact firing at ~262K; wire and
+  display paths are test-verified end-to-end only.
+
+### 2026-11-02 — merges + promotion of 5f36e28b (exit-resume hint + auth-failure diagnostics)
+
+- Operator: "merge and promote", then "include it and promote" for a
+  concurrently built `patch/auth-failure-diagnostics`. Both merged `--no-ff`
+  into `main`: `74883fe1` (patch/exit-resume-hint: feature `40e25506`,
+  review fix-pass `c47d1e63`, cli suite stability `6e16e0ce`) and
+  `5f36e28b` (`3cf8e1ff`, builder report in operator message). No conflicts;
+  the checkout was briefly occupied by the auth branch mid-battery — promote
+  gate refused as designed, waited for the builder to commit, then proceeded.
+- Review: two independent subagent reviews of the exit-resume hint (no
+  blockers); accepted+fixed spec corrections and harness stdout sinks,
+  accepted-as-is items recorded in the spec section.
+- Battery on final main, all green — details in
+  [verification](docs/fork/verification.md): architecture 0; root
+  typecheck + lint (96 baseline); CLI turbo typecheck 34/34; CLI lint
+  0/71/13; cli suite 620/620 + attach-resume-target 11/11 (extended
+  env-stripping list); adapters vitest 2275 passed with 16 load-flaky
+  failures → green in single-file isolation (documented class); fresh dist
+  pair + `build:attach`; freshness greps on `dist` and frozen
+  `dist-runtime` (hint string, auth fields, compact cap).
+- Suite-stability note: the long-standing "3 known pre-existing failures"
+  set (build.test.mjs clientOnly deep-equal + 2 SEA asset tests) is fixed
+  by `6e16e0ce`; future batteries should expect a green cli suite instead.
+- `sh apps/zcode-cli/scripts/promote-piz.sh` from clean `main`.
+- Installed-pair smoke (real `piz`, util-linux `script` pty, scratch ws +
+  isolated `ZCODE_DATA_BASE_DIR`): boot → double Ctrl-C → exit 0 with the
+  hint printing `piz --resume sess_46a36f22…`; ran the printed command
+  verbatim → exit 0, same id re-hinted (resume bound the persisted session);
+  scratch core killed via its own pid file after `/proc/<pid>/cwd` check;
+  operator's live cores/clients untouched.
+- Live-core notes: the hint is client-side (attach-command) — effective on
+  the next `piz` launch, no core restart needed; the auth-failure payload
+  is core-side (model runner) — a live core keeps the previous logging
+  until the next core start; do not restart live cores. Not exercised live
+  (unverified): the hint after a real model turn, the monolith
+  `zcode attach` hint wording (unit-tested only), and the auth payload
+  against a real 401/403 (redaction test-verified only). Full acceptance
+  gate (signing, allowance evidence, Ctrl-C signal path, memory matrix)
+  unchanged.
+

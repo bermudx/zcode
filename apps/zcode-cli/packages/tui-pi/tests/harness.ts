@@ -107,8 +107,9 @@ export const createHarness = (options: Partial<TuiOptions> = {}): Harness => {
   } as TuiOptions;
 
   const app = new PiTuiApp({
-    // `!` 解析与 pi-mono 一致走 /bin/bash -c（不看 $SHELL）；注入最小 env
-    // 只为隔离本机变量，bash -c 本身无 rc、时序与 /bin/sh 相当。
+    // env 不含 SHELL → `!` 走确定性回退链（bash -c、无 rc），隔离本机 rc
+    // 与交互时序；交互分支的 rc 行为由 shell.test.ts 直接对 runShellCommand
+    // 验证。
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
     onExit: (code) => {
       exitCode = code;

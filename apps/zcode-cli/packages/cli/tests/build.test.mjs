@@ -184,14 +184,22 @@ test("rejects missing root package versions during CLI builds", async () => {
 
 test("desktop agent builds minify the app-facing JS bundle", () => {
   assert.deepEqual(resolveBuildOptions([]), {
+    clientOnly: false,
     minify: false,
     sourcemap: true,
   });
   assert.deepEqual(resolveBuildOptions(["--desktop-agent"]), {
+    clientOnly: false,
     minify: true,
     sourcemap: false,
   });
   assert.deepEqual(resolveBuildOptions(["--desktop-agent"], { ZCODE_E2E_COVERAGE: "1" }), {
+    clientOnly: false,
+    minify: false,
+    sourcemap: true,
+  });
+  assert.deepEqual(resolveBuildOptions(["--client-only"]), {
+    clientOnly: true,
     minify: false,
     sourcemap: true,
   });

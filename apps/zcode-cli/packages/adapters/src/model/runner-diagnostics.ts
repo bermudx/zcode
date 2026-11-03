@@ -4,6 +4,7 @@ import type { Logger, ModelUsage } from "@zcode/contracts";
 import { ModelErrorCode, ModelFailureReason as ModelFailureReasonValue } from "@zcode/contracts";
 import { AiSdkModelAdapterError } from "./errors.js";
 import type { ClassifiedModelFailure } from "./failure-classifier.js";
+import { providerAuthFailureLogFields } from "./failure-inspection.js";
 import { detectProviderBusinessFinishError } from "./provider-finish-business-error.js";
 import type { AiSdkGenerateTextResult } from "./runner-runtime.js";
 import { normalizeUsage } from "./runner-normalization.js";
@@ -309,6 +310,8 @@ export function logStreamFailureDiagnostics(input: {
     textDeltaChars: input.diagnostics.textDeltaChars,
     toolCallCount: input.diagnostics.toolCallCount,
     usage: summarizeModelUsage(input.diagnostics.usage),
+    // 同 model.request.failed：认证失败只留状态码不足以排查，补回有界脱敏的 provider 原始错误。
+    ...providerAuthFailureLogFields(input.error ?? input.diagnostics.lastErrorChunk),
   });
 }
 

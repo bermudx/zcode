@@ -17,6 +17,7 @@ import {
   resolveModelApiCallObservation,
 } from "@zcode/contracts";
 import { UNBOUNDED_RETRY_MAX_ATTEMPTS } from "./retry-budget.js";
+import { providerAuthFailureLogFields } from "./failure-inspection.js";
 // 请求归因 header 一族住在 runner-attribution.ts（max-lines 拆分）；公开面仍从本文件导出，
 // 既有 importer 不必改路径。
 import { resolveModelRequestSessionType } from "./runner-attribution.js";
@@ -206,7 +207,7 @@ export async function publishModelStatus(
     statusSink?: ModelStatusSink;
   },
 ): Promise<void> {
-  logStatusEvent(event, options.logger);
+  logStatusEvent(event, options.logger, options.failureError);
   await publishRequestObservations(event, options);
 
   const deliveries: Array<() => void | Promise<void>> = [];
@@ -346,7 +347,11 @@ function modelStatusLogContext(event: ModelNetworkStatusEvent): Record<string, u
   return modelStatusContextToLogContext(event, event.attempt);
 }
 
-function logStatusEvent(event: ModelNetworkStatusEvent, logger?: Logger): void {
+function logStatusEvent(
+  event: ModelNetworkStatusEvent,
+  logger?: Logger,
+  failureError?: unknown,
+): void {
   // 只保留每个 attempt 的边界；旧 first_content 接受空 block start，不能用于本地首有效内容。
   if (event.querySource === "main_turn" || event.querySource === "compact") {
     const names: Partial<Record<ModelNetworkStatusEvent["type"], string>> = {
@@ -421,12 +426,21 @@ function logStatusEvent(event: ModelNetworkStatusEvent, logger?: Logger): void {
       logger?.warn("Model request attempt failed", {
         ...modelStatusLogContext(event),
         durationMs: event.durationMs,
+        errorCode: event.errorCode,
+        errorPhase: event.errorPhase,
         event: "model.request.failed",
+        exceptionType: event.exceptionType,
+        providerErrorCode: event.providerErrorCode,
+        providerErrorMessage: event.providerErrorMessage,
+        providerRequestId: event.providerRequestId,
         reason: event.reason,
         retryable: event.retryable,
         status: event.reason === ModelFailureReasonValue.Cancelled ? "cancelled" : "failed",
         statusCode: event.statusCode,
         statusMessage: event.message,
+        // 归一化后的 message 不保留 provider 原始认证错误（401/403），缺这份 payload 时
+        // 只能看到一个状态码；只补日志字段，不扩展 status event / session 事件。
+        ...providerAuthFailureLogFields(failureError),
       });
       return;
 

@@ -1278,6 +1278,10 @@ exceptions:
     paths:
       - apps/zcode-cli/packages/node-repl-host/src/cua-broker.ts
     reason: 已准入的 node_repl CUA broker 仅增透传可选 actionTitle 字段（node_repl cell title → badge 文字，docs/cua/producer/multi-session-cursor-overlay-spec.md §4.8）——cua-broker 按 ledger meta 构建的 requestContext 注入、parseContext 白名单补字段；签名、broker 形态与模块边界不变，不接管 zcode-cli 目录。
+  - id: compact-context-window-shared-append
+    rule: unmanaged-new-file
+    paths: [packages/shared/src/compact-context-window.ts]
+    reason: GLM 压缩窗口上限的常量与谓词需被 cli attach（下发）与 tui-pi（页脚分母收紧）同源引用，25 行纯函数无 IO；接管整个 shared 包不在本次范围内（同 shortcutCommands.ts 先例）。
   - id: side-pane-full-view-shortcut-command-edit
     rule: unmanaged-new-file
     paths: [packages/shared/src/shortcutCommands.ts]
