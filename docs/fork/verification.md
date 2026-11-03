@@ -926,3 +926,45 @@ Full battery for the 3.17.1 sync; results summary in
 - `pnpm fmt:check` (oxfmt) reports ~1655 upstream files with format drift
   after the sync — upstream-wide, not gated for this fork's batteries, and
   deliberately not reformatted inside the sync merge.
+
+## 2026-11-03 — merges + promotion of e37ed9d9 (session health + lean test gates)
+
+`patch/session-startup-health` merged `--no-ff` as `9abdd086`
+(draft-safe `session/subagents`, no-plugin discovery gating, numeric usage
+log counters). During verification, `patch/lean-test-gates` was merged on
+top as `a8254e2a`; promotion used current clean `main`. The full bootstrap
+run exposed a new-test scope error (project config strips
+`plugins.enabled`), fixed on main as `e37ed9d9` by moving the disabled
+case to user config. Battery on final main, all green unless stated:
+
+- Dependencies restored with `mise exec -- pnpm install --frozen-lockfile`
+  (the post-sync checkout lacked new workspace links; no manifest/lockfile
+  change). Root typecheck passed; CLI typecheck **36/36**; root lint
+  **0 errors / 83 warnings**; CLI lint **0 errors / 74 warnings / 7
+  accepted**; `architecture:check --changed --base a27f62f4` **0**
+  violations (broad `zcode-cli` remains unmanaged).
+- Full CLI-workspace tests completed in batches: adapters **2529**,
+  bootstrap **3369** (0 new, 5 known, 21 stale known entries now passing),
+  contracts **342**, core **4681**, dynamic-workflow **2034**,
+  dynamic-workflow-runtime **100**, all other vitest packages 0 new
+  failures (**13,420** vitest results total); node:test suites CLI
+  **637/637 + 11/11**, tui **256/256**, tui-pi **265/265**,
+  plugin-creator **8/8**. Signing and socket-listener always-run gates are
+  included. One first-pass dynamic-workflow stack-trace failure passed its
+  solo rerun; the post-fix bootstrap rerun had 0 new failures.
+- Fresh pair: CLI graph **12/12** + `build:attach` + root
+  `@zcode/model-option-map`. Freshness greps in `dist/zcode.cjs` and
+  frozen `dist-runtime/zcode.cjs`: `isSessionPersisted` ×6, `noPlugins`
+  ×16, `usageInputTokens` ×2, `NUMERIC_USAGE_FIELDS` ×3.
+- `promote-piz.sh` from clean `main` at `e37ed9d9`.
+- Installed-pair smoke (real `piz`, pty, scratch workspace + isolated
+  `ZCODE_DATA_BASE_DIR`): boot → double Ctrl-C → exit 0 with hint
+  `piz --resume sess_3e4ef4d4-8432-4d2e-a1c6-bf3d84446505`; printed command
+  run verbatim → exit 0 and same id re-hinted. Scratch core stopped via
+  its own pid file after `/proc/<pid>/cwd` + socket-info workspace checks;
+  operator live cores/clients untouched.
+
+NOT exercised live (unverified): a real model turn, live signing or
+extra-usage allowance evidence, snapshot latency improvement, Ctrl-C
+signal path, and the client-count memory matrix. Do not restart live cores;
+core-side fixes apply at each core's next start.
