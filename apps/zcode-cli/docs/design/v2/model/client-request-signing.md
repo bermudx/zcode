@@ -110,8 +110,11 @@ Provider 账号/key 变更换到新 key state，自然重置并重新尝试。
 1. 官方在缺少 `X-Session-Id` 或凭据不可解析时抛错；开源版改为未签名直发，
    避免后台/工具类无 session 请求或普通 `sk-` API Key 因签名能力不可用而失败。
 2. `requestVerificationInteractionAvailable` 保持 `false`：开源版没有 captcha 交互 UI。
-   `requiresRequestVerification` 仍按官方语义识别 `start-plan`，因此 start-plan 请求
-   会明确失败而不是发送未验证流量。
+   `requiresRequestVerification` 采用上游 3.17.1 的配置快照语义：非 `start-plan` 恒
+   `false`；`start-plan` 在配置显式关闭或 `skipModelRequest` 时 `false`，其余情况回落
+   发行策略（本版即 `false`）。start-plan 的 fail-closed 不再由该谓词承担，改由
+   Host 流程负责：`zcodeAgentService` 在需要验证而配置读取失败/缺失时显式报错
+   （`configNetwork`/`configInvalid`），不发送未验证流量。
 
 ## 观测与日志
 
