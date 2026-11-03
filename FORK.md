@@ -105,6 +105,18 @@ submission/acceptance status is **unverified**; no fork PR links have been recor
 | P004 | Shared core and thin attach client: bootstrap socket listener, CLI attach/spawn/build, root shared protocol; attach `/skill` list + suggestions via `skills/referenceCatalog` additive fields; attach custom-command catalog via new `commands/referenceCatalog` (composer `/` panel + `/help`; expansion stays in the core input facade, local `listAttachCustomCommands` scan removed); coding-plan quota read via new `usage/codingPlanQuota` (account-level snapshot fetched core-side from the Registry's coding-plan provider — API-key access from provider config **or** zhipu-account individual-coding-plan entitlement via the account credential port `providerRuntimeHeadersPort` (2026-10-28; same owner as model-request auth, manual plan key or OAuth-derived project token), feeding the tui-pi footer quota cluster; readUsageQuota absent → cluster silent; tui-pi failure diagnostics deduped per message + 60s idle-tick backoff so permanent no-credential states log exactly once per episode); herdr pane lifecycle reporter for `zcode-attach` (bounded retry + 30s heartbeat re-assert + always-on throttled stderr diagnostics, since a single lost `working` report pins herdr idle/done for a whole turn) plus `ZCODE_ATTACH_CORE` spawn marker suppressing the shared core's zcode hook | `32dc8799` through later attach fixes including `61abbc11`, plus `887668fb`..`d68db6ab` and the 2026-10-24 reporter-durability commit; CLI attach tests, bootstrap socket-listener + skill-reference-catalog, root shared attach contract, `attach-herdr-reporter` (incl. retry/argv-reuse/heartbeat regressions) + `app-server-spawn` marker tests; [design](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md) | Upstream shared-core mode covers no-plugin isolation, matched builds, sessions, reconnect and low per-client cost |
 | P005 | Interactive unresolved slash input routed as a normal prompt | piz `2f55f457`; allowance has a different patch `c6b36ad5`; coverage (audited 2026-10-26): verbatim forward incl. attachments + default no-opt-in "Unknown command" + headless e2e `--prompt /nope` + attach e2e via real command center asserting exactly one `session/send` + custom-command expansion precedence + recognized builtins staying local (cli.unit / attach-adapter); TUI-lane wiring pinned by `ff7bf885` (2026-10-26); still open: attach unresolved-slash **with attachments** over a real socket | Upstream equivalent verified on piz, including recognized slash commands |
 
+**Session-health invariants:**
+draft-aware subagent reads preserve deferred persistence and real missing-parent
+errors; trusted no-plugin command discovery must avoid bundled-plugin seed/hash
+work without freezing workspace commands; numeric usage counters need an exact,
+number-only redaction exception. Regression handles are
+`session-lifecycle-logging`, the pre-first-prompt cases in `session-persistence`,
+`logging`, `plugins`, `command-reference-catalog`, and the no-plugin snapshot
+case in `zcode-protocol`. Retire these fixes when upstream covers those same
+invariants; do not duplicate the upstream model-selection deferral fix.
+See the [2026-11-03 verification record](docs/fork/reports/2026-11-03-session-health.md)
+for the source checks and artifact limitations; it is not an installation record.
+
 **Pending audit, not a carried-patch claim:** allowance-only `da309372` and
 `bac3682c` provide queue/transcript behavior absent from piz's ancestry; compare
 behavior before deciding whether to port. Do not blindly cherry-pick these or
