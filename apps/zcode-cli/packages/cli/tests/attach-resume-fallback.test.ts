@@ -304,7 +304,11 @@ test("no resume intent still creates a new session", async () => {
     const result = await harness.runAttach({});
     assert.equal(result.exitCode, 0);
     assert.equal(result.restoredCount, undefined, "fresh session has no restoredMessages");
-    assert.ok(harness.coreRequests.some((r) => r.method === "session/create"));
+    const createCall = harness.coreRequests.find((r) => r.method === "session/create");
+    assert.ok(createCall);
+    // 启动新会话是 deferred 草稿：首发前不进 session/list、不被 /resume
+    // picker 或 -c 选中；首条 prompt accepted 时 core 提升为 immediate。
+    assert.equal(createCall.params.persistence, "deferred");
   } finally {
     await harness.destroy();
   }

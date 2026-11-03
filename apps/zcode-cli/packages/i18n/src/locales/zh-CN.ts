@@ -70,7 +70,7 @@ Slash Commands:
   /mode [mode]          查看或切换权限模式：build、edit、plan、yolo 或 guarded
   /model [id]           查看或切换当前 session 模型
   /new                  在 TUI 中开始新 session
-  /resume [sessionId]   按 sessionId 恢复 session；省略时恢复当前 cwd 最新 session
+  /resume [sessionId]   按 sessionId 恢复 session；省略时从已保存 session 中选择
   /rewind [latest|checkpointId]  查看最新 checkpoint 或恢复 workspace 文件
   /skill [name] [task]  列出 skills，或强制下一次 prompt 加载某个 skill
   /goal [action]        查看或设置当前 session goal

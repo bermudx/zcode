@@ -316,6 +316,33 @@ attach 入口的会话选择与主 CLI 同语义，不再默认 resume：
 之前无条件 resume 最近会话，piz 永远进旧对话、无法开新会话——
 与主 CLI（默认新会话、`-c` 才继续）相反。
 
+TUI 内的会话选择走 commandCenter 同一裁决面（与 monolith 对齐）：
+
+- **裸 `/resume` 打开既有 composer picker**（`buildSessionSelection`，
+  `deps.listSessions`）：`session/list` 按当前 workspace ref 列已持久化
+  会话，经 `zcodeSessionListResultSchema` 全量校验后映射为
+  `CommandCenterSession`（`sessionId→id`、`workspace.workspacePath→directory`、
+  `title`、`parentSessionId→parentId`、`updatedAt`），按 `updatedAt` 降序
+  排序，并剔除当前绑定会话（不能"恢复"自己）。空列表渲染 picker 既有的
+  "No saved sessions found" 空态；**列表请求失败或载荷畸形必须原样
+  抛错**，不得退回"猜最近会话"——attach 曾缺 `listSessions`，裸
+  `/resume` 落到 resumeApp 按最新猜测，会把刚绑定的当前会话当成
+  "最近会话"恢复（看似 no-op，实则掩盖了用户想挑历史会话的意图）。
+  选定条目的 `command`（`/resume <full id>`）提交前不做任何
+  绑定/resume/create。
+- **`/resume <id 或唯一前缀>` 与入口共用 `resolveAttachResumeTarget`**：
+  完整 id 直通、唯一前缀展开、多候选报错列出候选、无本地匹配透传给
+  `session/resume` 裁决（跨 workspace 完整 id 依然可恢复）。TUI 内
+  `session/resume` 请求携带 workspace ref（冷物化判定需要），失败直接
+  抛错不静默开新会话。
+- **启动与 `/new` 的 `session/create` 携带 `persistence:"deferred"`**：
+  未发送的草稿会话不进 `session/list`（core 既有规则跳过 deferred
+  record），也不会被本 pane 或其他 pane 的 picker / `-c` 选中。首条
+  prompt 被 accepted 时 core 在 admission 把它提升为 immediate
+  （`record.persistence` 镜像 runtime 持久化事实，事件流另有
+  `reconcileRecordPersistence` 兜底对齐）——与 desktop 新建 draft
+  同一条 core 规则，attach 侧无存储迁移、无新增协议形状。
+
 resume 成功时 `restoredMessages` 作为 `initialResult` 交给
 `runTui` 首帧渲染历史 transcript。同时 `sessionSnapshotSeed()` 把快照
 投影成一次性的页脚种子并入 `initialResult`（/new /resume /fork 的
