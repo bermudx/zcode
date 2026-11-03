@@ -17,15 +17,15 @@ describe("protocol slash command surface", () => {
       const commands = join(root, ".zcode", "commands");
       await mkdir(commands, { recursive: true });
       await writeCommand(commands, "review", "Workspace review", "Review $ARGUMENTS.");
-      const projectConfigPath = join(root, ".zcode", "config.json");
-      await writeFile(projectConfigPath, JSON.stringify({ plugins: { enabled: false } }));
+      const userConfigPath = join(root, "user-config.json");
+      await writeFile(userConfigPath, JSON.stringify({ plugins: { enabled: false } }));
       const options = {
-        env: {}, homeDirectory: join(root, "home"), skipUserConfig: true,
-        projectConfigPath, workingDirectory: root,
+        env: {}, homeDirectory: join(root, "home"),
+        userConfigPath, workingDirectory: root,
       };
       expect((await listZCodeCustomCommands(options)).commands.map((command) => command.name))
         .toEqual(["review"]);
-      await writeFile(projectConfigPath, JSON.stringify({ plugins: { enabled: true } }));
+      await writeFile(userConfigPath, JSON.stringify({ plugins: { enabled: true } }));
       const prompt = await resolveZCodeCustomCommandPrompt("/review diff", {
         ...options, noPlugins: true,
       });
