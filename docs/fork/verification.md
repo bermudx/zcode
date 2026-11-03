@@ -89,6 +89,53 @@ inventing a package test command. Expand coverage for changed protocol/bootstrap
 behavior. Run broad/full suites only when requested; focused checks are not a
 claim that the full upstream suite passed.
 
+### Selected vs full runs: `fork-tests.mjs`
+
+Don't `.skip` or delete upstream tests to save time. That adds sync conflicts and
+blinds `sync/*` branches, where upstream changes exactly the code those tests
+cover. Select tests instead:
+
+```sh
+# patch/* branches — tests reachable from what the branch changed (vs merge-base with main)
+mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs            # --dry-run shows the plan
+# sync/* branches and before promote-piz.sh — every CLI-workspace package
+mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full
+```
+
+- Selection: turbo `...[base]` gives the changed packages plus their dependents.
+  Inside vitest packages, `vitest --changed <base>` narrows that to the test files
+  whose import graph reaches a changed file. On attach-v4, that was 26 of 232
+  bootstrap files. node:test packages (cli, tui, tui-pi) run their whole package
+  script, and cli also runs `attach-resume-target.test.ts`. Signing and
+  socket-listener always run.
+- cli tests exec `packages/cli/dist/*.cjs`. If dist is missing, cli is
+  reported NOT RUN (exit 1, never a pass). Build first: CLI-workspace
+  `turbo run build` plus root `@zcode/model-option-map` (SEA tests). A stale
+  dist is your responsibility.
+- The script itself strips the session-env list (above), so the `env -u …`
+  prefix isn't needed.
+- TMPDIR goes to a fresh `/dev/shm` dir. Bootstrap SQLite tests fsync on
+  every write, and on btrfs `/tmp` that dominates. Measured 2026-11-03:
+  `dynamic-workflow-report-reads` 65,536-item test 23s wall on tmpfs vs
+  19 min idle (1146s, then fails its 120s timeout) and 26 min under suite
+  load on btrfs.
+  `session-persistence.test.ts:1135` fails on btrfs and passes on tmpfs.
+- Each failing vitest file gets one rerun, alone and at `--maxWorkers=1`.
+  If it passes then, it's reported as FLAKY, which is visible but doesn't
+  fail the run. Retrying failing files together didn't work: under load
+  (another agent's suite, load average ~28), `protocol-unbound-resume`
+  failed 11/11 in a batch and passed 11/11 solo.
+- Tests can leave artifacts in package dirs (adapters' full suite left an
+  untracked `packages/adapters/backup/`). Turbo then counts that package as
+  changed. Check `git status` after full runs.
+- Failures are classified against
+  [known-test-failures.txt](known-test-failures.txt): NEW (exit 1), known,
+  and STALE (a known entry that now passes; remove it). Add entries only
+  with a baseline run on main as evidence.
+- Changed files outside `apps/zcode-cli` are reported as NOT COVERED: root
+  vitest is broken (see the 2026-11-01 battery). A selected run is never a
+  full-suite result.
+
 ## Build and artifact checks
 
 Observed CLI scripts (not a complete clean-bootstrap recipe):

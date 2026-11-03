@@ -528,3 +528,21 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   gate (signing, allowance evidence, Ctrl-C signal path, memory matrix)
   unchanged.
 
+
+### 2026-11-03 — selected test runs (patch/fork-test-runner)
+
+- New fork-owned `apps/zcode-cli/scripts/fork-tests.mjs` (+ `fork-tests.test.mjs`).
+  On patch branches it runs only the tests reachable from what changed. Turbo
+  `...[merge-base]` picks the packages, and vitest `--changed` narrows to the
+  test files that import changed code. Signing and socket-listener always run.
+  `--full` is for sync branches and pre-promote. Upstream tests are selected,
+  never skipped or deleted: that would add sync conflicts and blind sync gates.
+- Each run strips the session env and puts TMPDIR on tmpfs (65k-row SQLite
+  fixture: 23s vs 19 min idle on btrfs). Failing files get a solo rerun, and a
+  pass on rerun is reported as FLAKY. Results are classified against
+  [known-test-failures.txt](docs/fork/known-test-failures.txt), seeded with
+  26 bootstrap failures that main already has (plugin/skill bundle class,
+  cause not investigated). cli without a built `dist/` is reported NOT RUN,
+  never pass. Root-workspace changes are reported NOT COVERED.
+- Policy and measurements: [verification.md](docs/fork/verification.md)
+  「Selected vs full runs」.
