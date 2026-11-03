@@ -46,6 +46,16 @@ append-only session event 记录可恢复状态，包括用户消息、模型结
 
 日志 payload 必须先经过 redactor。默认敏感 key 包括 `apiKey`、`token`、`authorization`、`cookie`、`password`、`secret`、`credential`。
 
+`DefaultLogRedactor` 对已知的数值 usage 计数使用精确、区分大小写的字段白名单，避免把模型 token 数误当作凭据：
+
+- context usage snapshot 的 `tokens`、`totalTokens`（包括分类、消息和 contributor 内的数值计数）。
+- model usage 摘要的 `inputTokens`、`outputTokens`、`totalTokens`、`cacheReadTokens`、`cacheWriteTokens`、`reasoningTokens`。
+- model response diagnostics 的 `usageInputTokens`、`usageOutputTokens`、`usageTotalTokens`、`usageCacheReadTokens`、`usageCacheWriteTokens`、`usageReasoningTokens`。
+
+白名单仅允许有限、非负整数 number 原值通过；不转换字符串，不放行负数、小数、NaN、Infinity、null、对象或数组。白名单字段下的这些非法值仍整体脱敏。其他包含敏感词的字段仍整体脱敏，包括数值 `token`、未知的 `customTokens` 及 `secretInputTokens` 等带敏感前缀的字段；不得按 `Tokens` 后缀或不区分大小写的规则扩展白名单。
+
+该规则同时适用于嵌套 context、数组元素及序列化后的 error/cause context。敏感父字段优先整体脱敏，不能因为内部含有白名单数值而递归放行其内容；原有深度和循环引用限制不变。回归覆盖在 adapters `tests/logging.test.ts`，包括合法计数、非法值、未知/敏感前缀字段、嵌套结构和错误原因链。
+
 错误日志必须保留可诊断的原因链。凡是通过 `logger.error(message, error, context)` 写出的错误，JSONL 中的 `error` 字段必须至少包含外层错误的 `name`、`message`、稳定 `code` / `type`（如果存在），并递归记录 `cause` 的同类摘要。错误对象上的结构化 `context` 也必须进入日志并经过 redactor。`turn.failed` 不能只留下 `UNKNOWN_ERROR`，必须能直接从日志定位原始失败原因，例如 provider 缺少 API key、模型请求非法、权限拒绝或工具执行失败，而不需要再查询 session storage。
 
 CLI/TUI 等用户界面也必须感知系统深层状态：当入口层展示错误、等待、重试、权限、模型、工具或 I/O 状态时，应优先展示稳定的状态码、可操作摘要和安全的 cause 链摘要，而不是只显示最外层包装错误。用户可见摘要必须经过隐私和密钥泄露风险评估，完整 payload 仍只进入受控日志或 debug 路径。

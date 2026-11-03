@@ -12,6 +12,26 @@
 
 非目标：desktop/web/remote 链路改动；opentui 前端改动；插件系统重构。
 
+### 空会话的子任务读取（2026-11-03 修复）
+
+`session/subagents` 是只读投影，不能为了读取而提前持久化空草稿。
+Runtime 的 `isSessionPersisted()` 是存在性事实的唯一所有者；协议 record 的
+`persistence` 只表达发布策略，旧 `session/create` 即使是 `immediate`，
+首条输入前仍可能没有 SQLite session 行。
+
+```text
+session/create → live runtime（尚未持久化）
+  ├─ session/subagents → 空列表 + 当前 revision，不创建行、不报告不存在
+  └─ 首次活动 → runtime 持久化 session → 后续读取使用持久化父子关系
+```
+
+只在持久化父记录缺席且当前连接确实持有未持久化 runtime 时返回空列表，
+不缓存该判断。不存在的 ID，或 runtime 已确认持久化但父记录缺席，
+仍保留 `sessionUnavailable` 错误和原有诊断；底层读取失败不得伪装为空列表。
+若首次读取缺席但 live runtime 此时已完成首次持久化，复读一次父记录，
+避免把首次落盘完成前的旧读取结果误报为持久化数据缺失。
+这不改变 session 所有权、模型选择、首发 admission 或草稿发布策略。
+
 ## 架构
 
 ```

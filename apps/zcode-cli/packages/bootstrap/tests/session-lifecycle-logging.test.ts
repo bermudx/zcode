@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Logger } from "@zcode/contracts";
 import { conversationTopic } from "@zcode/shared/zcode-protocol-v4";
 import {
@@ -117,6 +117,127 @@ describe("session lifecycle diagnostics", () => {
         }),
       }),
     );
+  });
+
+  it.each(["immediate", "deferred"])(
+    "returns an empty subagent list for a live unpersisted %s session",
+    async (persistence) => {
+      const logs: RecordedLog[] = [];
+      const getSession = vi.fn(async () => null);
+      const context = contextWithLogger(createRecordingLogger(logs), {
+        deps: { sessionStore: { getSession } },
+        sessions: new Map([
+          [
+            "sess_draft",
+            {
+              app: { runtime: { isSessionPersisted: () => false } },
+              persistence,
+              stateRevision: 7,
+            },
+          ],
+        ]),
+      });
+
+      await expect(
+        listSessionSubagents(context, { sessionId: "sess_draft", endedLimit: 1 }),
+      ).resolves.toEqual({
+        revision: 7,
+        childSessionIds: [],
+        running: [],
+        ended: { total: 0, items: [] },
+      });
+      expect(getSession).toHaveBeenCalledOnce();
+      expect(logs).toEqual([]);
+    },
+  );
+
+  it("does not hide a missing durable parent behind a stale deferred policy", async () => {
+    const logs: RecordedLog[] = [];
+    const context = contextWithLogger(createRecordingLogger(logs), {
+      deps: { sessionStore: { getSession: async () => null } },
+      sessions: new Map([
+        [
+          "sess_persisted",
+          {
+            app: { runtime: { isSessionPersisted: () => true } },
+            persistence: "deferred",
+            stateRevision: 7,
+          },
+        ],
+      ]),
+    });
+
+    await expect(
+      listSessionSubagents(context, { sessionId: "sess_persisted", endedLimit: 1 }),
+    ).rejects.toThrow("Session not found: sess_persisted");
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        context: expect.objectContaining({
+          event: "zcode_protocol.session.persisted_missing",
+          activeSession: true,
+        }),
+      }),
+    );
+  });
+
+  it("rereads a stale missing parent when first persistence completes during the read", async () => {
+    let persisted = false;
+    const logs: RecordedLog[] = [];
+    const getSession = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        persisted = true;
+        return null;
+      })
+      .mockResolvedValue({ id: "sess_creating", time: { updated: 1 } });
+    const context = contextWithLogger(createRecordingLogger(logs), {
+      deps: { sessionStore: { getSession, messages: async () => [] } },
+      sessions: new Map([
+        [
+          "sess_creating",
+          {
+            app: {
+              runtime: {
+                isSessionPersisted: () => persisted,
+                getProjection: async () => undefined,
+              },
+            },
+            eventStore: { getEvents: async () => [] },
+            stateRevision: 7,
+          },
+        ],
+      ]),
+    });
+
+    await expect(
+      listSessionSubagents(context, { sessionId: "sess_creating", endedLimit: 1 }),
+    ).resolves.toMatchObject({ revision: 7, childSessionIds: [], running: [], ended: { total: 0 } });
+    expect(getSession).toHaveBeenCalledTimes(2);
+    expect(logs).toEqual([]);
+  });
+
+  it("propagates storage failures even when the live parent is unpersisted", async () => {
+    const failure = new Error("fixture session read failed");
+    const context = contextWithLogger(createRecordingLogger([]), {
+      deps: {
+        sessionStore: {
+          getSession: async () => {
+            throw failure;
+          },
+        },
+      },
+      sessions: new Map([
+        [
+          "sess_draft",
+          { app: { runtime: { isSessionPersisted: () => false } }, stateRevision: 1 },
+        ],
+      ]),
+    });
+
+    await expect(
+      listSessionSubagents(context, { sessionId: "sess_draft", endedLimit: 1 }),
+    ).rejects.toBe(failure);
   });
 
   it("includes the session and phase when the gateway hydration source fails", async () => {

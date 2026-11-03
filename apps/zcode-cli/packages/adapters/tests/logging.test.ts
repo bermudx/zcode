@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LogLevel } from "@zcode/contracts";
 import {
+  DefaultLogRedactor,
   LOG_CLEANUP_STARTUP_DELAY_MS,
   cleanupLogRetention,
   createNodeLoggerFactory,
@@ -15,6 +16,105 @@ import {
   resetStorageFsFaultInjectorForTests,
   setStorageFsFaultInjectorForTests,
 } from "../src/storage/fs-fault-injection.js";
+
+const NUMERIC_USAGE_FIELDS = [
+  "tokens",
+  "inputTokens",
+  "outputTokens",
+  "totalTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+  "usageInputTokens",
+  "usageOutputTokens",
+  "usageTotalTokens",
+  "usageCacheReadTokens",
+  "usageCacheWriteTokens",
+  "usageReasoningTokens",
+];
+
+describe("DefaultLogRedactor numeric usage", () => {
+  it.each(NUMERIC_USAGE_FIELDS)("preserves nonnegative integer %s at nested locations", (key) => {
+    const context = {
+      [key]: 0,
+      usage: { [key]: 1234 },
+      categories: [{ contributors: [{ [key]: 42, apiKey: "hidden" }] }],
+    };
+
+    expect(new DefaultLogRedactor().redact(context)).toEqual({
+      [key]: 0,
+      usage: { [key]: 1234 },
+      categories: [{ contributors: [{ [key]: 42, apiKey: "[Redacted]" }] }],
+    });
+  });
+
+  it.each([
+    ["numeric string", "1234"],
+    ["credential string", "secret-value"],
+    ["empty string", ""],
+    ["negative", -1],
+    ["fraction", 0.5],
+    ["NaN", Number.NaN],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["null", null],
+    ["undefined", undefined],
+    ["boolean", true],
+    ["object", { tokens: 42, apiKey: "hidden" }],
+    ["array", [42, "hidden"]],
+    ["boxed number", new Number(42)],
+  ])("redacts %s under every allowed field", (_label, value) => {
+    const context = Object.fromEntries(NUMERIC_USAGE_FIELDS.map((key) => [key, value]));
+
+    expect(new DefaultLogRedactor().redact({ nested: context })).toEqual({
+      nested: Object.fromEntries(NUMERIC_USAGE_FIELDS.map((key) => [key, "[Redacted]"])),
+    });
+  });
+
+  it.each([
+    "token",
+    "customTokens",
+    "accessToken",
+    "refresh_token",
+    "apiKey",
+    "api-key",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "secret",
+    "secretInputTokens",
+    "apiKeyUsageTotalTokens",
+    "authorizationTokens",
+    "credentialTokens",
+    "inputTokensSecret",
+    "myusageInputTokens",
+    "inputTokensExtra",
+    "InputTokens",
+    "USAGETOTALTOKENS",
+  ])("keeps credential and unknown field %s protected", (key) => {
+    for (const value of [1234, "hidden", { tokens: 42, safe: "hidden" }]) {
+      expect(new DefaultLogRedactor().redact({ nested: { [key]: value } })).toEqual({
+        nested: { [key]: "[Redacted]" },
+      });
+    }
+  });
+
+  it("redacts sensitive parents before inspecting allowed counters", () => {
+    const secret = Object.fromEntries(NUMERIC_USAGE_FIELDS.map((key) => [key, 42]));
+    const context = {
+      usage: { inputTokens: 1234, token: secret, credentials: [secret] },
+      authorization: { usage: secret, apiKey: "hidden" },
+      tokens: secret,
+    };
+
+    expect(new DefaultLogRedactor().redact(context)).toEqual({
+      usage: { inputTokens: 1234, token: "[Redacted]", credentials: "[Redacted]" },
+      authorization: "[Redacted]",
+      tokens: "[Redacted]",
+    });
+  });
+});
 
 describe("Node logging adapter", () => {
   it("生产等级保留 TTFT，使用异步写入并沿用脱敏", async () => {
@@ -82,6 +182,56 @@ describe("Node logging adapter", () => {
       expect(entry.context.apiKey).toBe("[Redacted]");
       expect(entry.context.nested.token).toBe("[Redacted]");
       expect(entry.context.nested.safe).toBe("visible");
+    } finally {
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves usage counters in JSONL context and serialized error causes without leaking secrets", async () => {
+    const logDir = await mkdtemp(join(tmpdir(), "zcode-log-usage-"));
+
+    try {
+      const logger = createNodeLoggerFactory({ logDir }).createLogger("test");
+      const cause = Object.assign(new Error("Provider failure"), {
+        context: {
+          usage: { inputTokens: 1234, outputTokens: 0, cacheReadTokens: "hidden" },
+          apiKey: { tokens: 42, secret: "hidden" },
+        },
+      });
+      const error = Object.assign(new Error("Turn failed", { cause }), {
+        context: { usageTotalTokens: 1234, tokens: { totalTokens: 42, secret: "hidden" } },
+      });
+
+      logger.error("Usage diagnostics", error, {
+        usageInputTokens: 1234,
+        usageOutputTokens: 0,
+        snapshot: { totalTokens: 42, categories: [{ tokens: 42 }] },
+        usageReasoningTokens: "hidden",
+        secretInputTokens: 42,
+      });
+
+      const [file] = await readdir(logDir);
+      const content = await readFile(join(logDir, file!), "utf8");
+      expect(JSON.parse(content.trim())).toMatchObject({
+        context: {
+          usageInputTokens: 1234,
+          usageOutputTokens: 0,
+          snapshot: { totalTokens: 42, categories: [{ tokens: 42 }] },
+          usageReasoningTokens: "[Redacted]",
+          secretInputTokens: "[Redacted]",
+        },
+        error: {
+          context: { usageTotalTokens: 1234, tokens: "[Redacted]" },
+          cause: {
+            message: "Provider failure",
+            context: {
+              usage: { inputTokens: 1234, outputTokens: 0, cacheReadTokens: "[Redacted]" },
+              apiKey: "[Redacted]",
+            },
+          },
+        },
+      });
+      expect(content).not.toContain("hidden");
     } finally {
       await rm(logDir, { recursive: true, force: true });
     }

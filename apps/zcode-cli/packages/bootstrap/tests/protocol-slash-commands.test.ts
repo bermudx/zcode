@@ -1,12 +1,42 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as plugins from "../src/plugins.js";
+import { listZCodeCustomCommands } from "../src/custom-commands.js";
 import type { ExecutionPort, ExecutionResult } from "@zcode/contracts";
 import { resolveZCodeBuiltinPromptCommand } from "../src/builtin-prompt-command.js";
 import { resolveZCodeCustomCommandPrompt } from "../src/custom-command-prompt.js";
 
 describe("protocol slash command surface", () => {
+  it("honors disabled plugin config and trusted noPlugins for discovery and input expansion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zcode-no-plugin-commands-"));
+    const resolvePlugins = vi.spyOn(plugins, "resolveZCodePlugins")
+      .mockImplementation(() => { throw new Error("must not resolve plugins"); });
+    try {
+      const commands = join(root, ".zcode", "commands");
+      await mkdir(commands, { recursive: true });
+      await writeCommand(commands, "review", "Workspace review", "Review $ARGUMENTS.");
+      const projectConfigPath = join(root, ".zcode", "config.json");
+      await writeFile(projectConfigPath, JSON.stringify({ plugins: { enabled: false } }));
+      const options = {
+        env: {}, homeDirectory: join(root, "home"), skipUserConfig: true,
+        projectConfigPath, workingDirectory: root,
+      };
+      expect((await listZCodeCustomCommands(options)).commands.map((command) => command.name))
+        .toEqual(["review"]);
+      await writeFile(projectConfigPath, JSON.stringify({ plugins: { enabled: true } }));
+      const prompt = await resolveZCodeCustomCommandPrompt("/review diff", {
+        ...options, noPlugins: true,
+      });
+      expect(prompt).toContain("Review diff.");
+      expect(resolvePlugins).not.toHaveBeenCalled();
+    } finally {
+      resolvePlugins.mockRestore();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it("expands prompt custom commands without taking over reserved builtins", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "zcode-custom-command-prompt-"));
     const workspace = join(tempRoot, "workspace");
