@@ -734,6 +734,20 @@ v4 `sendText`。上游若删除 `session/send`，瘦客户端的输入提交会�
   ACK 时撤下本次临时等待器，只由 core 的真实 queued/drained/discarded 事件持有
   队列投影。不能仅凭 accepted 推断 queued，也不能把已启动的输入重放一遍。
 - 签名仍在 core 的 provider 请求路径，客户端不参与；本迁移不触碰。
+- **旧 `session/create` 会话的首发持久化（core 侧，2026-11-02 live e2e 发现）**：
+  attach 仍用旧 `session/create` 建会话，协议 record 缺省 `persistence:"immediate"`，
+  但 runtime 要到首条输入才落 `session` 行（旧 `session/send` 经 runtime prompt
+  隐式落行，故从未暴露）。v4 输入 admission 原先只在 record 为 `"deferred"` 时
+  先走 `ensureSessionPersistedForExternalActivity`，于是对这类会话直接写
+  `session_input` ledger，撞 `session(id)` 外键，**每一次**提交都以
+  `FOREIGN KEY constraint failed` 失败（fake-core 适配器测试无法发现）。
+  裁决：admission 以 runtime 的落行事实为准——record 为 `"deferred"` **或**
+  `runtime.isSessionPersisted()` 明确为 `false` 时，先经 runtime 统一首发持久化边界
+  落行再写 ledger，并把 record 镜像推进为 `"immediate"`。唯一写者仍是 runtime；
+  不改旧 `session/create` 的缺省值（会改变旧 TUI/headless 的 draft 可见性与
+  关闭语义）。`isSessionPersisted` 缺席（测试桩）不触发，与
+  `reconcileRecordPersistence` 同口径。回归：
+  `bootstrap/tests/v4-legacy-create-admission.test.ts`（真实 sqlite store）。
 
 **附件映射（`attach-v4-input.ts`）**
 

@@ -320,6 +320,20 @@ identity or enable inherited upload/update paths without a separate audit.
   and fail identically on the unmodified baseline (10 more in the entry suites,
   same class); no live-core e2e was run. Remaining legacy protocol surface
   piz still needs is listed in the design doc section above.
+- 2026-11-02 core fix (first live e2e): every attach submit failed with a
+  `session_input → session(id)` FK error. Legacy `session/create` marks the
+  record `persistence:"immediate"` while the runtime only writes the session
+  row on first input; v4 admission trusted the record and wrote the ledger
+  first. Admission now also runs first-persistence when
+  `runtime.isSessionPersisted?.() === false` (absent method = no trigger).
+  Spec bullet in 「输入提交迁移到 v4」 不变量; regression
+  `bootstrap/tests/v4-legacy-create-admission.test.ts` (fails without the fix).
+  Live e2e (dev build on sync+v4 combo, scratch workspace, GLM-5.3): idle
+  submit, guide steer, Ctrl+Q queue/replay, double-Esc stop + new turn,
+  clipboard image upload, exit resume hint + `--resume` replay all pass.
+  Not verified live: signing/allowance on the v4 path. Pre-existing, seen on
+  installed piz too: user abort is logged `model.network.failed` and the UI
+  shows "Model request failed".
 ### 2026-11-01 — promotion of 158a31d2 (per-session compactContextWindow cap)
 
 - Merge `158a31d2` carried `patch/compact-context-window` to `main` unchanged
