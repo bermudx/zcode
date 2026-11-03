@@ -51,7 +51,10 @@ It owns fork direction, branch roles, active patches and maintenance policy.
 - Errors must surface with context. Use existing project loggers; diagnostics
   go to stderr, never protocol stdout. Do not print credentials or secret config.
 - Root and CLI workspace typecheck/lint are separate. Run relevant checks and
-  report actual failures/limits. Real terminal/model behavior and resource cost
+  report actual failures/limits. CLI tests on patch branches:
+  `mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs` (selected); `--full`
+  only for sync/pre-promote or on request. Never `.skip`/delete upstream tests
+  for speed. Real terminal/model behavior and resource cost
   require observation, not claims based on compilation or fixtures.
 - Fix comments explaining bugs should follow upstream's Chinese-comment rule.
   Preserve license and upstream attribution. No inherited release/upload command
