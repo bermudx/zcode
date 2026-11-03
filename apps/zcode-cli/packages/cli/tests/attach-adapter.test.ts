@@ -8,6 +8,7 @@ import { ZCODE_PROTOCOL_VERSION, zcodeProtocolErrorCodes } from "@zcode/shared";
 import { getZCodeCopy } from "@zcode/i18n";
 import { connectAttachClient } from "../src/attach/attach-client.js";
 import { AttachSessionHandle } from "../src/attach/attach-session.js";
+import { uploadAttachment } from "../src/attach/attach-v4-attachments.js";
 import {
   AttachRuntime,
   createAttachPromptHandler,
@@ -1412,6 +1413,228 @@ test("附件寄存失败 → abort 暂存并让 submitPrompt 如实失败", asyn
   }
 });
 
+for (const stage of ["begin", "chunk", "commit"] as const) {
+  test(`abort during attachment ${stage} is handled immediately and never sends the cancelled prompt`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "attach-upload-cancel-"));
+    const controller = new AbortController();
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const core = await startFakeCore(join(dir, "core.sock"), async (request) => {
+      if (request.method === `v4/attachment/${stage}`) await blocked;
+      if (request.method === "v4/attachment/begin") {
+        return { nextChunkIndex: 0, state: "staging", uploadId: request.params.uploadId };
+      }
+      if (request.method === "v4/attachment/chunk") {
+        return { nextChunkIndex: 1, uploadId: request.params.uploadId };
+      }
+      if (request.method === "v4/attachment/commit") return { ref: "zcode-artifact://cancel" };
+      return {};
+    });
+    const runtime = new AttachRuntime({ socketPath: core.socketPath });
+    await runtime.connect();
+    const handle = new AttachSessionHandle({
+      client: () => runtime.currentClient(), sessionId: SID, snapshot: makeSnapshot() as never,
+    });
+    runtime.registerSession(handle);
+    try {
+      const submission = assert.rejects(handle.submitPrompt({
+        attachments: [
+          { content: `data:image/png;base64,${Buffer.alloc(600_000).toString("base64")}`, path: "@first.png", type: "image" },
+          { content: "must not upload", type: "file" },
+        ],
+        text: "cancelled prompt",
+      }, { abortSignal: controller.signal }), /aborted/);
+      await waitFor(() => core.requests.some((r) => r.method === `v4/attachment/${stage}`));
+      const requestsAtAbort = core.requests.length;
+      controller.abort();
+      // 跨过 Node unhandledRejection 的检查轮次，不能等上传完成才观察 turnPromise。
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(core.requests.length, requestsAtAbort, "no unscoped stop while uploading");
+      release?.();
+      await submission;
+      const uploads = core.requests.filter((r) => r.method === "v4/attachment/begin");
+      assert.equal(uploads.length, 1, "do not upload the next attachment");
+      assert.equal(core.requests.some((r) => r.method === "v4/command"), false);
+      if (stage !== "commit") {
+        assert.equal(core.requests.some((r) => r.method === "v4/attachment/abort"), true);
+      }
+      if (stage === "chunk") {
+        assert.equal(core.requests.filter((r) => r.method === "v4/attachment/chunk").length, 1);
+        assert.equal(core.requests.some((r) => r.method === "v4/attachment/commit"), false);
+      }
+    } finally {
+      release?.();
+      await runtime.close();
+      await core.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+}
+
+test("already aborted submissions never upload or send commands", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-pre-abort-"));
+  const core = await startFakeCore(join(dir, "core.sock"), () => ({}));
+  const runtime = new AttachRuntime({ socketPath: core.socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(), sessionId: SID, snapshot: makeSnapshot() as never,
+  });
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    await assert.rejects(handle.submitPrompt({
+      attachments: [{ content: "not uploaded", type: "file" }], text: "no send",
+    }, { abortSignal: controller.signal }), /aborted/);
+    await assert.rejects(handle.submitPrompt("no send", { abortSignal: controller.signal }), /aborted/);
+    assert.equal(core.requests.length, 0);
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("a completed submission detaches its abort listener before the next turn", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-abort-listener-"));
+  const core = await startFakeCore(join(dir, "core.sock"), (request, notify) =>
+    respondV4SendText(notify, request));
+  const runtime = new AttachRuntime({ socketPath: core.socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(), sessionId: SID, snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const controller = new AbortController();
+  try {
+    await handle.submitPrompt("completed", { abortSignal: controller.signal });
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(core.requests.some((r) => r.method === "v4/command" && r.params.type === "stop"), false);
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("a late completion from an aborted turn cannot settle a newer pending prompt", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-stale-complete-"));
+  const core = await startFakeCore(join(dir, "core.sock"), (request, notify) => {
+    if (request.params.type === "stop") return v4AckAccepted(String(request.params.commandId));
+    if ((request.params.payload as { text?: string })?.text === "old") {
+      notify(rawEvent({
+        payload: { inputId: request.params.commandId, input: "old", turnNumber: 1 },
+        seq: 1, turnId: "old-turn", type: "turn_started",
+      }));
+    }
+    return v4AckAccepted(String(request.params.commandId));
+  });
+  const runtime = new AttachRuntime({ socketPath: core.socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(), sessionId: SID, snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const controller = new AbortController();
+  try {
+    const old = assert.rejects(handle.submitPrompt("old", { abortSignal: controller.signal }), /aborted/);
+    await waitFor(() => handle.eventSeq === 1);
+    controller.abort();
+    await old;
+    let settled = false;
+    const next = handle.submitPrompt("new").then((result) => { settled = true; return result; });
+    await waitFor(() => core.requests.filter((r) => r.params.type === "sendText").length === 2);
+    core.notify(rawEvent({
+      payload: { response: "stale" }, seq: 2, turnId: "old-turn", type: "turn_complete",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(settled, false, "explicit old turnId must not fall through to firstPending");
+    const sent = core.requests.find((r) => (r.params.payload as { text?: string })?.text === "new");
+    core.notify(rawEvent({
+      payload: { inputId: sent?.params.commandId, input: "new", turnNumber: 2 },
+      seq: 3, turnId: "new-turn", type: "turn_started",
+    }));
+    core.notify(rawEvent({
+      payload: { response: "fresh" }, seq: 4, turnId: "new-turn", type: "turn_complete",
+    }));
+    assert.equal((await next).response, "fresh");
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+for (const diagnostics of ["logger", "stderr", "throwing logger"] as const) {
+  test(`failed upload cleanup reports via ${diagnostics} without replacing the primary error`, async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "attach-upload-cleanup-"));
+    const core = await startFakeCore(join(dir, "core.sock"), async (request) => {
+      if (request.method === "v4/attachment/begin") {
+        return { nextChunkIndex: 0, state: "staging", uploadId: request.params.uploadId };
+      }
+      if (request.method === "v4/attachment/chunk") throw new Error("primary chunk failure");
+      if (request.method === "v4/attachment/abort") throw new Error("cleanup failure");
+      return {};
+    });
+    const client = await connectAttachClient(core.socketPath);
+    const lines: string[] = [];
+    if (diagnostics !== "logger") {
+      t.mock.method(process.stderr, "write", (line: string) => { lines.push(line); return true; });
+    }
+    try {
+      await assert.rejects(uploadAttachment(client, {
+        bytes: Buffer.from("upload"), connectionId: "conn", fileName: "fixture.txt",
+        mime: "text/plain", sessionId: SID,
+        logger: diagnostics === "stderr" ? undefined : {
+          warn: (message) => {
+            if (diagnostics === "throwing logger") throw new Error("logger failure");
+            lines.push(message);
+          },
+        },
+      }), /primary chunk failure/);
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /attach v4 upload abort cleanup failed \(uploadId attach-up-[^)]+\): cleanup failure/);
+      const begin = core.requests.find((r) => r.method === "v4/attachment/begin");
+      const abort = core.requests.find((r) => r.method === "v4/attachment/abort");
+      assert.equal(abort?.params.uploadId, begin?.params.uploadId);
+    } finally {
+      client.close();
+      await core.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+}
+
+for (const beginReply of ["malformed", "committed"] as const) {
+  test(`unexpected ${beginReply} begin receipt cleans up and never submits a prompt`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "attach-upload-begin-"));
+    const core = await startFakeCore(join(dir, "core.sock"), (request) => {
+      if (request.method === "v4/attachment/begin") {
+        return beginReply === "malformed" ? { state: "bad" } : {
+          nextChunkIndex: 1, ref: "zcode-artifact://unexpected",
+          state: "committed", uploadId: request.params.uploadId,
+        };
+      }
+      return {};
+    });
+    const client = await connectAttachClient(core.socketPath);
+    const handle = new AttachSessionHandle({
+      client, sessionId: SID, snapshot: makeSnapshot() as never,
+    });
+    try {
+      await assert.rejects(handle.submitPrompt({
+        attachments: [{ content: "upload", type: "file" }], text: "no send",
+      }));
+      assert.deepEqual(core.requests.map((r) => r.method), ["v4/attachment/begin", "v4/attachment/abort"]);
+      assert.equal(core.requests[0].params.uploadId, core.requests[1].params.uploadId);
+    } finally {
+      client.close();
+      await core.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+}
+
 // 裸 /skill 在 attach 下走 skills/referenceCatalog（session 权威快照）——
 // 修复前 deps.listSkills 未接线，恒回 "Skill listing is not available in this client."
 test("裸 /skill 经 skills/referenceCatalog 取会话快照并格式化为命令结果", async () => {
@@ -1591,11 +1814,17 @@ const PERMISSION_OPTIONS = [
   },
 ];
 
-function interactionCoreResponder(request: Captured): unknown {
+function interactionCoreResponder(request: Captured, notify: (params: unknown) => void): unknown {
   if (request.method === "session/subscribe") {
     return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
   }
   if (request.method === "v4/command") {
+    if (request.params.type === "sendText") {
+      queueMicrotask(() => notify(rawEvent({
+        payload: { inputId: request.params.commandId, turnNumber: 1 },
+        seq: 1, turnId: "turn-1", type: "turn_started",
+      })));
+    }
     return v4AckAccepted(String(request.params.commandId));
   }
   return {};
@@ -2143,7 +2372,11 @@ async function startBusyFixture(
   dir: string,
   respondSteer: (
     request: Captured,
-  ) => unknown = (request) => v4AckAccepted(String(request.params.commandId)),
+    notify: (params: unknown) => void,
+  ) => unknown = (request) => ({
+    ...v4AckAccepted(String(request.params.commandId)),
+    result: { delivery: "queue", inputId: request.params.commandId, type: "inputAccepted" },
+  }),
 ): Promise<{
   core: FakeCore;
   handle: AttachSessionHandle;
@@ -2159,7 +2392,7 @@ async function startBusyFixture(
       if (request.params.type === "stop") return {};
       if (request.params.type === "sendText") {
         if ((request.params.payload as { requestedDelivery?: string }).requestedDelivery === "guide") {
-          return respondSteer(request);
+          return respondSteer(request, notify);
         }
         const commandId = request.params.commandId as string;
         queueMicrotask(() => {
@@ -2255,6 +2488,76 @@ test("busy sendInput delivery steer → v4 sendText guide，pendingInputId 客�
       0,
       "steer lane must not synthesize turn_steer_queued locally",
     );
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+for (const eventsBeforeAck of [true, false]) {
+  test(`guide admitted after idle returns a real started_turn (events ${eventsBeforeAck ? "before" : "after"} ACK)`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "attach-steer-idle-"));
+    const { core, handle, runtime } = await startBusyFixture(dir, (request, notify) => {
+      const notifyTurns = (): void => {
+        notify(rawEvent({
+          payload: { response: "old done", resultType: "completed" },
+          seq: 2, turnId: "turn-busy", type: "turn_complete",
+        }));
+        notify(rawEvent({
+          payload: { inputId: request.params.commandId, input: "new prompt", turnNumber: 2 },
+          seq: 3, turnId: "turn-raced", type: "turn_started",
+        }));
+        notify(rawEvent({
+          payload: { response: "new response", resultType: "completed" },
+          seq: 4, turnId: "turn-raced", type: "turn_complete",
+        }));
+      };
+      if (eventsBeforeAck) notifyTurns();
+      else setTimeout(notifyTurns, 20);
+      return v4AckAccepted(String(request.params.commandId));
+    });
+    const events: string[] = [];
+    handle.addSink((event) => events.push(event.type));
+    try {
+      const outcome = await handle.sendInput("new prompt", { delivery: "steer" });
+      assert.equal(outcome.kind, "started_turn", "accepted guide is not necessarily queued");
+      if (outcome.kind === "started_turn") {
+        assert.equal(outcome.result.turnId, "turn-raced");
+        assert.equal(outcome.result.response, "new response");
+      }
+      assert.equal(events.includes("turn_steer_queued"), false, "no phantom steering row");
+      assert.equal(events.includes("turn_steer_drained"), false, "TUI started_turn owns user echo");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(core.requests.filter((r) => r.method === "v4/command" && r.params.type === "sendText").length, 2,
+        "the accepted input must never be replayed");
+    } finally {
+      await runtime.close();
+      await core.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+}
+
+test("a late guide rejection still flushes its local fallback after the old turn settled", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-steer-late-reject-"));
+  const { core, handle, runtime } = await startBusyFixture(dir, async (request, notify) => {
+    notify(rawEvent({
+      payload: { response: "done", resultType: "completed" },
+      seq: 2, turnId: "turn-busy", type: "turn_complete",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      commandId: request.params.commandId, reasonCode: "fault.command.inputRejected",
+      revisionAtDecision: 0, status: "rejected",
+    };
+  });
+  try {
+    const outcome = await handle.sendInput("fallback", { delivery: "steer" });
+    assert.equal(outcome.kind, "queued");
+    await waitFor(() => core.requests.filter((r) => r.method === "v4/command" && r.params.type === "sendText").length === 3);
+    const replay = core.requests.filter((r) => r.method === "v4/command" && r.params.type === "sendText")[2];
+    assert.equal((replay.params.payload as { text: string }).text, "fallback");
   } finally {
     await runtime.close();
     await core.close();

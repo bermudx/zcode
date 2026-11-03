@@ -25,6 +25,7 @@ const attachmentFileName = (path: string | undefined): string => {
 };
 
 export type ToV4AttachmentRefsInput = {
+  abortSignal?: AbortSignal;
   sessionId: string;
   connectionId: string;
   attachments: readonly TuiPromptAttachment[];
@@ -40,6 +41,7 @@ export async function toV4AttachmentRefs(
 ): Promise<AttachmentRef[] | undefined> {
   const refs: AttachmentRef[] = [];
   for (const attachment of input.attachments) {
+    if (input.abortSignal?.aborted) throw new Error("aborted");
     const fileName = attachmentFileName(attachment.path);
     if (attachment.type === "image" || attachment.type === "pdf") {
       // 图片/PDF 的 path 是草稿占位符，不是磁盘路径；内容在 data URL 里，必须寄存。
@@ -47,6 +49,7 @@ export async function toV4AttachmentRefs(
       if (!match) continue;
       const mime = match[1];
       const ref = await uploadAttachment(client, {
+        abortSignal: input.abortSignal,
         bytes: Buffer.from(match[2], "base64"),
         connectionId: input.connectionId,
         fileName,
@@ -70,6 +73,7 @@ export async function toV4AttachmentRefs(
     if (attachment.content !== undefined) {
       // 内联文本：寄存后按 URI ref 走 core 的文本解码（≤64KiB 保留正文，超限只留展示元信息）。
       const ref = await uploadAttachment(client, {
+        abortSignal: input.abortSignal,
         bytes: Buffer.from(attachment.content, "utf8"),
         connectionId: input.connectionId,
         fileName,

@@ -14,9 +14,9 @@ import { randomUUID } from "node:crypto";
 import {
   V4_METHODS,
   commandAckSchema,
-  type AttachmentRef,
   type CommandAck,
-  type ModelSelection,
+  type CommandPayloadMap,
+  type CommandType,
 } from "@zcode/shared/zcode-protocol-v4";
 import type { AttachClient } from "./attach-client.js";
 
@@ -42,13 +42,9 @@ export function queueItemIdForCommand(commandId: string): string {
   return `queue_${commandId}`;
 }
 
-export type V4SendTextPayload = {
-  text: string;
-  attachments?: AttachmentRef[];
-  requestedDelivery?: "startNow" | "queue" | "guide";
-  heldQueueDisposition?: "clearQueueAndSend" | "keepQueueAndSend";
-  modelSelection?: ModelSelection;
-};
+// payload 类型直接取共享 CommandPayloadMap，客户端不再私有定义 sendText 字段集——
+// 与 core schema 同源，协议新增字段自动可见，不会漂移。
+export type V4SendTextPayload = CommandPayloadMap["sendText"];
 
 /** ACK 失败族（rejected/stale/noop/failed）：抛带 reasonCode 的错误，调用方据此分流，不静默吞掉。 */
 export class AttachV4CommandError extends Error {
@@ -62,14 +58,15 @@ export class AttachV4CommandError extends Error {
   }
 }
 
-/** 通用 v4/command 提交：accepted/duplicate 视为成功，其余抛 AttachV4CommandError。 */
-export async function sendV4Command(
+/** 通用 v4/command 提交：payload 按 CommandType 关联共享 payload 类型；
+ *  accepted/duplicate 视为成功，其余抛 AttachV4CommandError。 */
+export async function sendV4Command<T extends CommandType>(
   client: AttachClient,
   envelope: {
-    type: string;
+    type: T;
     sessionId: string;
     commandId: string;
-    payload: unknown;
+    payload: CommandPayloadMap[T];
   },
 ): Promise<CommandAck> {
   const raw = await client.request(V4_METHODS.command, {

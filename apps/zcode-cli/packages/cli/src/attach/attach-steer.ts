@@ -2,8 +2,8 @@
 // docs/design/v2/loop/turn-steering.md attach lane 节）：
 // - steer：v4 sendText requestedDelivery:"guide"——core 忙时注入 active turn
 //   pendingInputs（真实 TurnSteerQueued/Drained 事件驱动 UI）；settle 竞态/不可
-//   steer（含附件）时 core admission 自动转 deferred 队列或拒绝，客户端对拒绝回退
-//   本地 follow-up 队列，输入永不丢失；
+//   steer 时 core admission 自动转 deferred 队列或拒绝；idle 竞态则启动新回合，
+//   客户端按 ACK delivery 跟踪，拒绝回退本地 follow-up 队列；
 // - follow-up：客户端本地 FIFO（Ctrl+Q 语义：settle 后作为新回合重放）；
 // - 撤回：本地项就地摘除（合成 discarded 事件），core pendingInputs 项走
 //   session/discardPendingInputs。
@@ -16,7 +16,6 @@ import type { TuiPromptInput, TuiSendInputResult } from "@zcode/tui";
 import type { AttachClient } from "./attach-client.js";
 import {
   AttachV4CommandError,
-  newCommandId,
   queueItemIdForCommand,
   sendTextCommand,
 } from "./attach-v4-command.js";
@@ -53,21 +52,19 @@ export type SteerQueueContext = {
 /**
  * steer lane：v4 sendText requestedDelivery:"guide" 直驱 core admission——忙且
  * steerable 时注入 active turn pendingInputs；真实事件流（常驻订阅 sink）负责 UI
- * 队列区，不挂 per-call sink。pendingInputId 客户端自算（core 以
- * queue_<commandId> 作队列项 id），无需等回执。ACK 失败族（含 admission 拒绝、
- * heldQueueDispositionRequired、no_active_turn 竞态族 fault）回退本地 follow-up
- * 队列——flush 时序在客户端，服务端不擅自承诺；其余错误（网络/协议 schema）如实
- * 上抛，让上层恢复草稿。
+ * 队列区。调用方先登记 commandId 的 turn 等待器，ACK startNow 时返回 undefined，
+ * 由调用方等真实 turn 完成；否则撤下临时等待器并返回 queued。ACK 失败族回退本地
+ * follow-up 队列，其余错误（网络/协议 schema）如实上抛，让上层恢复草稿。
  */
 export async function steerActiveTurn(
   ctx: SteerQueueContext,
   text: string,
   options: SendInputOptions | undefined,
   activeTurnId: string | undefined,
-): Promise<TuiSendInputResult> {
-  const commandId = newCommandId();
+  commandId: string,
+): Promise<TuiSendInputResult | undefined> {
   try {
-    await sendTextCommand(ctx.clientOf(), {
+    const ack = await sendTextCommand(ctx.clientOf(), {
       commandId,
       payload: {
         heldQueueDisposition: "keepQueueAndSend",
@@ -76,6 +73,14 @@ export async function steerActiveTurn(
       },
       sessionId: ctx.sessionId,
     });
+    if (ack.result?.type !== "inputAccepted" || ack.result.inputId !== commandId) {
+      throw new Error("v4 guide ACK is missing its input admission result");
+    }
+    if (ack.result.delivery === "startNow") {
+      // Bug 根因：guide 落在 idle 时会启动新回合，不能伪造永不 drained 的队列行。
+      // started_turn 回包由 TUI 按正常提交插入 user 行，不在此重复投影。
+      return undefined;
+    }
   } catch (error) {
     if (error instanceof AttachV4CommandError) {
       return queueFollowUpInput(ctx, text, options, text, activeTurnId);

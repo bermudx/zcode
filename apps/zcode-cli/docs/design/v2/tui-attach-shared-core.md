@@ -199,7 +199,9 @@ herdr pane 1..N                    每 workspace 一个
 
 ### busy 输入：steer 与 follow-up 队列（pi-mono 对齐，2026-10-25）
 
-core 的 `session/send` 同一时间只接纳一个 prompt（并发时拒绝
+以下旧 `session/send` 行为已被本文「输入提交迁移到 v4」覆盖；v4 guide 的
+idle 竞态会原子接纳为新回合，客户端必须按 ACK 的实际 delivery 跟踪并展示。
+旧 core 的 `session/send` 同一时间只接纳一个 prompt（并发时拒绝
 "A prompt is already running"）。busy 输入分两条 lane，语义对齐
 pi-mono（Enter=steer，Ctrl+Q=queue follow-up）：
 
@@ -710,6 +712,10 @@ v4 `sendText`。上游若删除 `session/send`，瘦客户端的输入提交会�
 - ACK 只证明 admission，不证明 turn 开始。turn 等待器在发送前登记，按 `inputId`
   （= `commandId`）关联 raw 事件 `turn_started`；admission 转排队（ACK
   `result.delivery:"queue"`）时 turn 稍后由 core 起，等待器不变。
+- 所有 turn 等待器创建后立即挂 rejection handler，上传/命令 ACK 尚未完成时的
+  abort 或 turn_error 不得触发进程级 unhandledRejection。abort listener 在提交结束
+  的 finally 摘除；已取消信号在上传前、逐片/commit 前与 sendText 前检查，未提交
+  命令时只清理上传、不向共享 core 发无目标 stop。已发命令则走现有 v4 stop。
 - steer 的 `pendingInputId` = `queue_<commandId>`（`queueItemIdForCommand`，core 以
   `intent.queueItemId` 作队列项 id），客户端无需等回执即可确定；TUI 队列行幂等
   upsert 的键与 core 真实 `TurnSteerQueued` 事件对齐。`queueLength` 客户端只能报 1
@@ -722,7 +728,11 @@ v4 `sendText`。上游若删除 `session/send`，瘦客户端的输入提交会�
   v4 guide 在 admission 被拒（无 active turn 竞态、held 门、payload 门等）都回退
   本地 follow-up 队列，输入永不丢失；传输/schema 错误照旧如实上抛让上层恢复草稿。
   与旧路径的语义差：v4 guide 落在 idle（settle 竞态窗口）时 core 会**立即开新
-  回合**（不再等 settle 后客户端重放），排队行永不出现——输入同样不丢。
+  回合**（不再等 settle 后客户端重放）。steer 发送前同样登记 turn 等待器：
+  ACK `inputAccepted.delivery:"startNow"` 时保留等待器、返回 `started_turn`，
+  由 TUI 的 started_turn 正常提交分支补一条 user 行（不先造 queued 行）；queue/guide
+  ACK 时撤下本次临时等待器，只由 core 的真实 queued/drained/discarded 事件持有
+  队列投影。不能仅凭 accepted 推断 queued，也不能把已启动的输入重放一遍。
 - 签名仍在 core 的 provider 请求路径，客户端不参与；本迁移不触碰。
 
 **附件映射（`attach-v4-input.ts`）**
@@ -738,12 +748,19 @@ v4 `sendText`。上游若删除 `session/send`，瘦客户端的输入提交会�
 - `url` 形状维持丢弃（与旧协议一致）。单个附件不合法（如图形缺 data URL）丢弃
   该项、其余照发；寄存任一步失败 → abort 暂存并让本次提交如实失败（不出现
   "看似提交成功、模型没收到附件"）。
-- 幂等：begin 回 `state:"committed"`（回执丢失后重发）直接取 ref，不再走 chunk。
+- 每次上传使用新 uploadId，当前不重试 begin；不能把不可能发生的 committed 回执
+  分支当成重试保障。上传失败/取消时尽力 abort 暂存；cleanup 失败走 stderr 诊断，
+  不替换最初的上传错误。
 - 上限/校验常量取共享 `PROTOCOL_V4_LIMITS`（20MiB / 512KiB·片 / 64 片）。
 
 **客户端队列归属不变**：Ctrl+Q follow-up 仍是客户端本地 FIFO，settle 后逐条以普通
 `sendText` 重放；core 只拥有 steer(guide) 的 pendingInputs 与 admission 排队项。
 未引入第二个 queue owner。
+
+**兼容边界**：只支持同源码构建、配套安装的 client/core，不为旧 core 回退到
+`session/send`。v4 stop 可暂停 core guide 队列；`keepQueueAndSend` 保留它但不会恢复
+autoDrain。attach 目前只提供 Alt+Up 撤回这些项，没有恢复暂停 core 队列的 UI；
+不得把下一次输入成功解释为队列已恢复，也不得自动开启其他 client 暂停的队列。
 
 **仍留在旧协议（迁移后剩余依赖）**：`session/create|resume|list|subscribe|messages|events`、
 `session/setModel|setMode|setThoughtLevel`、`session/goal`、`session/fork`、
