@@ -624,3 +624,83 @@ resume 命令指向 `zcode --resume`。
   进程调用参数数组（含 `--agent-session-id`、尾部 `--` 分隔）。
 - 上报可靠性单测：单条失败重试后成功且重试复用同一 argv/seq、重试
   耗尽只回调一次 onError、心跳仅在绑定后重申最近状态。
+
+### 输入提交迁移到 v4 `v4/command`（2026-11-01 实现）
+
+背景：`session/send` 在共享协议里已标 `@deprecated（部分）`，Electron 主路径是
+v4 `sendText`。上游若删除 `session/send`，瘦客户端的输入提交会整体失效，故迁移。
+实现落点：`attach-v4-command.ts`（信封/ACK）、`attach-v4-attachments.ts`（寄存
+事务）、`attach-v4-input.ts`（TUI 附件形状 → AttachmentRef）、`attach-session.ts`
+（submitPrompt/abort）、`attach-steer.ts`（steer lane）、`attach-session-stop.ts`
+（stop）。旧 `attach-attachments.ts` 内联映射随迁移删除。
+
+**迁移范围（同一单元，必须一起动）**
+
+| 动作 | 旧 | 新 |
+|---|---|---|
+| 空闲提交 | `session/send` | `v4/command` `sendText`（**不带** `requestedDelivery`） |
+| Enter 忙时 steer | `session/send delivery:"steer"` | `sendText requestedDelivery:"guide"` |
+| Ctrl-C / 退出 stop | `session/stop` | `v4/command` `stop`（fire-and-forget 与 stop&quit 有界回执同源） |
+| 附件 | `attachments[]` 内联 | `v4/attachment/begin→chunk→commit` 得 `AttachmentRef`；磁盘路径文件直接用路径 ref，无需上传 |
+
+**为什么 stop 必须同迁**：v4 起的 turn 不登记旧的 `record.activeAbortController`，
+`session/stop` 只 abort 那个 controller，对 v4 起的 turn 是空操作。v4 `stop`
+经 runtime 前台执行收口（`stopActiveForegroundExecution`），新旧路径起的 turn
+都能停；对 idle 会话是 no-op ACK。
+
+**不变量（实现口径）**
+
+- `commandId` = 客户端生成的 UUID（`attach-cmd-<uuid>`，`newCommandId`）。core 的
+  CommandInbox 以 `(sessionId, commandId)` 持久去重，旧的进程内计数器
+  `attach-input-N` 跨进程会撞，撞上即 `duplicate` 而不执行。
+- 空闲提交不带 `requestedDelivery`。`forceStartNow`（抢占）只由显式
+  `requestedDelivery:"startNow"` 触发；缺省值在 core 侧即使忙时竞态也走 admission
+  自动排队，不会抢占共享 core 上别的 client 的 turn。
+- 一律携带 `heldQueueDisposition:"keepQueueAndSend"`：仅当队列处于 held/choice 时生效
+  （例如 stop 后遗留 guide 项），非破坏性，避免 Ctrl-C 后下一条被
+  `heldQueueDispositionRequired` 拒绝。
+- ACK 只证明 admission，不证明 turn 开始。turn 等待器在发送前登记，按 `inputId`
+  （= `commandId`）关联 raw 事件 `turn_started`；admission 转排队（ACK
+  `result.delivery:"queue"`）时 turn 稍后由 core 起，等待器不变。
+- steer 的 `pendingInputId` = `queue_<commandId>`（`queueItemIdForCommand`，core 以
+  `intent.queueItemId` 作队列项 id），客户端无需等回执即可确定；TUI 队列行幂等
+  upsert 的键与 core 真实 `TurnSteerQueued` 事件对齐。`queueLength` 客户端只能报 1
+  （ACK 不带计数），状态行首帧文案由事件投影修正——刻意为之，不伪造 core 计数。
+- ACK 状态 `accepted`/`duplicate` 视为成功；`rejected`/`stale`/`failed`/`noop` 抛
+  带 `reasonCode` 的 `AttachV4CommandError`，不静默吞掉。信封与回执、上传事务的
+  begin/chunk/commit 回执都按 `@zcode/shared/zcode-protocol-v4` 的共享 zod schema
+  校验，客户端不私有定义线上形状。
+- steer lane 的回退条件从旧 `guard.steerRejected.*` 前缀改为**整个 ACK 失败族**：
+  v4 guide 在 admission 被拒（无 active turn 竞态、held 门、payload 门等）都回退
+  本地 follow-up 队列，输入永不丢失；传输/schema 错误照旧如实上抛让上层恢复草稿。
+  与旧路径的语义差：v4 guide 落在 idle（settle 竞态窗口）时 core 会**立即开新
+  回合**（不再等 settle 后客户端重放），排队行永不出现——输入同样不丢。
+- 签名仍在 core 的 provider 请求路径，客户端不参与；本迁移不触碰。
+
+**附件映射（`attach-v4-input.ts`）**
+
+- `@file` 提及（`{type:"file", path}`）：磁盘路径直传
+  `{ref:<path>, mime:"application/octet-stream"}`——core 按普通 file 路径附件读取，
+  与旧 `localPath` 分支同语义，零上传、零拷贝。
+- 剪贴板图片 / PDF（data URL）：解码后经 begin/chunk/commit 寄存为 artifact URI
+  ref，mime 取 data URL 头；core 在模型请求阶段读回（与 monolith 外置产物同形）。
+- 内联文本（`{type:"file", content}`）：寄存为 `text/plain` URI ref；core 侧
+  ≤64KiB 保留正文，超限只留展示元信息（v4 命令面语义，旧内联 textContent 无此
+  65KiB 截断——pi 前端的 file 附件只产自 `@` 提及，实际不受影响）。
+- `url` 形状维持丢弃（与旧协议一致）。单个附件不合法（如图形缺 data URL）丢弃
+  该项、其余照发；寄存任一步失败 → abort 暂存并让本次提交如实失败（不出现
+  "看似提交成功、模型没收到附件"）。
+- 幂等：begin 回 `state:"committed"`（回执丢失后重发）直接取 ref，不再走 chunk。
+- 上限/校验常量取共享 `PROTOCOL_V4_LIMITS`（20MiB / 512KiB·片 / 64 片）。
+
+**客户端队列归属不变**：Ctrl+Q follow-up 仍是客户端本地 FIFO，settle 后逐条以普通
+`sendText` 重放；core 只拥有 steer(guide) 的 pendingInputs 与 admission 排队项。
+未引入第二个 queue owner。
+
+**仍留在旧协议（迁移后剩余依赖）**：`session/create|resume|list|subscribe|messages|events`、
+`session/setModel|setMode|setThoughtLevel`、`session/goal`、`session/fork`、
+`session/cancelBackgroundTask`、`session/discardPendingInputs`（v4 `deleteQueueItem`
+需要 `baseRevision`，只有 v4 订阅能提供）、`usage/*`、`skills/*`、`commands/*`、
+raw 事件流 `session/rawEvent`。上游删除这些中的任何一个都会再次破坏 piz。
+`session/send` 与 `session/stop` 已不在 piz 客户端的调用面里——上游带走的
+"adapter 附件回退分支"就是本迁移前的旧代码。

@@ -296,3 +296,24 @@ identity or enable inherited upload/update paths without a separate audit.
 - Added the [fork-deleted paths](docs/fork/upstream-sync.md#fork-deleted-paths)
   policy: modify/delete conflicts under those prefixes resolve to
   "stay deleted" mechanically during sync merges.
+
+### 2026-11-01 — attach input submission migrated to v4 `v4/command`
+
+- piz's send path no longer touches `session/send`/`session/stop` (both marked
+  `@deprecated` upstream; host consumers already removed): idle submit and
+  Ctrl+Q replay go through `v4/command` `sendText`, busy Enter through
+  `requestedDelivery:"guide"`, stop (abort + stop&quit) through `v4/command`
+  `stop`, attachments through `v4/attachment/begin→chunk→commit` refs with
+  disk-path direct refs. Client queue ownership (Ctrl+Q local FIFO) unchanged;
+  signing untouched (it lives core-side).
+- New cli attach modules `attach-v4-command/attachments/input.ts`; legacy
+  inline attachment mapper deleted. Envelope/ACK/upload schemas shared with
+  `@zcode/shared/zcode-protocol-v4` (no private wire shapes). Design notes:
+  [tui-attach-shared-core.md](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md)
+  「输入提交迁移到 v4」.
+- Verification (worktree, dev build only — installed `piz` pair NOT touched):
+  `@zcode/cli` typecheck + oxlint clean; `architecture:check --changed` 0 new;
+  attach-adapter suite 43/46 pass — 3 failures spawn a real app-server binary
+  and fail identically on the unmodified baseline (10 more in the entry suites,
+  same class); no live-core e2e was run. Remaining legacy protocol surface
+  piz still needs is listed in the design doc section above.

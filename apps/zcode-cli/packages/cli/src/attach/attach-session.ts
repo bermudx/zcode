@@ -31,7 +31,13 @@ import {
   type SendInputOptions,
   type SteerQueueContext,
 } from "./attach-steer.js";
-import { toProtocolAttachments } from "./attach-attachments.js";
+import { newUploadConnectionId } from "./attach-v4-attachments.js";
+import { toV4AttachmentRefs } from "./attach-v4-input.js";
+import {
+  newCommandId,
+  sendTextCommand,
+  stopCommand,
+} from "./attach-v4-command.js";
 import {
   projectAttachTranscriptMessages,
   projectSessionSnapshotSeed,
@@ -44,8 +50,6 @@ import { resolveTuiModelSelection } from "../command-center/handlers/model.js";
 
 const TURN_STARTED = "turn_started";
 const TURN_END_TYPES = new Set(["turn_complete", "turn_error"]);
-
-const PROMPT_INPUT_ID_PREFIX = "attach-input";
 
 /** 与本地 formatLegacyRuntimeModelValue 同形：providerId/modelId。
  * 状态行按 "/" 取尾段显示；Ctrl+P 轮换、/model 参数匹配都依赖完整 ref。 */
@@ -83,14 +87,15 @@ export class AttachSessionHandle {
   private readonly pendingTurns = new Map<string, PendingTurn>();
   private readonly pendingByTurnId = new Map<string, PendingTurn>();
   private lastSeq = 0;
-  private inputCounter = 0;
   private locale: TuiSubmitPromptResult["locale"];
-  /** core 的 session/send 忙时直接拒绝；busy 输入停本地队列，settle 后自动 flush。 */
+  /** core 忙时 v4 admission 自动排队；busy 输入仍停本地队列，settle 后自动 flush。 */
   private readonly queuedInputs: QueuedLocalInput[] = [];
   private queueCounter = 0;
   private localEventCounter = 0;
   private lastActiveTurnId: string | undefined;
   private flushingQueue = false;
+  /** 附件暂存的 connectionId 命名空间：本句柄一份即可（uploadId 每次上传独立随机）。 */
+  private uploadConnectionId = newUploadConnectionId();
   /** 当前等待中的 permission 回调；同一连接一次交互只挂一个。 */
   activeRequestPermission:
     | ((request: unknown, options?: unknown) => Promise<unknown>)
@@ -245,7 +250,8 @@ export class AttachSessionHandle {
   }
 
   private nextInputId(): string {
-    return `${PROMPT_INPUT_ID_PREFIX}-${++this.inputCounter}`;
+    // v4 锚点：inputId = commandId（turn_started/turn_complete 事件按它关联）。
+    return newCommandId();
   }
 
   /** CommandCenterApp.submitPrompt：普通 prompt（slash 已由 commandCenter 路由走）。 */
@@ -282,9 +288,9 @@ export class AttachSessionHandle {
       options?.abortSignal?.addEventListener(
         "abort",
         () => {
-          void this.clientOf()
-            .request(zcodeProtocolMethods.sessionStop, { sessionId: this.sessionId })
-            .catch(() => undefined);
+          void stopCommand(this.clientOf(), { sessionId: this.sessionId }).catch(
+            () => undefined,
+          );
           this.pendingTurns.delete(inputId);
           reject(new Error("aborted"));
         },
@@ -292,11 +298,25 @@ export class AttachSessionHandle {
       );
     });
     try {
-      await this.clientOf().request(zcodeProtocolMethods.sessionSend, {
-        attachments: typeof prompt === "string" ? undefined : toProtocolAttachments(prompt.attachments),
-        content: text,
-        inputId,
-        modelSelection,
+      // 附件先寄存为 v4 引用（begin/chunk/commit 或磁盘路径直传），失败即中止提交；
+      // 之后 sendText 只携带引用，不内联内容。
+      const attachments =
+        typeof prompt === "string"
+          ? undefined
+          : await toV4AttachmentRefs(this.clientOf(), {
+              attachments: prompt.attachments ?? [],
+              connectionId: this.uploadConnectionId,
+              sessionId: this.sessionId,
+            });
+      await sendTextCommand(this.clientOf(), {
+        commandId: inputId,
+        payload: {
+          ...(attachments ? { attachments } : {}),
+          // held/choice（如 v4 stop 后遗留 guide 项）下保队列放行；非 held 状态是 no-op。
+          heldQueueDisposition: "keepQueueAndSend",
+          ...(modelSelection ? { modelSelection } : {}),
+          text,
+        },
         sessionId: this.sessionId,
       });
     } catch (error) {
@@ -317,12 +337,12 @@ export class AttachSessionHandle {
 
   /**
    * CommandCenterApp.sendInput：busy 时按 delivery 分 lane（pi-mono 对齐）：
-   * - `delivery:"steer"`（Enter）：经 `session/send delivery:"steer"` 直驱 core
-   *   steerTurn 注入 active turn pendingInputs；真实 turn_steer_queued 事件驱动
-   *   UI。拒绝（settle 竞态 / turn 不可 steer / 附件）回退本地 follow-up 队列。
+   * - `delivery:"steer"`（Enter）：v4 sendText requestedDelivery:"guide"——忙且
+   *   steerable 时注入 active turn pendingInputs；ACK 拒绝族回退本地 follow-up
+   *   队列并提示，用户输入永不丢失。
    * - 缺省与 `delivery:"queue"`（Ctrl+Q）：本地排队，settle 后
-   *   flushQueuedInputs 逐条重放为新回合（core 的 session/send 只收一个并发
-   *   prompt，排队语义在客户端）。
+   *   flushQueuedInputs 逐条重放为新回合（v4 空闲提交在 core 忙时会 admission
+   *   自动排队，本地 FIFO 仍是 Ctrl+Q 的语义所有者）。
    */
   async sendInput(
     input: TuiPromptInput,
@@ -360,7 +380,6 @@ export class AttachSessionHandle {
     return {
       clientOf: () => this.clientOf(),
       emitSinkEvent: (type, payload) => this.emitSinkEvent(type, payload),
-      nextInputId: () => this.nextInputId(),
       nextQueueCounter: () => ++this.queueCounter,
       queuedInputs: this.queuedInputs,
       sessionId: this.sessionId,
@@ -731,9 +750,9 @@ export class AttachSessionHandle {
 
   /**
    * "stop & quit" 路径的 server 端停止：turnAbort.abort() 只触发 fire-and-forget
-   * 的 sessionStop，socket 若先关停不掉。这里显式再发一次并等有界回执——
-   * sessionStop 幂等，重复无害；超时按尽力而为返回，退出不被阻塞
-   * （实现见 attach-session-stop.ts）。
+   * 的 v4 stop，socket 若先关停不掉。这里显式再发一次并等有界回执——
+   * v4 stop 对 idle 会话是 no-op ACK，重复无害；超时按尽力而为返回，退出不被
+   * 阻塞（实现见 attach-session-stop.ts）。
    */
   async stopActiveTurn(): Promise<void> {
     await requestSessionStopBestEffort(this.clientOf, this.sessionId);
