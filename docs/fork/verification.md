@@ -904,6 +904,57 @@ against the real provider request, allowance evidence, Ctrl-C signal
 path, memory matrix) remains open and unchanged.
 
 
+## 2026-11-03 — SendMessage queue no longer drops messages (patch/subagent-sendmessage-queue)
+
+Branch `patch/subagent-sendmessage-queue` from `main` `610d1fd3` (not merged,
+not promoted — `piz` still runs the previous frozen pair; no core restarted).
+Spec: [tool/07-subagent.md](../../apps/zcode-cli/docs/design/v2/tool/07-subagent.md)
+"被拒收的消息与终态收口（fork）".
+
+Defect (from reading the code, not observed live): a SendMessage steer that the
+winding-down child turn rejected (`turn_not_steerable` / `no_active_turn`) was
+queued and reported `queued`; the queue was only flushed at sink registration
+and stripped at terminal, so the message was lost. The no-sink case had the
+same fate: the registration flush retries `no_active_turn` for about 200ms,
+but the first turn does context init, SessionStart hooks and submission state
+before `beginActiveTurn`. The 200ms figure comes from reading
+`message-steering.ts`; startup latency was not measured.
+
+Checks actually run and observed:
+
+- New `core/tests/subagent-sendmessage-queue.test.ts`: 9/9 pass. All 9 fail
+  with the `src` diff reverse-applied (queued text, 4× no redelivery timeout,
+  2× missing not-delivered note, 2× steer-retry race returning `queued`).
+- Core typecheck (`turbo run typecheck --filter=@zcode/core`, deps from
+  turbo cache): clean.
+- CLI lint (`npm_execpath=…/pnpm/10.33.2/…/pnpm.cjs mise exec -- node
+  scripts/run-cli-lint.mjs` from the repo root; `pnpm --dir apps/zcode-cli
+  lint` overrides `npm_execpath` back to the ELF and fails): 0 errors,
+  71 warnings (same count as 2026-10-29), none in touched files.
+- `pnpm architecture:check --changed` (after commit): OK, 0 violations.
+- Core vitest full suite: 4177 passed, 22 skipped, 4 failed. All 4 failures
+  were 5s timeouts under load:
+  - `deferred-call-todo-runtime`: 2 tests. Re-run alone, `stream=on` still
+    times out. With the fix reverse-applied it also times out: run 1 failed
+    both modes, run 2 failed `stream=on`. So this failure predates the change
+    and comes from load or timing.
+  - `mcp-tool-bridge` (oversized image): 1 test, passes on rerun.
+  - `tool-search-local-runtime` (`stream=off`): 1 test, passes on rerun.
+- `git merge-tree` against `patch/lead-sidekick`: the merge is clean after
+  moving the `undeliveredMessages` option below the session callbacks.
+  The merged tree was not typechecked. Sidekick queued messages carry no
+  redelivery context, so terminal drain only logs them, which leaves
+  sidekick behavior unchanged.
+
+NOT exercised live (unverified): a real child turn rejecting a steer and
+the background resume that follows; the model's reading of the new
+`queued` text and notification notes; the startup window timing.
+
+Open items:
+- Rewind drops, conservatively, every message queued on an older branch
+  generation.
+- A not-delivered notice for a task whose own branch generation is stale is
+  dropped by the existing per-taskId branch fence.
 ## 2026-11-02 — upstream sync battery (sync/2026-10-30-a60ba6a7, tree 1ce50ce3)
 
 Full battery for the 3.17.1 sync; results summary in
@@ -968,3 +1019,81 @@ NOT exercised live (unverified): a real model turn, live signing or
 extra-usage allowance evidence, snapshot latency improvement, Ctrl-C
 signal path, and the client-count memory matrix. Do not restart live cores;
 core-side fixes apply at each core's next start.
+
+## 2026-11-03 — re-port of patch/subagent-sendmessage-queue onto main 83fc4e65 (3.17.1 sync)
+
+Merge commit `70fc5f3b` (`fork: merge main into patch/subagent-sendmessage-queue`,
+parents `967a6b07` + `83fc4e65`; merge, no rebase, no history rewritten; not
+merged into `main`, not pushed, not promoted, no core restarted). Four
+conflicts, resolved semantically, not by taking a side wholesale:
+
+- `packages/core/src/subagent/completion-notification.ts`: main's 3.17.1
+  rewrite kept intact (`agentType` gone, `stopped` → `killed` + `stoppedBy`,
+  `Agent "<description>" finished / failed: <reason> / was stopped…` summary,
+  structured `localAgentSubagentResult`). The branch's `note` input is
+  re-homed into `formatLocalAgentOutcome`: summary becomes
+  `<outcome>. <note>` when a note is present; the note never enters the
+  structured result. No-note notifications are byte-identical to main's.
+- `packages/core/src/subagent/runner.ts`: branch drain/redelivery logic
+  interleaved with main's shutdown tracking. `UndeliveredMessageContext`
+  now carries the port's `track` (`TrackSubagentWork`); `handleRejectedRunningMessage`
+  and `redeliverUndeliveredMessages` pass `context.track` into
+  `resumeTerminalAgentInBackground`, and every fire-and-forget redelivery
+  (`trackRedelivery`) is registered in the same tracking set, so `close()`
+  cannot return before a terminal-drain resume is registered. Notifications
+  are built as main's `LocalAgentTaskNotificationInput` objects (with `note`,
+  and `stoppedBy: stopped.initiator` on the killed path) and enqueued through
+  main's `enqueueBackgroundNotification`. The resume path keeps main's
+  description fix (summary no longer becomes the task description).
+  Invariants preserved: single owner `registry.pendingMessages`, synchronous
+  drain at terminal settlement, stale-branch partition + log,
+  restore-on-failed-resume notification (`restoreTaskAfterFailedResume`).
+- `docs/design/v2/tool/07-subagent.md`: both sides kept — main's SendMessage
+  schema bullet and the branch's never-silently-dropped bullet; the fork
+  section now names post-merge APIs/statuses (`note` → summary via
+  `formatLocalAgentOutcome`, distinct from the fixed `<note>` element;
+  `failed / killed` with `stoppedBy` wording; `track` threading).
+- This file: both sides' records kept (append-only).
+
+Checks actually run on the combined tree (env stripped with
+`env -u ZCODE_SERVER_BIN -u ZCODE_WORKSPACE_IDENTITY`, pinned mise tools):
+
+- Focused `core/tests/subagent-sendmessage-queue.test.ts`: **9/9 pass**,
+  assertions unchanged — `<status>failed</status>` survives main's format,
+  and the stopped-child expectation now matches through the `killed`
+  registry status (`describeTaskEnd` → "was stopped").
+- First neighbouring run (`subagent-explore` + `background-task-control` +
+  `subagent-background`) failed 49 tests with
+  `TypeError: modelDescriptorOf is not a function`: this worktree's
+  `packages/contracts/dist` predated the 3.17.1 sync (source has the export,
+  dist did not). Diagnosed as a stale-dist precondition, not a code failure.
+  After `turbo run build --filter=@zcode/core` (4 tasks), the four suites
+  together pass **154/154** (queue 9, background-task-control 62,
+  subagent-explore 54, subagent-background 29).
+- Core typecheck (`turbo run typecheck --filter=@zcode/core`): clean.
+- `pnpm architecture:check --changed`: OK, 0 violations (script reports its
+  base as merge-base origin/main).
+- `oxlint` on the three touched core source files: exit 0, no findings.
+- Fork selected runner (`mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs`,
+  base `83fc4e656f`): core **3184 tests, 0 new / 0 known / 0 flaky**,
+  bootstrap selected 8, adapters signing always-run 13, bootstrap
+  socket-listener always-run 4, browser-use/node-repl/provider-regression 0
+  selected. `@zcode/cli` was first NOT RUN (missing `dist/zcode.cjs`,
+  exit 1 — reported as a precondition, not a pass). After building the CLI
+  graph (26 turbo tasks) + `@zcode/model-option-map` + `tsc -b` for the root
+  `packages/shared` / `packages/model-option-map` dists, a `--package
+  @zcode/cli` rerun first showed 640/642 (2 `build-sea` failures, missing
+  root `@zcode/shared` dist — same missing-dist class; `build-sea.test.mjs`
+  then passed 42/42 standalone) and the final `--package @zcode/cli` run
+  **passes** (642 package-script tests + 11 attach-resume-target tests).
+
+NOT RUN / unverified: the full (non-selected) core suite; a live child turn
+rejecting a steer and the background resume that follows; live signing /
+extra-usage allowance evidence; promotion and installed-pair smoke (not
+this branch's job). The branch-era claim "all 9 fail with the fix reverted"
+was not re-run against the merged tree.
+
+Open items (carried from the branch record, unchanged): rewind drops every
+message queued on an older branch generation; a not-delivered notice for a
+task whose own branch generation is stale is dropped by the existing
+per-taskId branch fence.

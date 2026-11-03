@@ -459,7 +459,7 @@ Child finish    -> no parent MCP cleanup
   provider schema 声明 `maxLength: 200`，运行时超长不拒绝：超过 200 个 UTF-16 码元时保留前 199 个码元
   （末尾是高位代理时再去掉它，不切断 emoji 等代理对）并加 `…`；`message` 描述保持 `Plain text message content`。
   交付给 child 的只有 message（无论是否带 summary；summary 只用于预览），只有空白的 message 在 PreToolUse hook 与权限之前判为输入错误，模型收到 `<tool_use_error>message must not be empty</tool_use_error>`，不触发 PostToolUseFailure；resume 终态 child 时沿用原 task 描述，summary 不改描述；App 的 SendMessage 卡片标题用 message 的第一个非空行（与描述里的 "Defaults to the first line" 一致）。`to` 的描述与长度限制不变；不支持名称、teammate 和 `"main"`。
-- running agent 有 active message sink 时直接投递到当前 turn，返回 `steered` 或 `queued`；没有 sink 或 sink 投递失败时进入该 task 的 pending message queue。
+- running agent 有 active message sink 时直接投递到当前 turn，返回 `steered` 或 `queued`；没有 sink 或 sink 投递失败时进入该 task 的 pending message queue。pending queue 里的消息不得被静默丢弃：要么 child 收到，要么主 Agent 被明确告知未投递，见下方「被拒收的消息与终态收口」.
 - terminal agent 仍保留 profile 和 child session id 时，`SendMessage` 复用原 child session 并在后台恢复；目标、profile 或 child session metadata 缺失时返回结构化失败。
 - queued 和 terminal resume 的模型可见成功文案分别固定为：
   `Message queued for delivery to ${to} at its next tool round.`；
@@ -472,6 +472,62 @@ Child finish    -> no parent MCP cleanup
 - `status: "success"` 只表示消息已被 `queued`、`steered` 或通过 `resumed_background` 接受，不表示目标 agent 已读取、接受任务或回复。
 - lowercase `send_message` 是独立的 session mailbox 工具，不复用 `SendMessage` 的 local-agent 路由、output 或 display 语义。
 - 当前没有独立的通用 resume tool，也不把 fork、worktree、team 或跨 session mailbox 能力隐式归入 `SendMessage`。
+
+#### 被拒收的消息与终态收口（fork）
+
+背景缺陷：child 的 turn 收尾时（`steerable=false`，或 turn 已结束而 task 尚未进入终态），
+`steerTurn` 以 `turn_not_steerable` / `no_active_turn` 拒收，sink 抛错；旧实现把消息放进
+`pendingMessages` 并返回 `queued`。该队列只在 sink 注册时 flush 一次，终态收口直接剥离，
+child 不再开新 turn 时消息被静默丢弃，主 Agent 却把随后的完成报告当作已覆盖这条消息。
+sink 注册前排队的消息同样可能丢：注册时的 flush 只对 `no_active_turn` 重试约 200ms，
+child 首个 turn 在 `beginActiveTurn` 之前还要做上下文初始化、SessionStart hooks 和提交态处理，
+超出窗口时 flush 失败、消息回到同一个队列，结局相同。
+
+规则：
+
+- **唯一 owner**：未投递消息只存在于 runtime task registry 的 `pendingMessages`。
+  `SendMessage` 入队时附带恢复上下文（原始 `SendMessage` request、model/modelOverride、
+  入队时的 active branch generation）。其它来源（如 sidekick）的消息不带此上下文，终态时不触发恢复。
+- **终态收口取走队列**：runner 在把 task 写成终态的同一段同步代码里 `drainMessages`
+  （与终态 `registry.update` 之间没有 `await`）。此后任何 `SendMessage` 都看到终态并走
+  terminal resume；此前入队的消息都被这次 drain 取走。flush 与终态 drain 都是同步 drain，
+  同一条消息只会被其中一个取走，因此不会重复投递。
+- **completed**：完成通知照常入队（先于恢复，避免恢复后的新 snapshot 吃掉 `notified`），
+  说明经 `LocalAgentTaskNotificationInput.note` 由 `formatLocalAgentOutcome` 追加到 summary 末尾
+  （`Agent "<description>" finished. <note>`；这不是通知里固定文案的 `<note>` 元素，也不进
+  `originMeta.subagentResult` 结构化终态）：这些消息未体现在本次结果里，agent 正在后台携带它们恢复。随后以第一条消息的
+  上下文复用 terminal resume（`resumed_background` 同一路径、同一 `SubagentSpawned(resumed)`），
+  多条消息按入队顺序以空行拼接为一个恢复 prompt。若此时 task 已被别的 `SendMessage` 恢复为
+  running，则把消息重新入队到新一轮，由其 flush 或终态收口处理。终态收口发起的恢复经
+  `UndeliveredMessageContext.track` 留在 port 的 shutdown 追踪集合内（与 `resumeTerminalAgentInBackground`
+  的 `track` 参数同一 owner），`close()` 不会在恢复注册前返回。
+- **failed / killed**：不恢复（停止或失败的 child 不得被排队消息复活）；终态通知同样经
+  `note` 在 summary 末尾追加「N 条消息未投递」（failed 的 summary 是 `Agent "<description>" failed: <原因>. <note>`，
+  killed 按 `stoppedBy` 是 `was stopped by ZCode` / `was stopped by user` / `was stopped` 后加 `<note>`）。
+- **rewind / 过期分支**：消息入队时的 branch generation 与当前 active generation 不同即丢弃并记日志，
+  不恢复、不通知（该消息所属分支已被回退；此类 task 的完成通知同样按既有 stale-branch 规则丢弃）。
+  保守代价：rewind 到 `SendMessage` 之后的位置也会丢弃此前排队的消息。
+- **恢复失败**：恢复启动失败（profile 缺失、child session 缺失、session ready 失败等）时，
+  直接向主 Agent 入队一条未投递通知（按 taskId 走既有 branch fencing），不再静默。
+- **投递途中进入终态**：sink 拒收需要约 200ms 重试；若重试期间 task 已进入终态，`SendMessage`
+  不再入队：终态为 completed 时直接走 terminal resume（返回 `resumed_background`），
+  其它终态返回 `status: "failed"` 并说明未投递。已被重新恢复为 running 时入新一轮队列。
+- **模型可见文案**：sink 拒收后入队仍返回 `delivery: "queued"`（契约枚举不变），文案改为：
+  `Agent ${to} is finishing its current turn and could not take the message mid-turn. It will be resumed in the background with your message once that turn ends; the completion notification for the current turn will not reflect it, and you'll be notified again when the resumed run finishes. If the agent fails or is stopped first, you'll be told the message was not delivered.`
+  sink 尚未注册时的 `queued` 文案保持原样。
+
+事件顺序（completed 路径）：
+
+```text
+lead SendMessage ──► sink.send ──► steerTurn rejected (turn_not_steerable / no_active_turn)
+                                   └─► registry.get: running → queueMessage(+恢复上下文) → "queued"(新文案)
+                                       completed → terminal resume → "resumed_background"
+                                       failed/killed → status failed（未投递）
+child turn 结束 ─► runExploreAgent 返回 ─► 写 artifacts (await)
+                 ─► [同步] drainMessages → registry.update(completed) → 完成通知(含未投递说明)入队
+                 ─► 事件发出 ─► 有带上下文且同分支的消息 → terminal resume(合并 prompt)
+                                    └─ 失败 → 未投递通知入队
+```
 
 ### RespondToCoordinator 当前范围
 

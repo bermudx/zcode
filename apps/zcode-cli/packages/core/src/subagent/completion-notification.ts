@@ -16,6 +16,8 @@ export interface LocalAgentTaskNotificationInput {
   agentId: string;
   description: string;
   error?: string;
+  /** fork: 追加到 summary 末尾的补充说明（如终态时未体现在结果中的 SendMessage 消息）。 */
+  note?: string;
   outputFile: string;
   parentToolCallId: string;
   result?: string;
@@ -81,6 +83,15 @@ function failureReason(error: string | undefined): string {
 
 // summary 措辞。失败原因直接跟在 "failed: " 后面，与 localAgentSubagentResult 的 error 相同。
 function formatLocalAgentOutcome(
+  input: Pick<LocalAgentTaskNotificationInput, "error" | "note" | "status" | "stoppedBy">,
+): string {
+  const outcome = formatLocalAgentOutcomeText(input);
+  // 修复原因：终态收口取走的 SendMessage 消息必须在通知里说明去向，否则主 Agent 会把
+  // 完成报告当成已覆盖这些消息。note 只进模型可见的 summary，不进结构化终态。
+  return input.note ? `${outcome}. ${input.note}` : outcome;
+}
+
+function formatLocalAgentOutcomeText(
   input: Pick<LocalAgentTaskNotificationInput, "error" | "status" | "stoppedBy">,
 ): string {
   if (input.status === "completed") return "finished";

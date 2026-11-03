@@ -1,6 +1,8 @@
 import type {
   ModelUsage,
   SessionId,
+  SubagentSendMessageOptions,
+  SubagentSendMessageRequest,
   SubagentTaskSnapshot,
   TraceContext,
   TurnId,
@@ -34,6 +36,20 @@ export interface RuntimeTaskPendingMessage {
   queuedAt: Date;
   summary?: string;
   traceContext?: TraceContext;
+  /**
+   * fork: SendMessage 入队时记下的恢复上下文。child turn 收尾时拒收的消息留在队列里，
+   * 终态收口据此在后台恢复 child 投递；不带此字段的消息（如 sidekick）终态时不恢复。
+   */
+  redelivery?: RuntimeTaskMessageRedelivery;
+}
+
+/** fork: 终态收口恢复 child 投递排队消息所需的 SendMessage 上下文。 */
+export interface RuntimeTaskMessageRedelivery {
+  request: SubagentSendMessageRequest;
+  model?: SubagentSendMessageOptions["model"];
+  modelOverride?: SubagentSendMessageOptions["modelOverride"];
+  /** 入队时的 active branch generation；rewind 后不再恢复。 */
+  branchGeneration?: number;
 }
 
 export interface RuntimeTaskMessageSink {
@@ -81,6 +97,8 @@ export interface RuntimeTaskRegistry {
   remove(id: string): void;
   requestBackground(id: string): boolean;
   setActiveBranchGeneration?(generation: number): void;
+  /** fork: 当前 active branch generation，用于排队消息的过期分支判定。 */
+  getActiveBranchGeneration?(): number;
   update(
     id: string,
     patcher: (task: RuntimeTaskSnapshot) => RuntimeTaskSnapshot,
@@ -147,6 +165,10 @@ export class InMemoryRuntimeTaskRegistry implements RuntimeTaskRegistry {
 
   setActiveBranchGeneration(generation: number): void {
     this.activeBranchGeneration = generation;
+  }
+
+  getActiveBranchGeneration(): number {
+    return this.activeBranchGeneration;
   }
 
   update(

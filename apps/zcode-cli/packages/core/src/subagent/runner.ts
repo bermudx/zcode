@@ -64,6 +64,7 @@ import {
 import {
   InMemoryRuntimeTaskRegistry,
   isTerminalRuntimeTask,
+  type RuntimeTaskMessageRedelivery,
   type RuntimeTaskMessageSink,
   type RuntimeTaskPendingMessage,
   type RuntimeTaskRegistry,
@@ -174,6 +175,13 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
   });
   const getProfiles = () => options.getAgentDefinitions?.().activeAgents ?? initialProfiles;
   const autoBackgroundMs = normalizeAutoBackgroundMs(options.autoBackgroundMs);
+  const undeliveredMessages: UndeliveredMessageContext = {
+    abortControllers,
+    getProfiles,
+    options,
+    registry,
+    track,
+  };
 
   const port: SubagentPort & { start: NonNullable<SubagentPort["start"]> } = {
     async launch(
@@ -292,6 +300,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
             );
             readyGate.resolve();
           },
+          undeliveredMessages,
         },
       );
       void completionPromise.catch((error: unknown) => readyGate.reject(error));
@@ -360,7 +369,14 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
           void track(
             completionPromise
               .then((completed) =>
-                finalizeBackgroundCompletion(options, request, lifecycle, registry, completed),
+                finalizeBackgroundCompletion(
+                  options,
+                  request,
+                  lifecycle,
+                  registry,
+                  completed,
+                  undeliveredMessages,
+                ),
               )
               .catch((error) =>
                 finalizeBackgroundFailure(options, request, lifecycle, registry, error),
@@ -379,6 +395,12 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
         borrowedForegroundAgentIds.delete(lifecycle.agentId);
 
         await writeCompletedAgentArtifacts(lifecycle, request, completed.output);
+        const undelivered = takeUndeliveredMessages(
+          options,
+          registry,
+          lifecycle.agentId,
+          lifecycle.runTraceContext,
+        );
         registry.update(lifecycle.agentId, (task) => ({
           ...withoutRuntimeMessageState(task),
           status: "completed",
@@ -419,6 +441,16 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
           totalToolUseCount: completed.output.totalToolUseCount,
           totalTokens: completed.output.totalTokens,
         });
+        trackRedelivery(
+          undeliveredMessages,
+          redeliverUndeliveredMessages(
+            options,
+            undeliveredMessages,
+            lifecycle.agentId,
+            undelivered,
+            lifecycle.runTraceContext,
+          ),
+        );
 
         return completed.output;
       } catch (error) {
@@ -428,6 +460,12 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
         const totalDurationMs = Date.now() - lifecycle.startedAt;
         const errorMessage = error instanceof Error ? error.message : String(error);
         await writeFailedAgentArtifacts(lifecycle, request, errorMessage);
+        const undelivered = takeUndeliveredMessages(
+          options,
+          registry,
+          lifecycle.agentId,
+          lifecycle.runTraceContext,
+        );
         registry.update(lifecycle.agentId, (task) => ({
           ...withoutRuntimeMessageState(task),
           status: "failed",
@@ -451,6 +489,17 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
             totalDurationMs,
             error: errorMessage,
           },
+        );
+        // 前台失败没有完成通知可附说明；task 已是 failed，这里只会告知主 Agent 未投递。
+        trackRedelivery(
+          undeliveredMessages,
+          redeliverUndeliveredMessages(
+            options,
+            undeliveredMessages,
+            lifecycle.agentId,
+            undelivered,
+            lifecycle.runTraceContext,
+          ),
         );
 
         if (isCoreError(error)) {
@@ -546,6 +595,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
               readyGate.resolve();
             },
             onSessionStartFailed: readyGate.reject,
+            undeliveredMessages,
           },
           taskAbort.dispose,
         ),
@@ -615,15 +665,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
       request: SubagentSendMessageRequest,
       sendOptions?: SubagentSendMessageOptions,
     ): Promise<SubagentSendMessageResult> {
-      return sendMessageToLocalAgent(
-        options,
-        getProfiles,
-        registry,
-        abortControllers,
-        request,
-        sendOptions,
-        track,
-      );
+      return sendMessageToLocalAgent(undeliveredMessages, request, sendOptions);
     },
   };
 
@@ -989,14 +1031,11 @@ function createSubagentLifecycleFromTask(
 }
 
 async function sendMessageToLocalAgent(
-  options: ExploreSubagentPortOptions,
-  getProfiles: () => readonly AgentProfile[],
-  registry: RuntimeTaskRegistry,
-  abortControllers: Map<string, AbortController>,
+  context: UndeliveredMessageContext,
   request: SubagentSendMessageRequest,
   sendOptions: SubagentSendMessageOptions | undefined,
-  track: <T>(work: Promise<T>, critical?: boolean) => Promise<T>,
 ): Promise<SubagentSendMessageResult> {
+  const { abortControllers, options, registry } = context;
   if (sendOptions?.signal?.aborted) {
     return createSendMessageFailure(request, `SendMessage was aborted for ${request.to}.`);
   }
@@ -1011,39 +1050,112 @@ async function sendMessageToLocalAgent(
 
   const message = createRuntimeTaskPendingMessage(request);
   if (!isTerminalRuntimeTask(task)) {
-    return deliverMessageToRunningAgent(registry, task, message);
+    return deliverMessageToRunningAgent(context, task, message, request, sendOptions);
   }
 
   return resumeTerminalAgentInBackground(
     options,
-    getProfiles(),
+    context.getProfiles(),
     registry,
     abortControllers,
     task,
     request,
     message,
     sendOptions,
-    track,
+    context.track,
   );
 }
 
 async function deliverMessageToRunningAgent(
-  registry: RuntimeTaskRegistry,
+  context: UndeliveredMessageContext,
   task: RuntimeTaskSnapshot,
   message: RuntimeTaskPendingMessage,
+  request: SubagentSendMessageRequest,
+  sendOptions?: SubagentSendMessageOptions,
 ): Promise<SubagentSendMessageResult> {
+  const { registry } = context;
+  // 排队副本带上恢复上下文：队列在终态收口时据此在后台恢复 child，而不是随终态被剥离。
+  const queued: RuntimeTaskPendingMessage = {
+    ...message,
+    redelivery: createMessageRedelivery(registry, request, sendOptions),
+  };
   if (task.messageSink) {
     try {
       const delivery = await task.messageSink.send(message);
       return createSendMessageSuccess(task, message, delivery);
-    } catch {
-      registry.queueMessage(task.taskId, message);
-      return createSendMessageSuccess(task, message, "queued");
+    } catch (error) {
+      return handleRejectedRunningMessage(context, task, queued, request, sendOptions, error);
     }
   }
 
-  registry.queueMessage(task.taskId, message);
+  registry.queueMessage(task.taskId, queued);
   return createSendMessageSuccess(task, message, "queued");
+}
+
+async function handleRejectedRunningMessage(
+  context: UndeliveredMessageContext,
+  task: RuntimeTaskSnapshot,
+  message: RuntimeTaskPendingMessage,
+  request: SubagentSendMessageRequest,
+  sendOptions: SubagentSendMessageOptions | undefined,
+  error: unknown,
+): Promise<SubagentSendMessageResult> {
+  const { options, registry } = context;
+  // 修复说明：child turn 收尾时（steerable=false / no_active_turn）sink 拒收。旧实现入队后报
+  // "queued"，但该队列只在 sink 注册时 flush、终态时被剥离，消息被静默丢弃而主 Agent 以为已送达。
+  // 拒收需重试约 200ms，期间 task 可能已进入终态，所以必须重新读取当前 snapshot 再决定去向。
+  const current = registry.get(task.taskId);
+  options.logger?.info("Subagent rejected a mid-turn message", {
+    ...traceContextToLogContext(request.trace),
+    agentId: task.agentId,
+    currentStatus: current?.status ?? "missing",
+    errorMessage: error instanceof Error ? error.message : String(error),
+    event: "subagent.message.steer_rejected",
+    messageId: message.id,
+    module: "core.subagent",
+  });
+  if (current && !isTerminalRuntimeTask(current)) {
+    registry.queueMessage(current.taskId, message);
+    return {
+      ...createSendMessageSuccess(current, message, "queued"),
+      message: formatRejectedMessageQueuedText(request.to),
+    };
+  }
+  if (current?.status === "completed") {
+    return resumeTerminalAgentInBackground(
+      options,
+      context.getProfiles(),
+      registry,
+      context.abortControllers,
+      current,
+      request,
+      message,
+      sendOptions,
+      context.track,
+    );
+  }
+  return createSendMessageFailure(
+    request,
+    `Message was not delivered: agent ${request.to} ${describeTaskEnd(current?.status)} before it could receive it.`,
+  );
+}
+
+function formatRejectedMessageQueuedText(to: string): string {
+  return `Agent ${to} is finishing its current turn and could not take the message mid-turn. It will be resumed in the background with your message once that turn ends; the completion notification for the current turn will not reflect it, and you'll be notified again when the resumed run finishes. If the agent fails or is stopped first, you'll be told the message was not delivered.`;
+}
+
+function createMessageRedelivery(
+  registry: RuntimeTaskRegistry,
+  request: SubagentSendMessageRequest,
+  sendOptions?: SubagentSendMessageOptions,
+): RuntimeTaskMessageRedelivery {
+  const branchGeneration = registry.getActiveBranchGeneration?.();
+  return {
+    request,
+    ...(sendOptions?.model ? { model: sendOptions.model } : {}),
+    ...(sendOptions?.modelOverride ? { modelOverride: sendOptions.modelOverride } : {}),
+    ...(branchGeneration === undefined ? {} : { branchGeneration }),
+  };
 }
 
 async function resumeTerminalAgentInBackground(
@@ -1055,7 +1167,7 @@ async function resumeTerminalAgentInBackground(
   request: SubagentSendMessageRequest,
   message: RuntimeTaskPendingMessage,
   sendOptions: SubagentSendMessageOptions | undefined,
-  track: <T>(work: Promise<T>, critical?: boolean) => Promise<T>,
+  track: TrackSubagentWork,
 ): Promise<SubagentSendMessageResult> {
   const profile = profiles.find((candidate) => candidate.name === task.agentType);
   if (!profile) {
@@ -1104,7 +1216,7 @@ async function resumeTerminalAgentInBackground(
   } catch (error) {
     // SendMessage resume setup 失败不能覆盖原 terminal task；
     // 还原旧 snapshot，避免一个未启动的新 turn 卡成 running。
-    registry.register(previousTask);
+    restoreTaskAfterFailedResume(options, registry, previousTask, error, lifecycle.runTraceContext);
     throw error;
   }
 
@@ -1123,6 +1235,13 @@ async function resumeTerminalAgentInBackground(
       },
       {
         resumeFromStore: true,
+        undeliveredMessages: {
+          abortControllers,
+          getProfiles: () => profiles,
+          options,
+          registry,
+          track,
+        },
         onSessionReady: async () => {
           await emitSubagentEvent(
             options,
@@ -1154,7 +1273,7 @@ async function resumeTerminalAgentInBackground(
     await readyGate.promise;
   } catch (error) {
     taskAbort.abort(error);
-    registry.register(previousTask);
+    restoreTaskAfterFailedResume(options, registry, previousTask, error, lifecycle.runTraceContext);
     throw error;
   }
   // terminal 状态属于旧 snapshot，但 resume 输出路径属于新 lifecycle；
@@ -1253,7 +1372,12 @@ async function runAgentToCompletion(
       permissionMode: lifecycle.profile.permissionMode,
       prompt: request.prompt,
       profile: lifecycle.profile,
-      registerMessageSink: createMessageSinkRegistration(options, lifecycle, registry),
+      registerMessageSink: createMessageSinkRegistration(
+        options,
+        lifecycle,
+        registry,
+        executionOptions.undeliveredMessages,
+      ),
       reportActivity: monitorOptions.reportActivity,
       resumeFromStore: executionOptions.resumeFromStore,
       systemPrompt: lifecycle.profile.systemPrompt,
@@ -1460,7 +1584,14 @@ async function runBackgroundAgent(
         },
       },
     );
-    await finalizeBackgroundCompletion(options, request, lifecycle, registry, completed);
+    await finalizeBackgroundCompletion(
+      options,
+      request,
+      lifecycle,
+      registry,
+      completed,
+      executionOptions.undeliveredMessages,
+    );
   } catch (error) {
     if (!sessionReady) {
       executionOptions.onSessionStartFailed?.(error);
@@ -1474,6 +1605,8 @@ async function runBackgroundAgent(
 
 interface SubagentExecutionOptions {
   resumeFromStore?: boolean;
+  /** fork: 终态收口时恢复 child 投递排队消息所需的 port 依赖。 */
+  undeliveredMessages?: UndeliveredMessageContext;
   onSessionReady?: () => Promise<void>;
   onSessionStartFailed?: (error: unknown) => void;
 }
@@ -1509,13 +1642,14 @@ function createMessageSinkRegistration(
   options: ExploreSubagentPortOptions,
   lifecycle: SubagentLifecycle,
   registry: RuntimeTaskRegistry,
+  undeliveredMessages: UndeliveredMessageContext | undefined,
 ): (sink: RuntimeTaskMessageSink) => void {
   return (sink) => {
     registry.update(lifecycle.agentId, (task) => ({
       ...task,
       messageSink: sink,
     }));
-    void flushPendingMessages(options, lifecycle, registry, sink);
+    void flushPendingMessages(options, lifecycle, registry, sink, undeliveredMessages);
   };
 }
 
@@ -1524,6 +1658,7 @@ async function flushPendingMessages(
   lifecycle: SubagentLifecycle,
   registry: RuntimeTaskRegistry,
   sink: RuntimeTaskMessageSink,
+  undeliveredMessages: UndeliveredMessageContext | undefined,
 ): Promise<void> {
   const pending = registry.drainMessages(lifecycle.agentId);
   for (let index = 0; index < pending.length; index++) {
@@ -1532,8 +1667,32 @@ async function flushPendingMessages(
     try {
       await sink.send(message);
     } catch (error) {
-      for (const undelivered of pending.slice(index)) {
-        registry.queueMessage(lifecycle.agentId, undelivered);
+      const rest = pending.slice(index);
+      const current = registry.get(lifecycle.agentId);
+      if (current && !isTerminalRuntimeTask(current)) {
+        for (const undelivered of rest) {
+          registry.queueMessage(lifecycle.agentId, undelivered);
+        }
+      } else {
+        // 修复说明：flush 重试期间 task 可能已进入终态，此时重新入队会写进终态 snapshot、
+        // 再无人读取；改为按终态收口规则恢复 child 或告知主 Agent。
+        const redeliverable = takeUndeliveredMessages(
+          options,
+          registry,
+          lifecycle.agentId,
+          lifecycle.runTraceContext,
+          rest,
+        );
+        trackRedelivery(
+          undeliveredMessages,
+          redeliverUndeliveredMessages(
+            options,
+            undeliveredMessages,
+            lifecycle.agentId,
+            redeliverable,
+            lifecycle.runTraceContext,
+          ),
+        );
       }
       options.logger?.warn("Failed to flush pending subagent message", {
         ...traceContextToLogContext(lifecycle.runTraceContext),
@@ -1580,6 +1739,285 @@ function withoutRuntimeMessageState(task: RuntimeTaskSnapshot): RuntimeTaskSnaps
   return snapshot;
 }
 
+// ------------------------------------------------------------
+// fork: 被拒收 / 未 flush 的 SendMessage 消息的终态收口（spec: tool/07-subagent.md）
+// ------------------------------------------------------------
+
+/** port 的 shutdown 工作追踪；终态收口发起的恢复必须留在同一 owner 下等待。 */
+type TrackSubagentWork = <T>(work: Promise<T>, critical?: boolean) => Promise<T>;
+
+interface UndeliveredMessageContext {
+  abortControllers: Map<string, AbortController>;
+  getProfiles: () => readonly AgentProfile[];
+  options: ExploreSubagentPortOptions;
+  registry: RuntimeTaskRegistry;
+  track: TrackSubagentWork;
+}
+
+type RedeliverableMessage = RuntimeTaskPendingMessage & {
+  redelivery: RuntimeTaskMessageRedelivery;
+};
+
+type DroppedUndeliveredMessage = {
+  message: RuntimeTaskPendingMessage;
+  reason: "no_redelivery_context" | "stale_branch";
+};
+
+function partitionUndeliveredMessages(
+  registry: RuntimeTaskRegistry,
+  messages: readonly RuntimeTaskPendingMessage[],
+): { dropped: DroppedUndeliveredMessage[]; redeliverable: RedeliverableMessage[] } {
+  const activeGeneration = registry.getActiveBranchGeneration?.();
+  const dropped: DroppedUndeliveredMessage[] = [];
+  const redeliverable: RedeliverableMessage[] = [];
+  for (const message of messages) {
+    const { redelivery } = message;
+    if (!redelivery) {
+      dropped.push({ message, reason: "no_redelivery_context" });
+    } else if (
+      activeGeneration !== undefined &&
+      redelivery.branchGeneration !== undefined &&
+      redelivery.branchGeneration !== activeGeneration
+    ) {
+      dropped.push({ message, reason: "stale_branch" });
+    } else {
+      redeliverable.push({ ...message, redelivery });
+    }
+  }
+  return { dropped, redeliverable };
+}
+
+function logDroppedUndeliveredMessages(
+  options: ExploreSubagentPortOptions,
+  agentId: string,
+  dropped: readonly DroppedUndeliveredMessage[],
+  traceContext: TraceContext,
+): void {
+  for (const { message, reason } of dropped) {
+    options.logger?.info("Dropped queued subagent message at terminal settlement", {
+      ...traceContextToLogContext(traceContext),
+      agentId,
+      event: "subagent.message.terminal_dropped",
+      messageId: message.id,
+      module: "core.subagent",
+      reason,
+    });
+  }
+}
+
+/** 取走（或接收已取走的）排队消息，记录不恢复的消息，返回可恢复投递的消息。 */
+function takeUndeliveredMessages(
+  options: ExploreSubagentPortOptions,
+  registry: RuntimeTaskRegistry,
+  agentId: string,
+  traceContext: TraceContext,
+  messages: readonly RuntimeTaskPendingMessage[] = registry.drainMessages(agentId),
+): RedeliverableMessage[] {
+  const { dropped, redeliverable } = partitionUndeliveredMessages(registry, messages);
+  logDroppedUndeliveredMessages(options, agentId, dropped, traceContext);
+  return redeliverable;
+}
+
+function describeTaskEnd(status: RuntimeTaskSnapshot["status"] | undefined): string {
+  if (status === undefined) return "is no longer tracked";
+  if (status === "killed" || status === "stopped") return "was stopped";
+  if (status === "failed" || status === "completed") return status;
+  return `ended (${status})`;
+}
+
+function describeUndeliveredMessagesForNotification(
+  count: number,
+  status: RuntimeTaskSnapshot["status"],
+): string | undefined {
+  if (count === 0) return undefined;
+  const subject = `${count} message(s) sent with SendMessage`;
+  return status === "completed"
+    ? `${subject} arrived after this turn stopped accepting input and are not reflected in this result; the agent is being resumed in the background with them and you'll be notified when that run finishes.`
+    : `${subject} were not delivered: the agent ${describeTaskEnd(status)} before it could receive them.`;
+}
+
+/** 终态恢复与 port shutdown 共用同一追踪集合，避免 close 在恢复注册前返回。 */
+function trackRedelivery(
+  context: UndeliveredMessageContext | undefined,
+  work: Promise<void>,
+): void {
+  if (context) void context.track(work);
+  else void work;
+}
+
+/**
+ * 终态后处理已取走的消息：task 已被别的 SendMessage 恢复为 running 时重新入队给新一轮；
+ * completed 时合并为一个 prompt 走 terminal resume；其它终态或恢复失败时告知主 Agent。
+ */
+async function redeliverUndeliveredMessages(
+  options: ExploreSubagentPortOptions,
+  context: UndeliveredMessageContext | undefined,
+  agentId: string,
+  messages: readonly RedeliverableMessage[],
+  traceContext: TraceContext,
+): Promise<void> {
+  const [first] = messages;
+  if (!first) return;
+  if (!context) {
+    notifyLeadUndeliveredMessages(
+      options,
+      agentId,
+      messages,
+      "no resume path is available",
+      traceContext,
+    );
+    return;
+  }
+  const { registry } = context;
+  const task = registry.get(agentId);
+  if (task && !isTerminalRuntimeTask(task)) {
+    for (const message of messages) registry.queueMessage(agentId, message);
+    options.logger?.info("Requeued subagent messages into the resumed run", {
+      ...traceContextToLogContext(traceContext),
+      agentId,
+      event: "subagent.message.requeued",
+      messageCount: messages.length,
+      module: "core.subagent",
+    });
+    return;
+  }
+  if (task?.status !== "completed") {
+    notifyLeadUndeliveredMessages(
+      options,
+      agentId,
+      messages,
+      `the agent ${describeTaskEnd(task?.status)} before it could receive them`,
+      traceContext,
+    );
+    return;
+  }
+  const { model, modelOverride } = first.redelivery;
+  try {
+    const result = await resumeTerminalAgentInBackground(
+      options,
+      context.getProfiles(),
+      registry,
+      context.abortControllers,
+      task,
+      mergeRedeliveryRequest(messages),
+      first,
+      { ...(model ? { model } : {}), ...(modelOverride ? { modelOverride } : {}) },
+      context.track,
+    );
+    if (result.status === "failed") {
+      notifyLeadUndeliveredMessages(
+        options,
+        agentId,
+        messages,
+        `resuming the agent failed: ${result.error ?? result.message ?? "unknown error"}`,
+        traceContext,
+      );
+      return;
+    }
+    options.logger?.info("Resumed subagent with messages it rejected mid-turn", {
+      ...traceContextToLogContext(traceContext),
+      agentId,
+      event: "subagent.message.redelivered",
+      messageCount: messages.length,
+      module: "core.subagent",
+    });
+  } catch (error) {
+    notifyLeadUndeliveredMessages(
+      options,
+      agentId,
+      messages,
+      `resuming the agent failed: ${error instanceof Error ? error.message : String(error)}`,
+      traceContext,
+    );
+  }
+}
+
+function mergeRedeliveryRequest(
+  messages: readonly RedeliverableMessage[],
+): SubagentSendMessageRequest {
+  const [first, ...rest] = messages;
+  if (!first) throw new Error("mergeRedeliveryRequest requires at least one message");
+  if (rest.length === 0) return first.redelivery.request;
+  return {
+    ...first.redelivery.request,
+    // 空 summary 让恢复描述回落到原 task description。
+    summary: "",
+    message: messages
+      .map((message) => {
+        const summary = message.summary?.trim();
+        return summary ? `${summary}\n\n${message.message}` : message.message;
+      })
+      .join("\n\n"),
+  };
+}
+
+function restoreTaskAfterFailedResume(
+  options: ExploreSubagentPortOptions,
+  registry: RuntimeTaskRegistry,
+  previousTask: RuntimeTaskSnapshot,
+  error: unknown,
+  traceContext: TraceContext,
+): void {
+  // 还原旧终态 snapshot 会覆盖恢复期间排队到新 running snapshot 的消息，先取出并告知主 Agent。
+  const stranded = takeUndeliveredMessages(options, registry, previousTask.taskId, traceContext);
+  registry.register(previousTask);
+  notifyLeadUndeliveredMessages(
+    options,
+    previousTask.taskId,
+    stranded,
+    `resuming the agent failed: ${error instanceof Error ? error.message : String(error)}`,
+    traceContext,
+  );
+}
+
+function notifyLeadUndeliveredMessages(
+  options: ExploreSubagentPortOptions,
+  agentId: string,
+  messages: readonly RuntimeTaskPendingMessage[],
+  reason: string,
+  traceContext: TraceContext,
+): void {
+  if (messages.length === 0) return;
+  options.logger?.warn("SendMessage messages were not delivered to subagent", {
+    ...traceContextToLogContext(traceContext),
+    agentId,
+    event: "subagent.message.undelivered",
+    messageCount: messages.length,
+    messageIds: messages.map((message) => message.id),
+    module: "core.subagent",
+    reason,
+  });
+  if (!options.enqueueParentTaskNotification) return;
+  const text = [
+    `${messages.length} message(s) you sent with SendMessage to agent ${agentId} were not delivered: ${reason}.`,
+    ...messages.map((message) => {
+      const summary = message.summary?.trim();
+      return summary ? `- ${message.id}: ${summary}` : `- ${message.id}`;
+    }),
+    "Send them again if they are still needed.",
+  ].join("\n");
+  try {
+    options.enqueueParentTaskNotification({
+      originMeta: {
+        backgroundSource: "subagent",
+        title: `Undelivered SendMessage for ${agentId}`,
+        workId: agentId,
+      },
+      taskId: agentId,
+      text,
+      traceContext,
+    });
+  } catch (error) {
+    options.logger?.warn("Failed to notify lead about undelivered subagent messages", {
+      ...traceContextToLogContext(traceContext),
+      agentId,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      event: "subagent.message.undelivered.notification_failed",
+      module: "core.subagent",
+    });
+  }
+}
+
 function createAgentBackgroundedOutput(
   request: SubagentRunRequest,
   lifecycle: SubagentLifecycle,
@@ -1604,16 +2042,26 @@ async function finalizeBackgroundCompletion(
   lifecycle: SubagentLifecycle,
   registry: RuntimeTaskRegistry,
   completed: { output: AgentCompletedOutput },
+  undeliveredMessages?: UndeliveredMessageContext,
 ): Promise<void> {
   const current = registry.get(lifecycle.agentId);
   if (current && isTerminalRuntimeTask(current)) return;
 
   await writeCompletedAgentArtifacts(lifecycle, request, completed.output);
+  // 修复说明：drain 与终态 update 之间不能有 await；否则此间排队的 SendMessage 会被
+  // withoutRuntimeMessageState 剥离而静默丢失。
+  const undelivered = takeUndeliveredMessages(
+    options,
+    registry,
+    lifecycle.agentId,
+    lifecycle.runTraceContext,
+  );
   const notification: LocalAgentTaskNotificationInput = {
     agentId: completed.output.agentId,
     description: completed.output.description,
     outputFile: lifecycle.outputFile,
     parentToolCallId: String(request.parentToolCallId),
+    note: describeUndeliveredMessagesForNotification(undelivered.length, "completed"),
     result: completed.output.content.map((block) => block.text).join("\n\n"),
     status: "completed",
     totalDurationMs: completed.output.totalDurationMs,
@@ -1674,6 +2122,17 @@ async function finalizeBackgroundCompletion(
     totalToolUseCount: completed.output.totalToolUseCount,
     totalTokens: completed.output.totalTokens,
   });
+  // 完成通知已入队（notified 已置位）后才恢复，避免恢复注册的新 snapshot 让旧通知失效。
+  trackRedelivery(
+    undeliveredMessages,
+    redeliverUndeliveredMessages(
+      options,
+      undeliveredMessages,
+      lifecycle.agentId,
+      undelivered,
+      lifecycle.runTraceContext,
+    ),
+  );
 }
 
 async function finalizeBackgroundFailure(
@@ -1693,10 +2152,18 @@ async function finalizeBackgroundFailure(
   const completedAt = new Date();
   const totalDurationMs = Date.now() - lifecycle.startedAt;
   await writeFailedAgentArtifacts(lifecycle, request, errorMessage);
+  // 失败的 child 不因排队消息复活；drain 后只在失败通知里说明未投递。
+  const undelivered = takeUndeliveredMessages(
+    options,
+    registry,
+    lifecycle.agentId,
+    lifecycle.runTraceContext,
+  );
   const notification: LocalAgentTaskNotificationInput = {
     agentId: lifecycle.agentId,
     description: request.description,
     error: errorMessage,
+    note: describeUndeliveredMessagesForNotification(undelivered.length, "failed"),
     outputFile: lifecycle.outputFile,
     parentToolCallId: String(request.parentToolCallId),
     status: "failed",
@@ -1796,16 +2263,23 @@ async function finalizeBackgroundStopped(
   stopped: StoppedBackgroundAgentTask,
   onCommitted?: () => void,
 ): Promise<RuntimeTaskSnapshot | undefined> {
+  await writeStoppedAgentArtifacts(stopped.task);
+  // 停止的 child 不因排队消息复活；drain 与终态 update 同步完成，通知里说明未投递。
+  const queued = registry.drainMessages(stopped.task.taskId);
+  const undelivered = partitionUndeliveredMessages(registry, queued);
   const notification: LocalAgentTaskNotificationInput = {
     agentId: stopped.task.agentId,
     description: stopped.task.description,
+    note: describeUndeliveredMessagesForNotification(
+      undelivered.redeliverable.length,
+      BACKGROUND_AGENT_STOPPED_STATE.registryStatus,
+    ),
     outputFile: stopped.task.outputFile ?? "",
     parentToolCallId: String(stopped.task.parentToolCallId ?? stopped.task.taskId),
     status: BACKGROUND_AGENT_STOPPED_STATE.notificationStatus,
     stoppedBy: stopped.initiator,
     totalDurationMs: stopped.totalDurationMs,
   };
-  await writeStoppedAgentArtifacts(stopped.task);
   registry.update(stopped.task.taskId, (current) => ({
     ...stopped.task,
     notified: current.notified,
@@ -1818,12 +2292,22 @@ async function finalizeBackgroundStopped(
     stopped.traceContext,
   );
   if (!enqueued) {
-    registry.register(stopped.previousTask);
+    registry.register(
+      queued.length > 0
+        ? { ...stopped.previousTask, pendingMessages: queued }
+        : stopped.previousTask,
+    );
     throw new Error(
       `Background agent task stopped notification was not enqueued: ${stopped.task.taskId}`,
     );
   }
 
+  logDroppedUndeliveredMessages(
+    options,
+    stopped.task.taskId,
+    undelivered.dropped,
+    stopped.traceContext,
+  );
   const committed = registry.get(stopped.task.taskId);
   if (!committed) return undefined;
   onCommitted?.();
