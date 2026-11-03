@@ -1870,7 +1870,24 @@ export async function listSessionSubagents(
     };
   }
 
-  const parentSession = await store.getSession(params.sessionId as SessionId);
+  let parentSession = await store.getSession(params.sessionId as SessionId);
+  if (!parentSession) {
+    // 空草稿已有 live runtime，但首条活动前还没有父记录；读取子任务不能强制落盘。
+    // runtime 持有真实落盘状态，不能用旧 session/create 缺省的 immediate 策略代替。
+    if (liveParent && !liveParent.app.runtime.isSessionPersisted()) {
+      return {
+        revision: liveParent.stateRevision,
+        childSessionIds: [],
+        running: [],
+        ended: { total: 0, items: [] },
+      };
+    }
+    // 首次落盘可能恰好在上次读取之后完成；runtime 已确认落盘时复读一次，
+    // 避免把旧的「无记录」结果误报成父会话丢失，真正缺席仍走下面的诊断。
+    if (liveParent) {
+      parentSession = await store.getSession(params.sessionId as SessionId);
+    }
+  }
   if (!parentSession) {
     // 诊断：hydrate 会复用子任务种子读取；若 task index/旧 ACP task 残留了无效 ID，
     // 这里会把“持久化记录不存在”包装成 v4.hydrate，必须记录调用阶段而不是只看错误文本。

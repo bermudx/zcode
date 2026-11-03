@@ -48,6 +48,8 @@ import {
 } from "@zcode/contracts";
 import { resolveLatestSession, runZCodeProtocolAgent } from "../src/index.js";
 import { ProductProjection } from "../src/zcode-protocol-v4/product-projection.js";
+import { listSessionSubagents } from "../src/zcode-protocol/server-operations.js";
+import type { ZCodeProtocolAgentServerContext } from "../src/zcode-protocol/server-types.js";
 import { synthesizeEventsFromMessages } from "../src/zcode-protocol-v4/transcript-hydration.js";
 import {
   createRegistryBackedTestApp as createZCodeApp,
@@ -84,8 +86,10 @@ describe("session persistence", () => {
         withContext: (context) => loggerFor(context),
       };
       try {
+        const eventStore = createInMemorySessionEventStore();
         const app = await createZCodeApp({
           env: { ZCODE_STORAGE_DIR: tempRoot },
+          eventStore,
           loggerFactory,
           ...(modelSelectionMode ? { modelSelectionMode } : {}),
           modelExecutor: {
@@ -110,6 +114,15 @@ describe("session persistence", () => {
               type: SESSION_ENTRY_MODEL_SELECTION,
             })) ?? []
           ).map((entry) => entry.data);
+        const subagentContext = {
+          deps: { sessionStore: store },
+          sessions: new Map([
+            [
+              sessionId,
+              { app, eventStore, persistence: "immediate", stateRevision: 0 },
+            ],
+          ]),
+        } as unknown as ZCodeProtocolAgentServerContext;
 
         // 与工单时序一致：会话刚创建、首条消息前 App 依次下发选型与思考档位。
         await app.setModel({
@@ -123,11 +136,21 @@ describe("session persistence", () => {
           ["debug", "session.model_selection.persist_deferred"],
         ]);
         expect(await store.getSession(sessionId)).toBeFalsy();
+        expect(app.runtime.isSessionPersisted()).toBe(false);
+        await expect(
+          listSessionSubagents(subagentContext, { sessionId }),
+        ).resolves.toMatchObject({ childSessionIds: [], running: [], ended: { total: 0 } });
+        // 子任务查询必须是只读，不能让空草稿提前进入 session/list。
+        expect(await store.getSession(sessionId)).toBeFalsy();
 
         await app.submitPrompt("hello");
         expect(await readSelections()).toEqual([
           { providerId: "zai", modelId: "glm-4.7", options: { reasoningLevel: "low" } },
         ]);
+        expect(app.runtime.isSessionPersisted()).toBe(true);
+        await expect(
+          listSessionSubagents(subagentContext, { sessionId }),
+        ).resolves.toMatchObject({ childSessionIds: [], running: [], ended: { total: 0 } });
 
         // 会话持久化后改档位直接覆盖同一 entry，不再出现 deferred/failed 日志。
         selectionLogs.length = 0;
