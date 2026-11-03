@@ -617,14 +617,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
       request: SubagentSendMessageRequest,
       sendOptions?: SubagentSendMessageOptions,
     ): Promise<SubagentSendMessageResult> {
-      return sendMessageToLocalAgent(
-        options,
-        getProfiles,
-        registry,
-        abortControllers,
-        request,
-        sendOptions,
-      );
+      return sendMessageToLocalAgent(undeliveredMessages, request, sendOptions);
     },
   };
 
@@ -946,13 +939,11 @@ function createSubagentLifecycleFromTask(
 }
 
 async function sendMessageToLocalAgent(
-  options: ExploreSubagentPortOptions,
-  getProfiles: () => readonly AgentProfile[],
-  registry: RuntimeTaskRegistry,
-  abortControllers: Map<string, AbortController>,
+  context: UndeliveredMessageContext,
   request: SubagentSendMessageRequest,
   sendOptions?: SubagentSendMessageOptions,
 ): Promise<SubagentSendMessageResult> {
+  const { abortControllers, options, registry } = context;
   if (sendOptions?.signal?.aborted) {
     return createSendMessageFailure(request, `SendMessage was aborted for ${request.to}.`);
   }
@@ -967,18 +958,12 @@ async function sendMessageToLocalAgent(
 
   const message = createRuntimeTaskPendingMessage(request);
   if (!isTerminalRuntimeTask(task)) {
-    return deliverMessageToRunningAgent(
-      { abortControllers, getProfiles, options, registry },
-      task,
-      message,
-      request,
-      sendOptions,
-    );
+    return deliverMessageToRunningAgent(context, task, message, request, sendOptions);
   }
 
   return resumeTerminalAgentInBackground(
     options,
-    getProfiles(),
+    context.getProfiles(),
     registry,
     abortControllers,
     task,
