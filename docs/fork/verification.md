@@ -803,3 +803,26 @@ next start; do not restart live cores. Full acceptance gate (signing
 against the real provider request, allowance evidence, Ctrl-C signal
 path, memory matrix) remains open and unchanged.
 
+
+## 2026-11-02 — upstream sync battery (sync/2026-10-30-a60ba6a7, tree 1ce50ce3)
+
+Full battery for the 3.17.1 sync; results summary in
+[FORK.md](../../FORK.md) maintenance log. New invocation notes:
+
+- Root vitest is now manifest-driven (`engineering-test-files.json`,
+  upstream's app-test retirement). The fork's shared protocol/signing tests
+  run via `mise exec -- pnpm exec vitest run --project engineering
+  packages/shared` after adding the four entries to the manifest (the old
+  `packages/*/test/**` discovery include is gone).
+- tui-pi tests must run from a cwd shorter than the 80-col fixtures: 4
+  footer/harness-flush tests fail when the cwd label alone crowds out the
+  status text (this herdr worktree path is ~73 cols). Run
+  `tsx --test <pkg>/tests/*.test.ts` from `/tmp`, plus
+  `tests/terminal-drain.test.ts` from the package dir (its pty test needs
+  the package cwd). 265/265 in that split; not a code regression.
+- `architecture:check --changed` now admits fork files absent from
+  upstream's refreshed snapshot; `status-line.test.ts` was trimmed 811→798
+  lines (import compaction, same coverage) for the max-file-lines cap.
+- `pnpm fmt:check` (oxfmt) reports ~1655 upstream files with format drift
+  after the sync — upstream-wide, not gated for this fork's batteries, and
+  deliberately not reformatted inside the sync merge.

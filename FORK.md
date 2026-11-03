@@ -528,3 +528,79 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   gate (signing, allowance evidence, Ctrl-C signal path, memory matrix)
   unchanged.
 
+
+### 2026-11-02 — upstream sync 3.17.1 (sync/2026-10-30-a60ba6a7)
+
+- Base `3c5b2276` → `a60ba6a7` ("chore: sync ZCode source", 2026-10-30;
+  desktop 3.17.1 / CLI 0.17.1; 5,231 files, +216k/−611k — ~1,990 deleted
+  files are the upstream app-unit-test retirement; CLI/CUA suites keep
+  theirs). Two merge commits on the branch: upstream merge `7d0aecb3`, then
+  `1ce50ce3` reconciling parallel fork work that landed on `main`
+  (`610d1fd3`: shell spill/aliases, footer compact gauge, exit-resume hint,
+  auth-failure diagnostics) after the branch was cut.
+- Upstream merge: 12 unmerged paths (11 content + 1 modify/delete). Fork
+  rule handled `.agents/skills/e2e-case-lifecycle` (stay deleted);
+  `packages/shared/test/zcodeProtocol.test.ts` kept fork-side (upstream
+  retired it; it is P004's protocol-schema regression suite). Content
+  resolutions of note:
+  - `verification-policy.ts`: kept the real implementation, adopted
+    upstream's two signature changes — `readValidatedRequestVerificationConfig`
+    (delegates to our validating reader) and the 2-arg
+    `requiresRequestVerification` (start-plan + config.enabled/skipModelRequest
+    semantics, falls back to `requestVerificationInteractionAvailable=false`).
+    The start-plan fail-closed stance moved into the Host flow
+    (zcodeAgentService fails closed on invalid/missing config); signing doc
+    updated. Upstream's kept `contract.test.ts` passes against our impl.
+  - `zcode-protocol-entrypoint.ts`: official command endpoint, MCP node
+    fallback and `sessionDataFiles` reintegrated into the per-connection
+    lifecycle the auto-merge silently dropped; the endpoint's auth context
+    follows `latestProtocolServer` (same owner as the MCP auth port);
+    stateless `sessionDataFiles` shared across connection servers.
+  - `server-types.ts` `requireSession`: sync claim (`claimDetachedSession`)
+    runs BEFORE upstream's lifecycle readiness guard — the guard treats
+    unclaimed/foreign sessions as `unloaded` and would reject reconnect
+    resume-adoption.
+  - `server-operations.ts`: upstream's register-before-subscribe +
+    late-callback guard composed with the fork's `ownerContext` event
+    fanout; `activateSessionForResume` gained a pre-lifecycle active-record
+    fast path because lifecycle `initialize` short-circuits ready sessions
+    and was silently dropping resume `compactContextWindow` on active
+    records (caught by the compact-cap regression).
+  - `browser-control-broker.ts`: upstream's `childSessionParents` value
+    shape (`{parentSessionId}`) + fork's claimed-record lookup;
+    `session-resident-pool.ts` keeps both new methods
+    (`isDeactivationInFlight`, `operationCount`).
+  - `AGENTS.md`/`00-tool-change-chain.md`/`architecture-policy.yaml`/
+    `cli/package.json`: fork guide kept; both doc sections kept; both
+    baseline-entry sets kept; test lists composed.
+- Root vitest now uses the explicit `engineering-test-files.json` manifest
+  (test retirement). Fork seam: added 4 entries (shared
+  `zcodeProtocol.test.ts`, `usageCodingPlanQuotaSchema.test.ts`,
+  `app-server-attach` + `request-security-edition` contract tests) so the
+  protocol/signing regressions keep a `pnpm test` lane.
+- Follow-ups fixed during verification: `tui-pi/tests/status-line.test.ts`
+  import compaction (upstream's refreshed architecture checker counts it
+  over the 800-line cap; 811→798, identical coverage);
+  `attach-binary.smoke.test.ts` poll now requires the rendered mode token —
+  the old workspace-substring condition matched `script`'s command echo and
+  exited before the first frame (the 3.17.1 core boots to first frame later
+  than its pid-file self-registration; manual pty boot verified the full
+  banner/footer/quota-diagnostic render).
+- Battery on the final combined tree, all green unless stated: root
+  typecheck; CLI typecheck 36/36 (workspace grew 34→36); root lint 0
+  errors/83 warnings; CLI lint 0/74/7; `architecture:check --changed` 0;
+  adapters signing 13/13 + runner-status-fanout (auth payload) 9/9;
+  bootstrap socket-listener+zcode-protocol 138/138, quota+cold-resume
+  132/132, session-lifecycle/session-data 21/21; shared engineering set
+  95/95 (incl. upstream's new verification contract test); tui-pi 265/265
+  with a cwd caveat (4 footer/flush fixtures cannot fit this worktree's
+  73-col path at width 80 — pass from a short cwd; the pty test needs the
+  package cwd; sources unchanged by the sync); CLI suite **620/620 exit 0**
+  (main's stability fixes now included). Fresh dist pair + `build:attach`;
+  freshness greps: compactContextWindow ×11/×6, createOfficialCommandEndpoint
+  ×2, exit-resume hint ×1, providerResponseBody ×2.
+- Not exercised live (unverified): real model turn / signing against the
+  live provider / allowance evidence / Ctrl-C signal path / memory matrix
+  (full acceptance gate unchanged and still open); `piz` still runs the
+  158a31d2-promoted pair — promotion from `main` is a separate operator
+  decision after this branch merges.
