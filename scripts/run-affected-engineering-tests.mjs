@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { relative, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createVitest } from "vitest/node";
 import { git, cleanGitEnv } from "./engineering-tests/process.mjs";
@@ -17,6 +18,10 @@ export async function parseArgs(argv) {
       const value = argv[++i];
       if (!value || value.startsWith("--")) throw new Error(`${arg} 需要参数`);
       options[arg.slice(2)] = value;
+    } else if (arg === "--set") {
+      const value = argv[++i];
+      if (value !== "piz" && value !== "all") throw new Error("--set 需要 piz 或 all");
+      options.set = value;
     } else if (arg === "--files") {
       options.files ??= [];
       while (argv[i + 1] && !argv[i + 1].startsWith("--")) options.files.push(argv[++i]);
@@ -28,6 +33,26 @@ export async function parseArgs(argv) {
 
 const specKey = (spec) => JSON.stringify([spec.project.name, spec.pool, spec.moduleId]);
 
+// fork: piz 工程子集清单（scripts/fork-engineering-test-files.json）只能是上游
+// 清单的子集；未知/重复/空清单是脚本错误，绝不静默退化为全量或空跑。
+export function parseEngineeringSet(text, upstreamFiles) {
+  const entries = JSON.parse(text);
+  if (!Array.isArray(entries) || !entries.length) throw new Error("fork engineering set is empty");
+  const upstream = new Set(upstreamFiles);
+  const seen = new Set();
+  for (const entry of entries) {
+    if (typeof entry !== "string" || !entry) throw new Error("fork engineering set entries must be non-empty strings");
+    if (seen.has(entry)) throw new Error(`fork engineering set has duplicate entry: ${entry}`);
+    seen.add(entry);
+    if (!upstream.has(entry)) throw new Error(`fork engineering set entry is not in the upstream engineering list: ${entry}`);
+  }
+  return seen;
+}
+
+export function filterPathsBySet(paths, set) {
+  return paths.filter((path) => set.has(path));
+}
+
 export async function main(argv = process.argv.slice(2)) {
   let vitest;
   const restored = {};
@@ -35,7 +60,7 @@ export async function main(argv = process.argv.slice(2)) {
     const options = await parseArgs(argv);
     if (options.help) {
       console.log(
-        "用法：pnpm test:engineering:affected [--scope worktree|push] [--base <commit>] [--files <files...>] [--dry-run] [--json]\n使用 Vitest 官方选择；全量选择跳过工程测试并成功退出，脏工作区 Push 和错误非零退出。0=通过/无选中测试/跳过全量，1=测试失败，2=阻止执行/脚本错误。",
+        "用法：pnpm test:engineering:affected [--scope worktree|push] [--base <commit>] [--files <files...>] [--set piz|all] [--dry-run] [--json]\n使用 Vitest 官方选择；全量选择跳过工程测试并成功退出，脏工作区 Push 和错误非零退出。--set piz 只跑 fork 子集（默认 all，上游行为不变）。0=通过/无选中测试/跳过全量，1=测试失败，2=阻止执行/脚本错误。",
       );
       return 0;
     }
@@ -74,7 +99,22 @@ export async function main(argv = process.argv.slice(2)) {
         for (const file of vitest.config.related ?? []) related.add(file);
       }
     }
-    const specs = [...selected.values()].sort((a, b) => specKey(a).localeCompare(specKey(b)));
+    let specs = [...selected.values()].sort((a, b) => specKey(a).localeCompare(specKey(b)));
+    // fork: --set piz 把上游选择结果与 fork 子集求交集；子集只有 7 个文件，
+    // 即使上游选中全量也照常跑，不触发下面的全量跳过。
+    const setName = options.set ?? "all";
+    let excludedBySet = 0;
+    if (setName === "piz" && !scope.deletedOnly) {
+      const upstreamFiles = JSON.parse(readFileSync(join(root, "scripts/engineering-test-files.json"), "utf8"));
+      const pizSet = parseEngineeringSet(
+        readFileSync(join(root, "scripts/fork-engineering-test-files.json"), "utf8"),
+        upstreamFiles,
+      );
+      const before = specs.length;
+      const keep = new Set(filterPathsBySet(specs.map((spec) => relative(root, spec.moduleId).replaceAll("\\", "/")), pizSet));
+      specs = specs.filter((spec) => keep.has(relative(root, spec.moduleId).replaceAll("\\", "/")));
+      excludedBySet = before - specs.length;
+    }
     const tests = specs.map((spec) => ({
       runner: "vitest",
       project: spec.project.name,
@@ -84,13 +124,14 @@ export async function main(argv = process.argv.slice(2)) {
     if (options.json) console.log(JSON.stringify(tests, null, 2));
     else {
       console.log(
-        `[engineering:affected] base=${scope.files ? "related" : scope.bases.map((base) => (base === true ? "HEAD（未提交）" : base)).join(",")} 选中 ${specs.length}/${all.length}${specs.length ? "" : "：无选中测试"}`,
+        `[engineering:affected] set=${setName} base=${scope.files ? "related" : scope.bases.map((base) => (base === true ? "HEAD（未提交）" : base)).join(",")} 选中 ${specs.length}/${all.length}${excludedBySet ? `（fork 子集排除 ${excludedBySet} 个）` : ""}${specs.length ? "" : "：无选中测试"}`,
       );
       if (options.dryRun)
         for (const test of tests) console.log(`  ${test.project}/${test.pool}: ${test.path}`);
     }
     // 全量选择不是测试失败；加载测试前跳过并成功退出，避免仅因不跑全量而阻止 Push。
-    if (all.length && all.every((spec) => selected.has(specKey(spec)))) {
+    // fork 子集模式不跳过：子集本身就是精简后的全量，照常执行。
+    if (setName === "all" && all.length && all.every((spec) => selected.has(specKey(spec)))) {
       console.warn(
         `[engineering:affected] Vitest 官方选择了整个工程套件（${all.length} 个规格），已跳过工程测试（未执行测试），不因此阻止 Push。改动文件：${[...related].map((file) => relative(root, file)).join(", ")}`,
       );

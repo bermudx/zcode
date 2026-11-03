@@ -1,10 +1,26 @@
 // node --test apps/zcode-cli/scripts/fork-tests.test.mjs
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classify, collectResults, parseArgs, parseKnownFailures, testKey } from "./fork-tests.mjs";
+import {
+  classify,
+  collectResults,
+  filterPluginTasks,
+  parseArgs,
+  parseKnownFailures,
+  PLUGIN_PACKAGES,
+  testKey,
+} from "./fork-tests.mjs";
 
 test("parseArgs: defaults, repeatable --package, exclusive --full/--base", () => {
-  assert.deepEqual(parseArgs([]), { packages: [], retry: true, tmpfs: true, full: false, dryRun: false });
+  assert.deepEqual(parseArgs([]), {
+    packages: [],
+    retry: true,
+    tmpfs: true,
+    full: false,
+    dryRun: false,
+    excludePlugins: false,
+  });
+  assert.equal(parseArgs(["--full", "--exclude-plugins"]).excludePlugins, true);
   const opts = parseArgs(["--package", "a", "--package", "b", "--no-retry", "--max-workers", "2"]);
   assert.deepEqual(opts.packages, ["a", "b"]);
   assert.equal(opts.retry, false);
@@ -13,6 +29,17 @@ test("parseArgs: defaults, repeatable --package, exclusive --full/--base", () =>
   assert.throws(() => parseArgs(["--base"]), /needs a value/u);
   assert.throws(() => parseArgs(["--max-workers", "0"]), /positive integer/u);
   assert.throws(() => parseArgs(["--bogus"]), /unknown argument/u);
+});
+
+test("filterPluginTasks: only listed plugin packages are excluded, only on request", () => {
+  const tasks = [{ pkg: "@zcode/core" }, { pkg: "@zcode/browser-use-plugin" }, { pkg: "@zcode/bootstrap" }];
+  assert.deepEqual(filterPluginTasks(tasks, false), { kept: tasks, excluded: [] });
+  const tier = filterPluginTasks(tasks, true);
+  assert.deepEqual(tier.kept.map((task) => task.pkg), ["@zcode/core", "@zcode/bootstrap"]);
+  assert.deepEqual(tier.excluded.map((task) => task.pkg), ["@zcode/browser-use-plugin"]);
+  // Seeding and the built-in node_repl host are never in the plugin tier.
+  assert.ok(!PLUGIN_PACKAGES.includes("@zcode/bootstrap"));
+  assert.ok(!PLUGIN_PACKAGES.includes("@zcode/node-repl-host"));
 });
 
 test("parseKnownFailures: comments, blanks, separators inside test names, malformed lines", () => {

@@ -31,7 +31,7 @@
     "test:e2e:container:conversation": "bash scripts/test-desktop-e2e-container.sh conversation-session-verified",
     "test:e2e:container:plugins": "bash scripts/test-desktop-e2e-container.sh plugins-verified",
     "test:docker:web-app-gateway": "node scripts/test-web-app-gateway-reset.mjs",
-    "verify:pre-push": "node scripts/check-push-worktree.mjs && pnpm run check:e2e-remote-targets && pnpm run lint && pnpm run docs:stale-phrases:check && pnpm run db:schema:check && pnpm run test:architecture && pnpm run architecture:check -- --changed && pnpm run test:engineering:affected --scope push",
+    "verify:pre-push": "node scripts/check-push-worktree.mjs && pnpm run check:e2e-remote-targets && pnpm run lint && pnpm run docs:stale-phrases:check && pnpm run db:schema:check && pnpm run test:architecture && pnpm run architecture:check -- --changed && pnpm run test:engineering:piz-affected --scope push",
     "build": "pnpm -r build",
     "build:desktop-agent:bytecode": "node scripts/build-desktop-agent-bytecode.mjs",
     "build:docs": "pnpm --filter @zcode/dev-docs build",
@@ -48,6 +48,7 @@
     "test:native-search:e2e": "node scripts/test-native-search-tools-e2e.mjs",
     "test:sea-runtime-tools:e2e": "node scripts/test-sea-runtime-tools-e2e.mjs",
     "clean": "node scripts/clean.mjs",
+    "typecheck:piz": "node scripts/fork-typecheck.mjs",
     "typecheck": "tsc -b packages/shared/tsconfig.testing.json packages/rpc packages/provider packages/provider-node packages/shared packages/services packages/client packages/server packages/zcode-server-cli packages/ui packages/web apps/dev-docs packages/e2e-report packages/desktop/tsconfig.main.json packages/desktop/tsconfig.host.json packages/desktop/tsconfig.e2e.json && tsc -p packages/desktop/tsconfig.remote-main.json --noEmit && tsc -p packages/zcode-cua --noEmit",
     "bundle:desktop": "pnpm --filter @zcode/desktop run bundle --",
     "fmt": "oxfmt",
@@ -79,7 +80,8 @@
     "provider:regression": "pnpm --filter @zcode/bootstrap... build && tsx apps/zcode-cli/tools/provider-regression/src/cli.ts",
     "test:engineering": "vitest run --project engineering",
     "test:engineering:affected": "node scripts/run-affected-engineering-tests.mjs",
-    "test:engineering-tools": "node --test scripts/test/affected-engineering-test-cli.test.mjs scripts/test/pre-push-worktree.test.mjs scripts/test/retired-app-unit-evidence.test.mjs scripts/test/e2e-remote-targets-check.test.mjs",
+    "test:engineering:piz-affected": "node scripts/run-affected-engineering-tests.mjs --set piz",
+    "test:engineering-tools": "node --test scripts/test/affected-engineering-test-cli.test.mjs scripts/test/pre-push-worktree.test.mjs scripts/test/retired-app-unit-evidence.test.mjs scripts/test/e2e-remote-targets-check.test.mjs scripts/test/fork-engineering-set.test.mjs",
     "check:e2e-remote-targets": "node scripts/check-e2e-remote-targets.mjs"
   },
   "dependencies": {

@@ -240,7 +240,9 @@ test("实际选中测试失败返回 1，无关测试不执行", async (t) => {
 test("pre-push retains the engineering runner and the E2E provider seed regression", async () => {
   const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
   const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-  assert.match(pkg.scripts["verify:pre-push"], /test:engineering:affected --scope push/);
+  // fork: pre-push runs the piz engineering subset (same runner, --set piz);
+  // either spelling retains the engineering runner this test guards.
+  assert.match(pkg.scripts["verify:pre-push"], /test:engineering:(piz-)?affected --scope push/);
   const files = JSON.parse(
     await readFile(join(root, "scripts/engineering-test-files.json"), "utf8"),
   );

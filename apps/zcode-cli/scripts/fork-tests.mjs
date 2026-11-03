@@ -23,6 +23,9 @@
 //   mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs [options]
 //     --base <ref>        selection base (default: merge-base of main and HEAD)
 //     --full              run every package, no selection
+//     --exclude-plugins   with --full (pre-promote): skip plugin-package test
+//                         tasks the no-plugin core does not load; printed, and
+//                         still run by plain --full on sync branches
 //     --package <name>    restrict to these packages (repeatable)
 //     --max-workers <n>   pass --maxWorkers to vitest first pass
 //     --no-retry          skip the isolated rerun of failing vitest files
@@ -65,6 +68,27 @@ export const EXTRA_NODE_TESTS = {
   "@zcode/cli": ["tests/attach-resume-target.test.ts"],
 };
 
+// Plugin packages the no-plugin shared core does not load (docs/fork/
+// verification.md "Lean fork gates" C). --exclude-plugins drops their test
+// tasks on pre-promote runs only; plain --full (sync branches) keeps them.
+// Bootstrap's bundled-plugin seeding tests are NOT here — seeding still runs
+// at startup — and @zcode/node-repl-host is a built-in host, not a plugin.
+export const PLUGIN_PACKAGES = [
+  "@zcode/android-emulator-plugin",
+  "@zcode/ios-simulator-plugin",
+  "@zcode/browser-use-plugin",
+  "@zcode/office-runtime",
+  "@zcode/zcode-site-plugin",
+  "@zcode/plugin-creator-plugin",
+  "@zcode/zcode-cua-plugin",
+];
+
+export function filterPluginTasks(tasks, excludePlugins) {
+  if (!excludePlugins) return { kept: tasks, excluded: [] };
+  const excluded = tasks.filter((task) => PLUGIN_PACKAGES.includes(task.pkg));
+  return { kept: tasks.filter((task) => !PLUGIN_PACKAGES.includes(task.pkg)), excluded };
+}
+
 // node:test packages whose tests exec built artifacts. Missing = NOT RUN (exit 1),
 // never a pass. Present-but-stale is the caller's job: rebuild after src changes.
 export const REQUIRES_BUILD = {
@@ -77,7 +101,7 @@ const TMPFS_MAGIC = 0x01021994;
 const KNOWN_SEP = " :: ";
 
 export function parseArgs(argv) {
-  const opts = { packages: [], retry: true, tmpfs: true, full: false, dryRun: false };
+  const opts = { packages: [], retry: true, tmpfs: true, full: false, dryRun: false, excludePlugins: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => {
@@ -92,7 +116,8 @@ export function parseArgs(argv) {
       const n = Number(value());
       if (!Number.isInteger(n) || n < 1) throw new Error("--max-workers needs a positive integer");
       opts.maxWorkers = n;
-    } else if (arg === "--no-retry") opts.retry = false;
+    } else if (arg === "--exclude-plugins") opts.excludePlugins = true;
+    else if (arg === "--no-retry") opts.retry = false;
     else if (arg === "--no-tmpfs") opts.tmpfs = false;
     else if (arg === "--known") opts.known = value();
     else if (arg === "--dry-run") opts.dryRun = true;
@@ -241,6 +266,10 @@ export async function main(argv = process.argv.slice(2)) {
     let tasks = turboTestTasks(cliRoot, env, base ? `...[${base}]` : undefined);
     const all = base ? turboTestTasks(cliRoot, env) : tasks;
     if (opts.packages.length) tasks = tasks.filter((task) => opts.packages.includes(task.pkg));
+    // Plugin tier: excluded packages are listed in the plan below, never
+    // silently skipped; plain --full on sync branches still runs them.
+    const pluginTier = filterPluginTasks(tasks, opts.excludePlugins);
+    tasks = pluginTier.kept;
     const always = opts.full
       ? []
       : ALWAYS_RUN.filter((entry) => !opts.packages.length || opts.packages.includes(entry.pkg))
@@ -256,8 +285,10 @@ export async function main(argv = process.argv.slice(2)) {
     const uncovered = changed.filter((file) => !file.startsWith("apps/zcode-cli/") && CODE_FILE.test(file));
 
     console.log(
-      `[fork-tests] mode=${opts.full ? "full" : `selected (base ${base.slice(0, 10)})`} packages=${tasks.length} known=${known.size} TMPDIR=${tmp ?? "(inherited)"}`,
+      `[fork-tests] mode=${opts.full ? "full" : `selected (base ${base.slice(0, 10)})`}${opts.excludePlugins ? " (plugin tier excluded)" : ""} packages=${tasks.length} known=${known.size} TMPDIR=${tmp ?? "(inherited)"}`,
     );
+    for (const task of pluginTier.excluded)
+      console.log(`  ${task.pkg}: EXCLUDED (plugin package; run plain --full on sync branches to cover it)`);
     for (const task of tasks)
       console.log(`  ${task.pkg}: ${task.vitest ? (opts.full ? "vitest, all files" : "vitest, --changed") : "package script (no per-file selection)"}`);
     for (const entry of always) console.log(`  ${entry.pkg}: always-run ${entry.files.join(" ")}`);
