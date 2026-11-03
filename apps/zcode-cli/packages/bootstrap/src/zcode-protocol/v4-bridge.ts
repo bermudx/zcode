@@ -842,7 +842,14 @@ export function createConversationV4Gateway(
       if (!input) return null;
       const kind = input.kind;
       const record = context.sessions.get(sessionId);
-      if (record?.persistence === "deferred") {
+      // Bug 原因：旧 session/create 建的会话 record 缺省标 "immediate"，但 runtime 要到
+      // 首条输入才落 session 行；只看 record 镜像会跳过首发持久化，直接写 ledger 撞
+      // session(id) 外键（piz attach 迁到 v4 sendText 后每次提交都失败）。以 runtime
+      // 落行事实为准：明确未落行同样先走首发边界；方法缺席（测试桩）不触发。
+      if (
+        record &&
+        (record.persistence === "deferred" || record.app.runtime?.isSessionPersisted?.() === false)
+      ) {
         // session_input 有 session 外键；draft 要到 startPromptTurn 后台阶段才持久化，
         // 如果先写 ledger 会直接 FK 失败，accepted 前仍没有权威记录。因此 admission
         // 先走 runtime 的统一首发持久化边界，再落 ledger，随后 handler 只负责执行。

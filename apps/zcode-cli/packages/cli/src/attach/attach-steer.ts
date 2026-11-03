@@ -1,17 +1,24 @@
 // attach busy 输入的双 lane 与 Alt+Up 撤回（pi-mono 对齐，见
 // docs/design/v2/loop/turn-steering.md attach lane 节）：
-// - steer：session/send delivery:"steer" 直驱 core steerTurn，真实事件驱动 UI；
-// - follow-up：客户端本地 FIFO（core 的 session/send 只收单并发 prompt）；
+// - steer：v4 sendText requestedDelivery:"guide"——core 忙时注入 active turn
+//   pendingInputs（真实 TurnSteerQueued/Drained 事件驱动 UI）；settle 竞态/不可
+//   steer 时 core admission 自动转 deferred 队列或拒绝；idle 竞态则启动新回合，
+//   客户端按 ACK delivery 跟踪，拒绝回退本地 follow-up 队列；
+// - follow-up：客户端本地 FIFO（Ctrl+Q 语义：settle 后作为新回合重放）；
 // - 撤回：本地项就地摘除（合成 discarded 事件），core pendingInputs 项走
 //   session/discardPendingInputs。
 import {
   zcodeProtocolMethods,
   zcodeSessionDiscardPendingInputsResultSchema,
-  zcodeSessionSendResultSchema,
 } from "@zcode/shared";
 import type { SessionEvent, TurnId } from "@zcode/contracts";
 import type { TuiPromptInput, TuiSendInputResult } from "@zcode/tui";
-import { AttachProtocolError, type AttachClient } from "./attach-client.js";
+import type { AttachClient } from "./attach-client.js";
+import {
+  AttachV4CommandError,
+  queueItemIdForCommand,
+  sendTextCommand,
+} from "./attach-v4-command.js";
 
 export type SendInputOptions = {
   abortSignal?: AbortSignal;
@@ -36,58 +43,57 @@ export type QueuedLocalInput = {
 export type SteerQueueContext = {
   clientOf: () => AttachClient;
   emitSinkEvent: (type: string, payload: Record<string, unknown>) => void;
-  /** 协议 inputId（与 submitPrompt 共用同一计数器）。 */
-  nextInputId: () => string;
   /** 本地队列项 id 的计数器（`attach-input-queued-N`）。 */
   nextQueueCounter: () => number;
   queuedInputs: QueuedLocalInput[];
   sessionId: string;
 };
 
-/** 服务端 guard.steerRejected.{reason}：可回退 follow-up 队列的拒绝族。 */
-function isSteerRejected(error: AttachProtocolError): boolean {
-  const reasonCode = (error.data as { reasonCode?: unknown } | undefined)?.reasonCode;
-  return typeof reasonCode === "string" && reasonCode.startsWith("guard.steerRejected.");
-}
-
 /**
- * steer lane：协议回执 steerQueued（core pendingInputId）即成；真实事件流
- * （常驻订阅 sink）负责 UI 队列区，不挂 per-call sink。guard.steerRejected.*
- * （含 no_active_turn settle 竞态）回退本地 follow-up 队列——flush 时序在
- * 客户端，服务端不擅自开新回合；其余错误（网络/协议）如实上抛，让上层恢复草稿。
+ * steer lane：v4 sendText requestedDelivery:"guide" 直驱 core admission——忙且
+ * steerable 时注入 active turn pendingInputs；真实事件流（常驻订阅 sink）负责 UI
+ * 队列区。调用方先登记 commandId 的 turn 等待器，ACK startNow 时返回 undefined，
+ * 由调用方等真实 turn 完成；否则撤下临时等待器并返回 queued。ACK 失败族回退本地
+ * follow-up 队列，其余错误（网络/协议 schema）如实上抛，让上层恢复草稿。
  */
 export async function steerActiveTurn(
   ctx: SteerQueueContext,
   text: string,
   options: SendInputOptions | undefined,
   activeTurnId: string | undefined,
-): Promise<TuiSendInputResult> {
-  const inputId = ctx.nextInputId();
+  commandId: string,
+): Promise<TuiSendInputResult | undefined> {
   try {
-    const result = zcodeSessionSendResultSchema.parse(
-      await ctx.clientOf().request(zcodeProtocolMethods.sessionSend, {
-        content: text,
-        delivery: "steer",
-        inputId,
-        sessionId: ctx.sessionId,
-      }),
-    );
-    if (!result.steerQueued) {
-      // delivery:"steer" 的回执必带 steerQueued；缺失视为协议损坏，走上抛路径。
-      throw new Error("steer ack missing steerQueued");
+    const ack = await sendTextCommand(ctx.clientOf(), {
+      commandId,
+      payload: {
+        heldQueueDisposition: "keepQueueAndSend",
+        requestedDelivery: "guide",
+        text,
+      },
+      sessionId: ctx.sessionId,
+    });
+    if (ack.result?.type !== "inputAccepted" || ack.result.inputId !== commandId) {
+      throw new Error("v4 guide ACK is missing its input admission result");
     }
-    return {
-      kind: "queued",
-      pendingInputId: result.steerQueued.pendingInputId,
-      queueLength: result.steerQueued.queueLength,
-      turnId: result.steerQueued.turnId as TurnId,
-    };
+    if (ack.result.delivery === "startNow") {
+      // Bug 根因：guide 落在 idle 时会启动新回合，不能伪造永不 drained 的队列行。
+      // started_turn 回包由 TUI 按正常提交插入 user 行，不在此重复投影。
+      return undefined;
+    }
   } catch (error) {
-    if (error instanceof AttachProtocolError && isSteerRejected(error)) {
+    if (error instanceof AttachV4CommandError) {
       return queueFollowUpInput(ctx, text, options, text, activeTurnId);
     }
     throw error;
   }
+  return {
+    kind: "queued",
+    pendingInputId: queueItemIdForCommand(commandId),
+    // ACK 不带队列长度；此处仅状态行首帧文案，真实计数由 TurnSteerQueued 事件投影修正。
+    queueLength: 1,
+    turnId: (activeTurnId ?? "") as TurnId,
+  };
 }
 
 /** follow-up lane：本地 FIFO + 合成 turn_steer_queued（delivery:"queue"）。 */

@@ -607,7 +607,7 @@ export function createAttachPromptHandler(
   submitPrompt.recallPreviousInput = (skip) => current.recallPreviousInputHistory(skip);
   submitPrompt.sendInput = async (input: TuiPromptInput, sendOptions) => {
     // /model /effort 是客户端侧命令（Ctrl+P 轮换、Ctrl+L 选择器都走 sendInput），
-    // 必须经 commandCenter → handle.setModel/setThoughtLevel；直接 session/send
+    // 必须经 commandCenter → handle.setModel/setThoughtLevel；直接 sendText
     // 会把命令文本当 prompt 发给模型（曾导致"轮换"只是模型聊了一句命令名）。
     const command = parseSlashCommand(
       typeof input === "string" ? input : input.text,

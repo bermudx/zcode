@@ -1,6 +1,6 @@
 // 瘦客户端的自定义命令目录：composer `/` 面板 suggestions 与 commandCenter
 // `/help` 列表都从 `commands/referenceCatalog` 取数（core 现扫，单一事实源）。
-// 命令展开不走这里：瘦客户端把 `/name args` 原文经 session/send 转发，由
+// 命令展开不走这里：瘦客户端把 `/name args` 原文经 v4 sendText 转发，由
 // core 的 input facade 展开 custom-command-prompt.ts（含 !`cmd` 动态语法，
 // 客户端侧展开器反而砍能力）。见 docs/fork/attach-custom-commands-design.md。
 import {
