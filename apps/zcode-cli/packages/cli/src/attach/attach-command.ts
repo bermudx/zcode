@@ -73,7 +73,8 @@ const createAttachTransportLogger = (
 
 /**
  * 解析 attach 入口的会话选择目标（-c/--resume/默认新会话）：实现与 TUI 内
- * 裸 /resume 共用，见 attach-tui-options.ts 的 resolveAttachResumeTarget。
+ * /resume <id> 共用（裸 /resume 走 picker，不走这里），见
+ * attach-tui-options.ts 的 resolveAttachResumeTarget。
  */
 export { resolveAttachResumeTarget } from "./attach-tui-options.js";
 
@@ -167,9 +168,14 @@ export const runAttachCommand = async (
           })
         : undefined;
       // 握手：session/create 直接返回协议快照；版本断言先于任何会话状态依赖。
+      // persistence:"deferred"——启动新会话在首条 prompt 被 accepted 前只是
+      // 草稿：core 的 session/list 跳过 deferred record，空启动会话不会被
+      // 本 pane 或其他 pane 的 /resume picker、-c 误选中；首发时 core 在
+      // admission 提升为 immediate（与 desktop 新建 draft 同一规则）。
       const created =
         resumedSnapshot ??
         ((await client.request(zcodeProtocolMethods.sessionCreate, {
+          persistence: "deferred",
           workspace: workspaceRef,
         })) as unknown);
       // 版本断言先于全量 schema 校验：snapshot.protocol.version 是 z.literal 断言位，
