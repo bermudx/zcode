@@ -4083,6 +4083,7 @@ async function snapshotWithDiagnostics(
     persistedGoalVerificationEvents,
     session,
     slashCommandOptions: {
+      noPlugins: context.deps.noPlugins,
       // session snapshot 的 `/` 目录与 workspace presentation 必须给出同一份灰度结论，
       // 否则关闭态下侧栏面板还能看到 `workflow`。
       dynamicWorkflowEnabled: context.appRuntimePreferences.dynamicWorkflowEnabled,

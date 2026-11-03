@@ -43,6 +43,8 @@ export interface ParamsSchema<T> {
 }
 
 export interface ZCodeProtocolAgentDependencies {
+  /** 受信进程入口的插件硬门；不接受协议参数覆盖。 */
+  noPlugins?: boolean;
   createZCodeApp(options?: Omit<ZCodeAppOptions, "providerRegistry">): ZCodeApp | Promise<ZCodeApp>;
   /**
    * 每个 session record 的内存 event store 工厂。

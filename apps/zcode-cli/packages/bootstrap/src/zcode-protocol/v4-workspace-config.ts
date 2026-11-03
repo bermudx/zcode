@@ -49,6 +49,7 @@ export async function buildLiveWorkspaceConfigStateV4(
   if (!record) return null;
   const settings = await mapSessionSettings(record.app);
   const slashCommands = await listProtocolSlashCommands({
+    noPlugins: context.deps.noPlugins,
     // 灰度门是 Host 判定的 workspace 级事实，目录装配读进程缓存。
     dynamicWorkflowEnabled: context.appRuntimePreferences.dynamicWorkflowEnabled,
     env: context.deps.env,

@@ -90,6 +90,8 @@ import { createWorkspaceZCodeApp } from "../src/zcode-protocol/workspace-model-r
 import { onSessionEvent } from "../src/zcode-protocol/server-operations.js";
 import type { ZCodeApp, ZCodeAppOptions } from "../src/app/types.js";
 import { createFakeApp } from "./helpers/fake-zcode-app.js";
+import * as plugins from "../src/plugins.js";
+import { buildLiveWorkspaceConfigStateV4 } from "../src/zcode-protocol/v4-workspace-config.js";
 import { createApiKeyProviderConfig } from "./provider-config-fixtures.js";
 
 const workspace = {
@@ -1230,6 +1232,52 @@ describe("ZCodeProtocolAgentServer", () => {
     ]);
 
     expect(events).toEqual([]);
+  });
+
+  it("keeps builtin and workspace commands in no-plugin snapshots and workspace catalogs without plugin discovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zcode-no-plugin-snapshot-"));
+    const resolvePlugins = vi.spyOn(plugins, "resolveZCodePlugins")
+      .mockImplementation(() => { throw new Error("must not resolve plugins"); });
+    const createApp = vi.fn((options?: ZCodeAppOptions) => createFakeApp(options));
+    const server = new ZCodeProtocolAgentServer({
+      createZCodeApp: createApp,
+      noPlugins: true,
+      env: {},
+      cwd: root,
+    });
+    try {
+      await mkdir(join(root, ".zcode", "commands"), { recursive: true });
+      await writeFile(join(root, ".zcode", "commands", "workspace-review.md"),
+        "---\ndescription: Workspace review\n---\nReview changes.");
+      await writeFile(join(root, ".zcode", "config.json"),
+        JSON.stringify({ plugins: { enabled: true } }));
+      const ws = { workspacePath: root, workspaceKey: root };
+      const snapshot = zcodeSessionStateSnapshotSchema.parse(await requestResult(server, {
+        id: 1, method: zcodeProtocolMethods.sessionCreate, params: { workspace: ws },
+      }));
+      expect(createApp.mock.calls[0]?.[0]?.noPlugins).toBe(true);
+      const assertCommands = (commands: readonly { name: string; source?: string }[]) => {
+        expect(commands).toContainEqual(expect.objectContaining({ name: "compact", source: "builtin" }));
+        expect(commands).toContainEqual(expect.objectContaining({ name: "workspace-review", source: "custom" }));
+      };
+      assertCommands(snapshot.slashCommands);
+      const presentation = zcodeWorkspacePresentationSchema.parse(await requestResult(server, {
+        id: 2, method: zcodeProtocolMethods.workspaceReadPresentation, params: { workspace: ws },
+      }));
+      assertCommands(presentation.slashCommands);
+      const app = createApp.mock.results[0]!.value;
+      const state = await buildLiveWorkspaceConfigStateV4({
+        deps: { env: {}, noPlugins: true },
+        appRuntimePreferences: { dynamicWorkflowEnabled: false },
+        sessions: new Map([[app.sessionId, { app, workspace: ws }]]),
+      } as unknown as ZCodeProtocolAgentServerContext, root);
+      assertCommands(state!.slashCommands);
+      expect(resolvePlugins).not.toHaveBeenCalled();
+    } finally {
+      await server.shutdown();
+      resolvePlugins.mockRestore();
+      await rm(root, { force: true, recursive: true });
+    }
   });
 
   it("logs snapshot phase timings for session create diagnostics", async () => {

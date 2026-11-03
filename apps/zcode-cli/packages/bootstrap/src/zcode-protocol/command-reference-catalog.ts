@@ -23,6 +23,7 @@ export async function getCommandReferenceCatalog(
   // 照 skills workspace 权威先例：复用 CLI 正式发现配置现扫，用户从文件系统
   // 手动增删命令后无需重启即可在下次目录请求中看到。
   const outcome = await listZCodeCustomCommands({
+    noPlugins: context.deps.noPlugins,
     env: context.deps.env,
     logger: context.logger,
     workingDirectory: params.workspace.workspacePath,

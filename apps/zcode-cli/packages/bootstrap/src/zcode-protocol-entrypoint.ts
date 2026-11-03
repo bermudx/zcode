@@ -500,6 +500,7 @@ export async function runZCodeProtocolAgent(
               connection.send({ method: zcodeProtocolNotifications.toolExecResource, params }),
           }),
         cwd: options.cwd,
+        noPlugins: options.noPlugins,
         env: options.env,
         loggerFactory,
         mcpPort,

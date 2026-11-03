@@ -995,6 +995,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           return builtin.prompt;
         }
         return await resolveZCodeCustomCommandPrompt(text, {
+          noPlugins: options.noPlugins,
           additionalDirectories: options.additionalDirectories,
           env: options.env,
           executionPort,
