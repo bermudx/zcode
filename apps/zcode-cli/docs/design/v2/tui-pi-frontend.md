@@ -153,40 +153,59 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 - Footer 恒定两行由 `StatusFooter`（`tui-pi/src/footer.ts`，extends
   `Container`）唯一 own：高度不随 busy 变化，挂载/卸载 spinner 不再把整屏
   内容顶起/落下；`update({state, status, cwdLabel, quotaText})` 一行委托
-  两行。操作者口径为两行（2026-10-29 起恢复 3324315f 前的双行布局）：
-  活动行 + meta 行（cwd 并入 stats 左区，额度簇右移到活动行尾）。
-  - 活动行（`ActivityLine`，Loader 单行形态）：busy 或 `activeTurnId` 在场
-    时动画 spinner + `status`（status 为空回退 `input.activeStatusHint`，
-    "esc to interrupt"，与 React 前端同文案）；空闲时 spinner 位留空格对齐、
-    显示 `status` 或留白。`activeTurnId` 并入活动判定与
-    `quitChoice.turnBusy` 同口径——attach 会话远端发起的 turn 也可见
-    spinner；指示切换只在 busy 沿变化时发生。行尾右对齐额度簇（pi
-    provider-balance 同式，`appendFooterRightZone`）：账号级读数不占
-    meta 行的 session 左区；`theme.dim`，间距 ≥2 列，余量不足丢额度
-    读数不截 status/spinner。
-  - meta 行（`MetaLine` + `status-line.ts` 纯格式化 `formatMetaLine`）：
-    左区 `~/cwd (branch)` + `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}]
+  两行。操作者口径为两行（2026-10-29 起恢复 3324315f 前的双行布局；
+  2026-11-01 起 cwd 上移到活动行行首，meta 行只剩 stats 左区）：
+  活动行 + meta 行。
+  - 活动行（`ActivityLine`，Loader 单行形态）：行首 `~/cwd (branch)`
+    （`formatPwdLine`，`$HOME` 折叠为 `~`，branch 取
+    `TuiStartupOptions.workspaceGitBranch`——CLI 组合层启动快照，与
+    React sidebar 同一来源；无 live watcher，会话内切分支不刷新；非
+    git 目录只显 cwd），其后 `spinner + status`：busy 或 `activeTurnId`
+    在场时动画 spinner + `status`（status 为空回退
+    `input.activeStatusHint`，"esc to interrupt"，与 React 前端同文案）；
+    空闲时 spinner 位留空格对齐、显示 `status` 或留白。`activeTurnId`
+    并入活动判定与 `quitChoice.turnBusy` 同口径——attach 会话远端发起
+    的 turn 也可见 spinner；指示切换只在 busy 沿变化时发生。行尾右对齐
+    额度簇（pi provider-balance 同式，`appendFooterRightZone`）：账号级
+    读数不占 meta 行的 session 左区；`theme.dim`，间距 ≥2 列，余量不足
+    丢额度读数不截 status/spinner。pwd 与 status 两空格分隔；pwd 超宽
+    行尾 "..." 截断（cwd 存活最久，status/额度先行收缩——与原 meta 行
+    「cwd 在左区最前、最后丢」同优先级）。
+  - meta 行（`MetaLine` + `status-line.ts` 纯格式化 `formatStatsLine`）：
+    左区 `↑{in} ↓{out} R{cacheRead} [W{cacheWrite}]
     [CH{hit}%] [$cost] {ctxPct}%/{ctxWindow}(auto)`（pi footer 同构同序；
-    `$HOME` 折叠为 `~`，branch 取 `TuiStartupOptions.workspaceGitBranch`
-    ——CLI 组合层启动快照，与 React sidebar 同一来源；无 live watcher，
-    会话内切分支不刷新；非 git 目录只显 cwd。窗口缺失降级
-    `ctx {compact(used)}`；`W` 仅 cacheWrite>0 时显示），右区
-    `(provider) model • thought • mode • agents:N`（pi 用 `•` 分隔；
-    provider 前缀仅当可用 provider 数 >1 时显示，与 pi
+    窗口缺失降级 `ctx {compact(used)}`；`W` 仅 cacheWrite>0 时显示），
+    右区 `(provider) model • thought • mode • agents:N`（pi 用 `•`
+    分隔；provider 前缀仅当可用 provider 数 >1 时显示，与 pi
     `getAvailableProviderCount()>1` 同规约；mode/agents 为 piz 扩展段，
     附着在 pi 段之后），两区间距 ≥2 空格。宽度收缩顺序：左区行尾 "..."
-    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）；cwd
-    在左区最前、最后丢，用量/ctx 读数先收缩。
+    截断 → 右区按剩余宽度截断（pi footer 同序，右区截断无标记）。
     早期「右区余窗 <4 列整体退场」的防碎片守卫已移除，以 pi 行为为准。
   - ctx 百分比按 pi 阈值着色：>90% `theme.danger`、>70% `theme.warning`、
     其余随行 `theme.muted`；`(auto)` 直接拼在窗口紧凑计数之后
     （`{pct}%/{win} (auto)`）。
+  - ctx 仪表分母按每会话压缩上限收紧（fork 偏离 pi；
+    `patch/footer-compact-gauge`，2026-11-02）：当前模型命中 piz 的 GLM
+    压缩上限（`@zcode/shared` `resolveCompactContextWindowForModel`——与
+    attach 下发 `compactContextWindow` 的谓词同一来源，发送与展示不可能
+    漂移）时，分母 = `min(cap, 窗口)`（262_000 → `262k`），投影/目录窗口
+    均缺失时直接取 cap。动机：auto-compact 在有效窗口 − 21K − 13K ≈ 228K
+    触发，未收紧的 1M 分母把仪表 100% 刻度放到触发线的 ~4.4 倍处——读数
+    误导而非保守。`?`/降级分支与 pi 阈值着色不变（按收紧后的百分比计算；已知窗口
+    ≥ cap 时触发线落在 ~87% warning 区——窗口未知的 cap-only 分支里 core
+    对缺失窗口回退 200K 默认，触发线比例更低，且只存在于首个
+    model_complete 之前）。非 GLM/无 cap 会话保持模型窗口分母。
+    边界：收紧是纯客户端展示，core/协议侧窗口语义不变；老 core（对
+    `session/setCompactContextWindow` 答 -32601、静默跳过）不会应用 cap 而
+    仪表仍按 cap 显示——matched-pair 部署下仅 promotion 过渡期存在。
   - 两行均单行截断（取 Text 渲染首行，已按宽补齐），不折行：窄终端或长
     status 也不会把 footer 撑过两行。
   - `(auto)`：core `AutoCompactPolicyConfig.enabled` 目前不在客户端事件面
     暴露（compact 事件只带 `autoCompactThreshold` 结果值）。计划经 additive
     契约字段把设置态带到 `ContextUsage`；字段落地前 footer 不显示 `(auto)`，
-    不按默认值伪造。
+    不按默认值伪造。例外（`patch/footer-compact-gauge`）：每会话压缩上限
+    激活（GLM cap 收紧了分母）时，分母本身就是压缩预算，直接渲染
+    `(auto)`；非 cap 会话仍按上段规则不显示。
   - `↑`/`↓`/`R` 读 `UsageTotalsAccumulator`（`tui-pi/src/usage-totals.ts`）
     维护的 session 累计。折叠口径与 contracts `summarizeSessionUsageTotals`
     同源：已 dedup 的主会话 `model_complete` 与 `model_request_failed`
@@ -315,24 +334,48 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
 
 - composer 内 `!cmd`（trim 后以 `!` 开头且长度 > 1）不进入模型回合：在客户端
   workspace（`workspaceDirectory ?? cwd`）本地执行；`!cmd` 头行 + 退出状态 +
-  输出（stdout/stderr 合并、120s 超时、64k 字符 / 2000 行截断）作为 system
-  消息行写入 transcript；捕获输出以 `<shell-output …>` 块前置到下一条真实
-  prompt（slash 命令不消费缓冲，缓冲只交付一次）。core 没有「追加本地消息」的
-  协议面，上下文交接只能在提交时发生；transcript 展示端把该块折叠为
-  `⤷ shell output:` 一行，未闭合的手写标记原样保留。
-- 执行 shell：POSIX 下取 `env.SHELL` 且 basename 为 bash/zsh 的可执行文件，
-  否则回退 `/bin/sh`；Windows 保持 `ComSpec ?? cmd.exe`（`/d /s /c`）。
-- bash/zsh 以 `-ic` 执行：交互模式加载真实 rc 路径，使 `!` 与用户交互 shell
-  里的 alias、函数、初始化一致（`!gd` == `git diff`）。不能用非交互 `-c` +
-  前缀注入替代：zsh 对 `-c` 串整体先解析再执行，同一串内定义的 alias 对串内
-  命令不生效（bash 按完整命令逐段解析才可行，且依赖 expand_aliases）。
-- `-i` 在无控制 tty 时产生启动期 stderr 诊断（bash 的
-  `cannot set terminal process group` / `no job control in this shell`，
-  zsh 同类 tty/job-control 警告）：属 shell 启动噪声而非命令输出，从捕获
-  输出中剔除；其余 stderr 原样保留进输出。
-- rc 的副作用（噪声输出、慢初始化、阻塞读）与用户在自己终端里执行同一命令
-  的暴露面一致；stdin 置 ignore，120s 超时兜底。
-- 非 bash/zsh 的 SHELL 走原 `/bin/sh -c` 语义：不读 rc、无 alias。
+  输出（stdout/stderr 合并、120s 超时）作为 system 消息行写入 transcript；
+  捕获输出以 `<shell-output …>` 块前置到下一条真实 prompt（slash 命令不消费
+  缓冲，缓冲只交付一次）。core 没有「追加本地消息」的协议面，上下文交接只能
+  在提交时发生；transcript 展示端把该块折叠为 `⤷ shell output:` 一行
+  （截断时附 full output 路径），未闭合的手写标记原样保留。
+- 执行 shell（fork 有意偏离 pi-mono 的确定性 bash 解析，恢复早期
+  `80729ec8`/`f5241576` 交互式变体的动机：操作者的 rc alias/函数对 `!gs`
+  这类手敲命令必须生效）：Unix 下可执行 bash/zsh 的 `$SHELL` 优先，以
+  `+m -ic` 交互执行（交互 rc 加载——zsh 读 `.zshenv`/`.zshrc`、bash 读
+  `.bashrc`，login rc（`.zprofile`/`.bash_profile`）不读；alias、函数、
+  rc 导出的变量生效；不能用非交互 `-c` + 前缀注入替代——zsh 对 `-c` 串
+  整体先解析，串内定义的 alias 对串内命令不生效）；`$SHELL`
+  缺失/不可执行/非 bash-zsh 时回退 pi 链（`/bin/bash` → `which bash` →
+  `sh`，非交互 `-c`，不加载 rc）。`-i` 无控制 tty 时 bash/zsh 的启动期
+  stderr 诊断（job control / tty pgrp）属 shell 启动噪声：仅交互分支在
+  finish 时从流首剔除**至多 2 行**带 shell 名前缀的已知诊断行——诊断只
+  出现在启动、任何命令输出之前，限位保证长得像诊断的用户输出行（如
+  `!echo 'no job control in this shell'`）不被无声吃掉；本地化措辞不
+  匹配时漏删只是外观问题，反向才是数据丢失。spill 文件保留原始流首
+  （清理后全文的定位不变）。Windows 维持 Git Bash 链（`where bash.exe`、
+  旧 WSL bash.exe 走 stdin `-s`），绝不交互。POSIX detached（新 session、
+  无控制终端）spawn——`+m` 关 monitor 且 detached 根除启动期 tcsetpgrp
+  抢占（客户端 stdin read 不再 SIGTTIN 挂起）；超时/中止按进程树
+  SIGKILL；completion 按 `exit` + idle-pipe grace 等待（pi#5303，
+  detached 孙进程占住 stdout 管道不得挂起或截尾）。
+- 输出按 pi-mono bash-executor 语义「保尾 + 落盘」：超过 64k 字符 / 2000 行
+  （先到者）截断，保留尾部完整行；首行（从尾往前第一个超限行）单独超限到
+  字符上限时保留该行末尾 64k 字符。截断发生时完整输出在
+  `<tmpdir>/piz-shell-<hex>.log`（0600、`wx`）：累计越过 64k 字符阈值时懒
+  开启并回填已缓冲块，行数超限而字符未越界时在完成时兜底开启；内存滚动
+  缓冲上限 128k 字符（阈值 2 倍，与 pi 相同）。输出流与 pi 一致：逐块先
+  清理（控制字符剔除）再计数、缓冲与落盘——控制字符密集的输出不会让滚动
+  淘汰跑赢截断阈值，spill 文件即清理后全文；与 pi 的剩余差异仅阈值单位
+  （64k 字符 vs 50KB 字节）。spill 存在即交付路径（展示端仍按截断门控），
+  避免留下无人引用的文件。
+- 截断告知三处同步：`<shell-output>` 块头加 `truncated=true` 与
+  `full_output="<path>"` 属性，块尾与 transcript 行追加
+  `[Output truncated. Full output: <path>]`（状态行同样提示）；展示折叠的
+  `⤷ shell output:` 通知在截断时附路径。spill 写失败降级为无路径的截断
+  标记并写单行 stderr 诊断，不影响命令结果本身。
+- `!!cmd` 输出不进上下文（pi excludeFromContext 语义），但同样截断/落盘，
+  transcript 行与状态行照常给出 full output 路径供操作者查看。
 
 ## 图片粘贴与草稿附件
 

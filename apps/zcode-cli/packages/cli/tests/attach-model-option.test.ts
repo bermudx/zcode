@@ -12,6 +12,11 @@ import {
   resolveInitialModelRef,
 } from "../src/attach/attach-command.js";
 import { parseAttachEntryArgs } from "../src/attach/attach-entry-args.js";
+import {
+  GLM_COMPACT_CONTEXT_WINDOW,
+  isGlmModelId,
+  resolveCompactContextWindowForModel,
+} from "../src/attach/attach-compact-cap.js";
 
 /**
  * `--model` 启动模型选择（docs/design/v2/tui-attach-shared-core.md
@@ -164,6 +169,7 @@ interface AttachHarness {
 /** runAttachCommand + 假 core：默认走 session/create 新会话路径。 */
 async function startAttachHarness(
   available?: ZCodeModelOption[],
+  startModelId = "glm-4.6",
 ): Promise<AttachHarness> {
   const dir = await mkdtemp(join(tmpdir(), "attach-model-"));
   const workspace = join(dir, "workspace");
@@ -173,7 +179,7 @@ async function startAttachHarness(
     { env: { ZCODE_DATA_BASE_DIR: dir } },
   );
   await mkdir(dirname(socketPath), { recursive: true });
-  let currentModelId = "glm-4.6";
+  let currentModelId = startModelId;
   const core = await startFakeCore(socketPath, (request) => {
     if (request.method === "session/create") return makeSnapshot(currentModelId, available);
     if (request.method === "session/resume") return makeSnapshot(currentModelId, available);
@@ -204,7 +210,8 @@ async function startAttachHarness(
         },
       } as never,
       stdin: process.stdin,
-      stdout: process.stdout,
+      // 退出续接提示走 ctx.stdout：接静默 sink，提示不污染测试输出。
+      stdout: { write: () => true } as never,
     } as RunContext;
     let tuiOptions: Record<string, unknown> | undefined;
     const deps = {
@@ -405,6 +412,100 @@ test("空值 --model：报错退出", async () => {
     const result = await h.runAttach("  ");
     assert.equal(result.exitCode, 1);
     assert.match(result.stderr, /--model requires a non-empty value/);
+  } finally {
+    await h.destroy();
+  }
+});
+
+// ── 压缩窗口上限（GLM → 262K，跟随当前模型） ──
+
+const capRequests = (requests: Captured[]) =>
+  requests
+    .filter((r) => r.method === "session/setCompactContextWindow")
+    .map((r) => r.params.compactContextWindow);
+
+test("压缩上限谓词：GLM 家族大小写不敏感，非 GLM 不设", () => {
+  assert.equal(GLM_COMPACT_CONTEXT_WINDOW, 262_000);
+  for (const id of ["GLM-5.3", "GLM-5.3-Flash", "glm-5.3", "glm-4.6"]) {
+    assert.equal(isGlmModelId(id), true, id);
+    assert.equal(resolveCompactContextWindowForModel(id), 262_000, id);
+  }
+  for (const id of ["claude-sonnet-4", "gpt-5", "my-glm-fork", "", undefined]) {
+    assert.equal(isGlmModelId(id), false, String(id));
+    assert.equal(resolveCompactContextWindowForModel(id), undefined, String(id));
+  }
+});
+
+test("create 路径：GLM 当前模型 → 下发 262000", async () => {
+  const h = await startAttachHarness(undefined, "GLM-5.3");
+  try {
+    const result = await h.runAttach();
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(capRequests(h.coreRequests), [262_000]);
+    assert.equal(
+      h.coreRequests.find((r) => r.method === "session/setCompactContextWindow")?.params
+        .sessionId,
+      SID,
+    );
+  } finally {
+    await h.destroy();
+  }
+});
+
+test("create 路径：非 GLM 当前模型 → 显式清除（null），不下发数值", async () => {
+  const h = await startAttachHarness(
+    [modelOption("claude-sonnet-4"), modelOption("glm-5.3")],
+    "claude-sonnet-4",
+  );
+  try {
+    const result = await h.runAttach();
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(capRequests(h.coreRequests), [null]);
+  } finally {
+    await h.destroy();
+  }
+});
+
+test("resume 路径：恢复会话后按其当前模型下发", async () => {
+  const h = await startAttachHarness(undefined, "glm-5.3");
+  try {
+    const result = await h.runAttach(undefined, { continueSession: true });
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.ok(h.coreRequests.some((r) => r.method === "session/resume"));
+    assert.deepEqual(capRequests(h.coreRequests), [262_000]);
+  } finally {
+    await h.destroy();
+  }
+});
+
+test("--model 切到非 GLM：setModel 之后重算为 null；仅同步一次", async () => {
+  const h = await startAttachHarness(
+    [modelOption("claude-sonnet-4"), modelOption("glm-5.3")],
+    "glm-5.3",
+  );
+  try {
+    const result = await h.runAttach("zai/claude-sonnet-4");
+    assert.equal(result.exitCode, 0, result.stderr);
+    const methods = h.coreRequests.map((r) => r.method);
+    assert.ok(
+      methods.indexOf("session/setCompactContextWindow") > methods.indexOf("session/setModel"),
+      "cap must be recomputed after the model switch",
+    );
+    assert.deepEqual(capRequests(h.coreRequests), [null]);
+  } finally {
+    await h.destroy();
+  }
+});
+
+test("--model 切到 GLM：setModel 之后下发 262000", async () => {
+  const h = await startAttachHarness(
+    [modelOption("claude-sonnet-4"), modelOption("glm-5.3")],
+    "claude-sonnet-4",
+  );
+  try {
+    const result = await h.runAttach("zai/glm-5.3");
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(capRequests(h.coreRequests), [262_000]);
   } finally {
     await h.destroy();
   }

@@ -73,6 +73,7 @@ export interface AgentRuntimeCoreMethods {
   ): boolean;
   getSessionShellSelection(): ExecutionShellSelection | undefined;
   getMode(): CollaborationMode;
+  setCompactContextWindowCap(cap: number | undefined): void;
   getPlanEnabled(): boolean;
   grantPermissionFullAccess(interactionId: string, signal?: AbortSignal): Promise<string>;
   setExecutionState(

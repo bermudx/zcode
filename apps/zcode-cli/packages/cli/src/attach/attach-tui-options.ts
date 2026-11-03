@@ -416,9 +416,12 @@ export class AttachRuntime {
         return false;
       }
       try {
+        const compactContextWindow = handle.getCompactContextWindow();
         await this.client.request(zcodeProtocolMethods.sessionResume, {
           sessionId: handle.sessionId,
           workspace: this.options.workspace,
+          // core 重启/空闲回收后冷恢复会丢掉内存里的上限，随 resume 带回当前模型对应的值。
+          ...(compactContextWindow !== undefined ? { compactContextWindow } : {}),
         });
         await handle.resubscribe();
         return true;
@@ -501,6 +504,8 @@ export function createAttachPromptHandler(
     });
     runtime.registerSession(handle);
     await handle.subscribe(undefined, true);
+    // /new /resume /fork 换会话：新绑定的 core session 也要按其当前模型设置压缩上限。
+    await handle.syncCompactContextWindow();
     return handle;
   };
 

@@ -778,7 +778,8 @@ test("协议版本不匹配 → 退出码 2 与可操作错误", async () => {
       },
     } as never,
     stdin: process.stdin,
-    stdout: process.stdout,
+    // 退出续接提示走 ctx.stdout：接静默 sink，提示不污染测试输出。
+    stdout: { write: () => true } as never,
   };
   const deps = {
     cwd: () => workspace,
@@ -833,7 +834,8 @@ test("runAttachCommand 给传输接 stderr 诊断：畸形行有日志、连接�
       },
     } as never,
     stdin: process.stdin,
-    stdout: process.stdout,
+    // 退出续接提示走 ctx.stdout：接静默 sink，提示不污染测试输出。
+    stdout: { write: () => true } as never,
   };
   const deps = {
     cwd: () => workspace,
@@ -1020,6 +1022,70 @@ test("sendInput '/model …' 经 commandCenter → session/setModel，不发 v4 
       "slash command must not reach the sendText command lane",
     );
   } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("会话中途 /model 切换：压缩上限跟随当前模型；旧 core（-32601）静默", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let currentModelId = "glm-5.3";
+  let legacyCore = false;
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/setModel") {
+      currentModelId = (request.params as { model: { modelId: string } }).model.modelId;
+      const snapshot = makeSnapshot() as ReturnType<typeof makeSnapshot> & {
+        settings: { model: { current: unknown } };
+      };
+      snapshot.settings.model.current = { modelId: currentModelId, providerId: "zai" };
+      return snapshot;
+    }
+    if (request.method === "session/setCompactContextWindow" && legacyCore) {
+      return Promise.reject(Object.assign(new Error("Method not found"), { code: -32601 }));
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const snapshot = makeSnapshot() as ReturnType<typeof makeSnapshot> & {
+    settings: { model: { available: unknown[]; current: unknown } };
+  };
+  snapshot.settings.model.current = { modelId: "glm-5.3", providerId: "zai" };
+  snapshot.settings.model.available = [
+    modelOption("glm-5.3"),
+    modelOption("claude-sonnet-4"),
+  ];
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: snapshot as never,
+  });
+  const caps = () =>
+    core.requests
+      .filter((r) => r.method === "session/setCompactContextWindow")
+      .map((r) => (r.params as { compactContextWindow: unknown }).compactContextWindow);
+  try {
+    assert.equal(handle.getCompactContextWindow(), 262_000);
+    await handle.setModel("zai/claude-sonnet-4");
+    assert.equal(handle.getCompactContextWindow(), undefined);
+    await handle.setModel("zai/glm-5.3");
+    assert.deepEqual(caps(), [null, 262_000]);
+
+    // 旧 core 不认识该方法：不抛、不出 notice。
+    legacyCore = true;
+    const notices: unknown[] = [];
+    handle.addSink((event) => {
+      if ((event.type as string) === "session_notice") notices.push(event);
+    });
+    await handle.syncCompactContextWindow();
+    assert.deepEqual(notices, []);
+  } finally {
+    client.close();
     await runtime.close();
     await core.close();
     await rm(dir, { force: true, recursive: true });
@@ -2050,7 +2116,7 @@ test("loadStartupOptions 的 slashCommands 含协议目录里的自定义命令"
   } as never;
   try {
     const exitCode = await runAttachCommand(
-      { argv: [], stderr: process.stderr, stdin: process.stdin, stdout: process.stdout } as never,
+      { argv: [], stderr: process.stderr, stdin: process.stdin, stdout: { write: () => true } } as never,
       {} as never,
       deps,
       "0.0.0-test",

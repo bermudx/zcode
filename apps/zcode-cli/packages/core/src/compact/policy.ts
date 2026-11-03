@@ -16,6 +16,11 @@ export const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3;
 export interface AutoCompactPolicyConfig {
   enabled?: boolean;
   contextWindow?: number;
+  /**
+   * 每会话的压缩窗口上限（协议客户端设置）。只能收紧：有效窗口 = min(cap, contextWindow)，
+   * 对更小窗口的模型不会放大。只影响压缩决策，不改 provider 请求限制。
+   */
+  contextWindowCap?: number;
   maxOutputTokens?: number;
   modelContextBudgetStrategy?: "legacy" | "preflight-v1";
   summaryReserveTokens?: number;
@@ -64,8 +69,16 @@ export interface AutoCompactDecision {
     | "above_threshold";
 }
 
+/** 压缩决策使用的窗口：模型窗口（缺省 200K）再被每会话 cap 收紧，cap 永不放大窗口。 */
+export function resolveCompactContextWindow(config: AutoCompactPolicyConfig = {}): number {
+  const window = positiveInt(config.contextWindow) ?? DEFAULT_COMPACT_CONTEXT_WINDOW;
+  const cap = positiveInt(config.contextWindowCap);
+  // cap=0 视为未设置：0 窗口会让每次检查都触发压缩。
+  return cap === undefined || cap === 0 ? window : Math.min(cap, window);
+}
+
 export function getEffectiveContextWindowSize(config: AutoCompactPolicyConfig = {}): number {
-  const contextWindow = positiveInt(config.contextWindow) ?? DEFAULT_COMPACT_CONTEXT_WINDOW;
+  const contextWindow = resolveCompactContextWindow(config);
   // provider 的 context window 是 input + output 共享窗口；自动压缩只能让出输入侧，
   // 因此阈值分母必须先扣掉当前模型允许的 output token，而不是继续吃完整 contextWindow。
   const reserve = Math.min(getAutoCompactOutputReserveTokens(config), contextWindow);
@@ -94,7 +107,7 @@ export function shouldAutoCompact(input: {
   tokenOverride?: AutoCompactTokenOverride;
 }): AutoCompactDecision {
   const config = input.config ?? {};
-  const contextWindow = positiveInt(config.contextWindow) ?? DEFAULT_COMPACT_CONTEXT_WINDOW;
+  const contextWindow = resolveCompactContextWindow(config);
   const effectiveContextWindow = getEffectiveContextWindowSize(config);
   const outputReserveTokens = Math.min(getAutoCompactOutputReserveTokens(config), contextWindow);
   const threshold = getAutoCompactThreshold(config);

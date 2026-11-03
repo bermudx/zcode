@@ -5,6 +5,7 @@ import {
   getAutoCompactOutputReserveTokens,
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
+  resolveCompactContextWindow,
   shouldAutoCompact,
 } from "../src/compact/index.js";
 import {
@@ -310,3 +311,62 @@ describe("normal request output target", () => {
     ).toBe(11_000);
   });
 });
+
+describe("per-session context window cap", () => {
+  const messages = [
+    { role: "user" as const, content: "u".repeat(4_000) },
+    { role: "assistant" as const, content: "a".repeat(4_000) },
+  ];
+
+  it("tightens a larger model window: 262K cap on a 1M model compacts at ~228K", () => {
+    const config = { contextWindow: 1_000_000, contextWindowCap: 262_000, maxOutputTokens: 32_000 };
+    // reserve = min(32K, 21K) = 21K; threshold = 262K - 21K - 13K
+    expect(resolveCompactContextWindow(config)).toBe(262_000);
+    expect(getEffectiveContextWindowSize(config)).toBe(241_000);
+    expect(getAutoCompactThreshold(config)).toBe(228_000);
+    expect(getAutoCompactThreshold({ ...config, contextWindowCap: undefined })).toBe(966_000);
+  });
+
+  it("never raises a smaller model window", () => {
+    const config = { contextWindow: 128_000, contextWindowCap: 262_000, maxOutputTokens: 8_000 };
+    expect(resolveCompactContextWindow(config)).toBe(128_000);
+    expect(getAutoCompactThreshold(config)).toBe(128_000 - 8_000 - 13_000);
+  });
+
+  it("clamps the default window when the model window is unknown", () => {
+    expect(resolveCompactContextWindow({ contextWindowCap: 262_000 })).toBe(200_000);
+    expect(resolveCompactContextWindow({ contextWindowCap: 100_000 })).toBe(100_000);
+  });
+
+  it("ignores a zero or negative cap", () => {
+    expect(resolveCompactContextWindow({ contextWindow: 1_000_000, contextWindowCap: 0 })).toBe(
+      1_000_000,
+    );
+    expect(resolveCompactContextWindow({ contextWindow: 1_000_000, contextWindowCap: -5 })).toBe(
+      1_000_000,
+    );
+  });
+
+  it("shouldAutoCompact uses the capped window and reports it", () => {
+    const base = { contextWindow: 1_000_000, maxOutputTokens: 21_000 };
+    const tokenOverride = {
+      source: "provider_usage" as const,
+      tokenCount: 240_000,
+    };
+    const uncapped = shouldAutoCompact({ config: base, messages, tokenOverride });
+    expect(uncapped).toMatchObject({ shouldCompact: false, reason: "below_threshold" });
+
+    const capped = shouldAutoCompact({
+      config: { ...base, contextWindowCap: 262_000 },
+      messages,
+      tokenOverride,
+    });
+    expect(capped).toMatchObject({
+      shouldCompact: true,
+      reason: "above_threshold",
+      contextWindow: 262_000,
+      threshold: 228_000,
+    });
+  });
+});
+

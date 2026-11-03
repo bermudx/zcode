@@ -374,6 +374,20 @@ projection 再 reset，种子整体被抹掉）。
 - **不做**：不写客户端默认模型偏好（交互 `/model` 会记忆默认选型；
   一次性旗标不改变持久偏好），不改协议 schema、不改服务端。
 
+### GLM 压缩窗口上限（262K）
+
+piz 对 GLM 系列模型（`modelId` 匹配 `/^glm-/i`）把 core 的 auto-compact 窗口压到
+262,000（≈228K 触发），其他模型不设。常量与谓词的唯一来源是
+`@zcode/shared` `compact-context-window.ts`（`attach/attach-compact-cap.ts`
+re-export 兼容旧导入路径）——wire 下发与 tui-pi 页脚分母收紧同源，不会漂移。
+`AttachSessionHandle.syncCompactContextWindow()` 在
+会话绑定（启动 create/resume、`/new` `/resume` `/fork`）、`setModel` 成功后、以及
+`recoverSession` 的 resume 里下发——cap 跟随**当前**模型，切到非 GLM 会以 `null` 清除。
+core 侧契约与理由见 [compact/plan.md M2.1](./compact/plan.md)。2026-11-02 修订：
+原「此上限不改页脚 ctx 分母」不再成立——页脚/信息面板的 ctx 分母现在按同一
+谓词客户端侧收紧（见 [tui-pi-frontend.md](./tui-pi-frontend.md) 的 ctx 仪表条目）；
+协议与 core 侧窗口语义仍不动。
+
 ### 模型状态同步（mutation 快照 / state.updated）
 
 legacy `session/setModel`/`setThoughtLevel`/`setMode` 与订阅事件不同源：
@@ -487,6 +501,40 @@ core，用户无感。detached session 仍在收养窗口内时池非空，core 
 做成有 ack 的有界等待——socket 先关会让 fire-and-forget 的 stop 落不了线。
 opentui 前端无三选一 UI：busy 退出统一先 `session/stop` 再退，保持
 旧"退出即终止"语义而不是静默 detach。
+
+### 退出续接提示（exit resume hint，2026-11-02）
+
+客户端正常退出（TUI 拆屏、`runTui` 返回 0）后，attach 客户端在 stdout 打
+两行恢复指引，让会话 id 不必事后翻 session/list：
+
+```
+Resume this session with:
+piz --resume sess_…
+```
+
+- **命令名跟随入口**：zcode-attach（piz wrapper）入口打
+  `piz --resume <id>`（判据：`attachHerdrAgent === "piz"`，与进程/产品名同源）；
+  monolith 入口（`zcode attach`，argv 重写透传全局旗标）打
+  `zcode attach --resume <id>`。两条命令都真实可解析、可恢复。
+- **会话 id 取当前绑定**：`promptHandler.getMainSessionId()` 跟随
+  /new /resume /fork 换绑后的当前会话，不用启动 snapshot 的陈旧 id。
+- **打印门槛**：`runTui` 返回 0 且存在绑定会话 id。`runTui` 非 0 返回
+  （non-TTY 拒绝）与启动期失败（版本不匹配等 throw，exit 2）都没有
+  "这个会话"可续接；SIGTERM/SIGHUP 走 reap-then-reraise，进程直接
+  终止，到不了打印点。空会话（开了就退）也打印——提示恒定可预测，
+  刻意不做"有无输入"的内容判断。
+- **时序**：写在 `runAttachCommand` 的 `await runTui` 之后、
+  `finally { runtime.close() }` 之前。此时 pi-tui 已 `app.stop()` 恢复
+  终端，stdout 回到主屏缓冲，提示不会被备用屏吞掉；协议走 socket，
+  与此 stdout 无涉。
+- **范围**：仅 attach 通道（runAttachCommand）。monolith 独立
+  `zcode tui`（opentui 前端）不在 piz 产品线，不加。opentui 前端经
+  `--tui-frontend opentui --shared-core` 走同一通道：终端恢复点在
+  `renderer.destroy()`（DESTROY 路径），提示同样打印，但命令名恒为
+  `zcode attach`——该命令 argv 重写固定落回 pi 前端（同会话 id、换
+  UI）。monolith-only 开发通道，接受此偏差（2026-11-02 评审记录）。
+- 回归：`tests/attach-exit-resume-hint.test.ts`（假 core + 假 runTui：
+  piz/monolith 命令名、非 0 退出不打提示、/new 换绑后提示跟随新 id）。
 
 ### 审批与提问反向请求（interaction/*）
 

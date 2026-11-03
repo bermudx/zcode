@@ -21,7 +21,7 @@ import type {
   TuiSubagentTranscriptSnapshot,
 } from "@zcode/tui";
 import type { CollaborationMode, TurnId } from "@zcode/contracts";
-import type { AttachClient } from "./attach-client.js";
+import { AttachProtocolError, type AttachClient } from "./attach-client.js";
 import {
   discardPendingInputs as discardPendingInputsLane,
   localFollowUpDrainedPayload,
@@ -38,6 +38,7 @@ import {
   sendTextCommand,
   stopCommand,
 } from "./attach-v4-command.js";
+import { resolveCompactContextWindowForModel } from "./attach-compact-cap.js";
 import {
   projectAttachTranscriptMessages,
   projectSessionSnapshotSeed,
@@ -555,6 +556,31 @@ export class AttachSessionHandle {
     for (const sink of this.sinks) sink(event);
   }
 
+  /** 当前模型对应的压缩窗口上限（GLM → 262K，其余 undefined）；resume 恢复时随请求下发。 */
+  getCompactContextWindow(): number | undefined {
+    return resolveCompactContextWindowForModel(this.snapshot.settings.model.current?.modelId);
+  }
+
+  /**
+   * 让 core 的 auto-compact 窗口上限跟随**当前**模型：GLM 设 262K，其余以 null 清除
+   * （复用的活跃 session 可能带着上一个客户端留下的旧上限，所以非 GLM 也要显式清除）。
+   * 旧 core 没有该方法（-32601）时静默跳过；其他失败只出 notice，不阻断会话。
+   */
+  async syncCompactContextWindow(): Promise<void> {
+    try {
+      await this.clientOf().request(zcodeProtocolMethods.sessionSetCompactContextWindow, {
+        compactContextWindow: this.getCompactContextWindow() ?? null,
+        sessionId: this.sessionId,
+      });
+    } catch (error) {
+      if (error instanceof AttachProtocolError && error.code === -32601) return;
+      this.emitSinkEvent("session_notice", {
+        message: `Could not apply compact window cap: ${error instanceof Error ? error.message : String(error)}`,
+        role: "system",
+      });
+    }
+  }
+
   async setModel(modelId: string | ModelSelection): Promise<{ model: string }> {
     const selection = this.toModelSelection(modelId);
     const result = await this.clientOf().request(zcodeProtocolMethods.sessionSetModel, {
@@ -562,6 +588,8 @@ export class AttachSessionHandle {
       sessionId: this.sessionId,
     });
     this.applyMutationSnapshot(result);
+    // 压缩上限跟随当前模型：切到/切离 GLM 都要重新计算。
+    await this.syncCompactContextWindow();
     return { model: this.getModel() ?? "" };
   }
 

@@ -6315,7 +6315,10 @@ test("continues managed browser cleanup when app close never settles", async () 
   assert.equal(exitCode, 0);
   assert.equal(appCloseCount, 1);
   assert.equal(browserCloseCount, 1);
-  assert.ok(Date.now() - startedAt < 200);
+  // 这条断言钉的是「按 20ms 清理超时放行，不等 never-settling 的 close」：
+  // 生产默认 6s，<2000 仍足以分辨两者。全套件并行曾实测 632ms，<200 的
+  // 裸墙钟在负载下必炸，钉的不是真实不变量。
+  assert.ok(Date.now() - startedAt < 2000);
 });
 
 test("returns from a headless prompt when managed browser close never settles", async () => {
@@ -6355,7 +6358,10 @@ test("returns from a headless prompt when managed browser close never settles", 
   assert.equal(exitCode, 0);
   assert.equal(appCloseCount, 1);
   assert.equal(browserCloseCount, 1);
-  assert.ok(Date.now() - startedAt < 200);
+  // 这条断言钉的是「按 20ms 清理超时放行，不等 never-settling 的 close」：
+  // 生产默认 6s，<2000 仍足以分辨两者。全套件并行曾实测 632ms，<200 的
+  // 裸墙钟在负载下必炸，钉的不是真实不变量。
+  assert.ok(Date.now() - startedAt < 2000);
 });
 
 test("forces the existing exit code when the CLI watchdog deadline is reached", async () => {

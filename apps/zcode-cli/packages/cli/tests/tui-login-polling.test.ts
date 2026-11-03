@@ -331,7 +331,9 @@ test("browser failure keeps authorization URL available and polling completes", 
 
 test(
   "TUI renders the login URL in the current session and refreshes models after authorization",
-  { timeout: 5000 },
+  // opentui 测试渲染器 + 语法高亮等待本身就要 ~3.5s（实测）；全套件并行时
+  // 拉到 5-6.4s，5s 预算必炸。放宽到 30s：断言不变，只给真实渲染留余量。
+  { timeout: 30000 },
   async (t) => {
     const f = await fixture(t);
     const runtime = await startProcessProviderRegistryRuntime(f.env, {

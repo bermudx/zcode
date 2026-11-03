@@ -4,8 +4,8 @@
 // 恰好一行，故两者都只取渲染首行（Text 已按宽度换行并补齐，首行即天然单行
 // 截断，窄终端/长 status 也不会撑高 footer）。
 
-import { Container, Loader, type Component, type TUI } from "@earendil-works/pi-tui";
-import { appendFooterRightZone, formatMetaLine } from "./status-line.js";
+import { Container, Loader, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { appendFooterRightZone, formatPwdLine, formatStatsLine } from "./status-line.js";
 import type { AppStore } from "./store.js";
 import type { PiTheme } from "./theme.js";
 
@@ -16,12 +16,15 @@ import type { PiTheme } from "./theme.js";
 export const ACTIVITY_IDLE_INDICATOR = { frames: [" "] };
 
 /**
- * spinner + status 活动行：busy 时动画帧，idle 时空白帧位 + status。
+ * 活动行：`~/cwd (branch)` 行首 + spinner/status 中列 + 行尾额度簇。
+ * pwd 是常驻锚点（meta 行让位后移上来），status/spinner 占剩余中列，
  * 额度簇右对齐在行尾（账号级读数不占 meta 行的 session 左区）——
  * 余量不足时丢额度不截 status（appendFooterRightZone）。
  */
 export class ActivityLine extends Loader {
   private quotaText: string | undefined;
+  private branch: string | undefined;
+  private cwdLabel = "";
 
   constructor(
     tui: TUI,
@@ -30,13 +33,26 @@ export class ActivityLine extends Loader {
     super(tui, theme.accent, theme.muted, "");
   }
 
+  setLocation(input: { branch?: string; cwdLabel: string }): void {
+    this.branch = input.branch;
+    this.cwdLabel = input.cwdLabel;
+  }
+
   setQuota(quotaText: string | undefined): void {
     this.quotaText = quotaText;
   }
 
   override render(width: number): string[] {
-    const rows = super.render(width);
-    const line = rows[1] ?? " ".repeat(Math.max(0, width));
+    const pwd = formatPwdLine({ branch: this.branch, cwdLabel: this.cwdLabel, width });
+    const styledPwd = pwd ? this.theme.dim(pwd) : "";
+    const statusWidth = Math.max(0, width - visibleWidth(styledPwd) - (styledPwd ? 2 : 0));
+    const rows = statusWidth > 0 ? super.render(statusWidth) : [];
+    const statusLine = rows[1] ?? " ".repeat(statusWidth);
+    const line = styledPwd
+      ? statusWidth > 0
+        ? `${styledPwd}  ${statusLine}`
+        : styledPwd
+      : statusLine;
     return [
       appendFooterRightZone({
         line,
@@ -49,28 +65,25 @@ export class ActivityLine extends Loader {
 }
 
 /**
- * meta 行：左区 `~/cwd (branch)` + 用量簇 + ctx 仪表，右区身份簇。着色在
- * formatMetaLine 内按 pi 阈值完成（整行 dim、ctx 按占用分档），持有最新
- * state 在 render(width) 时按需收缩，恒为单行。
+ * meta 行：左区用量簇 + ctx 仪表，右区身份簇（formatStatsLine）。cwd 已
+ * 上移到活动行行首，meta 行只剩 session 统计。着色在 formatStatsLine 内
+ * 按 pi 阈值完成（整行 dim、ctx 按占用分档），持有最新 state 在
+ * render(width) 时按需收缩，恒为单行。
  */
 export class MetaLine implements Component {
-  private cwdLabel = "";
   private state: AppStore["state"] | undefined;
 
   constructor(private readonly theme: PiTheme) {}
 
-  setState(state: AppStore["state"], cwdLabel: string): void {
+  setState(state: AppStore["state"]): void {
     this.state = state;
-    this.cwdLabel = cwdLabel;
   }
 
   invalidate(): void {}
 
   render(width: number): string[] {
     const line = this.state
-      ? formatMetaLine({
-          branch: this.state.workspaceGitBranch,
-          cwdLabel: this.cwdLabel,
+      ? formatStatsLine({
           state: this.state,
           theme: this.theme,
           width,
@@ -81,8 +94,8 @@ export class MetaLine implements Component {
 }
 
 /**
- * Footer 恒定两行的唯一 owner：活动行（spinner + status + 行尾额度簇）
- * 与 meta 行（cwd + 用量/ctx | 身份）常驻，只换内容不换结构。活动判定与
+ * Footer 恒定两行的唯一 owner：活动行（cwd + spinner/status + 行尾额度簇）
+ * 与 meta 行（用量/ctx | 身份）常驻，只换内容不换结构。活动判定与
  * quitChoice.turnBusy 同口径（busy 或前台 activeTurnId），attach 会话的
  * 远端 turn 也转 spinner；指示切换只在 busy 沿变化时发生，空闲指示帧数
  * ≤1，idle 下没有帧定时器空转。
@@ -117,8 +130,9 @@ export class StatusFooter extends Container {
       this.activity.setIndicator(active ? undefined : ACTIVITY_IDLE_INDICATOR);
     }
     this.activity.setMessage(state.status || (active ? input.idleHint : ""));
+    this.activity.setLocation({ branch: state.workspaceGitBranch, cwdLabel: input.cwdLabel });
     this.activity.setQuota(input.quotaText);
-    this.meta.setState(state, input.cwdLabel);
+    this.meta.setState(state);
   }
 
   stop(): void {

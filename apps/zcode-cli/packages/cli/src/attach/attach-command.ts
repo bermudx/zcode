@@ -209,6 +209,8 @@ export const runAttachCommand = async (
           throw new Error(`--model: ${message}`);
         }
       }
+      // 压缩窗口上限跟随当前模型；--model 走 setModel 已经同步过一次，不重复下发。
+      if (initialModel === undefined) await handle.syncCompactContextWindow();
       const promptHandler = createAttachPromptHandler({
         client,
         initialHandle: handle,
@@ -222,7 +224,7 @@ export const runAttachCommand = async (
           : (await loadTuiRuntime()).runTui);
       const developerMode = resolveZCodeRuntimeEnv(env) === "development";
       const workflowMode = DEFAULT_CLI_WORKFLOW_MODE;
-      return await runTui({
+      const exitCode = await runTui({
         developerMode,
         getMainSessionId: promptHandler.getMainSessionId,
         initialMode: handle.getMode(),
@@ -320,6 +322,21 @@ export const runAttachCommand = async (
         writeClipboardText:
           deps.writeClipboardText ?? createNodeClipboardTextWriter({ stdout: ctx.stdout }),
       });
+      // 退出续接提示（spec「退出续接提示」）：只在正常退出（exit 0）且有绑定
+      // 会话时打——此时 TUI 已拆屏、终端已恢复，stdout 回到主屏缓冲。非 0 退出
+      // 没有可续接的会话；信号退出走 reap-then-reraise，到不了这里。
+      if (exitCode === 0) {
+        const sessionId = promptHandler.getMainSessionId?.();
+        if (sessionId) {
+          ctx.stdout.write(
+            formatExitResumeHint(
+              attachHerdrAgent === "piz" ? "piz" : "zcode attach",
+              sessionId,
+            ),
+          );
+        }
+      }
+      return exitCode;
     } finally {
       // 只断连接；core 端会话与运行时继续存活（共享 core 的全部意义）。
       await runtime.close();
@@ -333,6 +350,11 @@ export const runAttachCommand = async (
     return error instanceof AttachProtocolVersionError ? 2 : 1;
   }
 };
+
+/** 退出续接提示的两行文案。会话 id 只在 core 侧记录里可查，退出时打出来
+ *  省得事后翻 session/list；命令名由入口决定（piz / zcode attach）。 */
+export const formatExitResumeHint = (command: string, sessionId: string): string =>
+  `Resume this session with:\n${command} --resume ${sessionId}\n`;
 
 /** `--model` 取值归一：bare modelId 在目录唯一命中时补全 provider，
  *  完整 ref（含 `$effort` 后缀）原样交给 setModel 的目录校验

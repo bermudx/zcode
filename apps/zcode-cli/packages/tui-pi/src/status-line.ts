@@ -1,11 +1,12 @@
-// Footer meta 行布局（pi-mono footer 同构）：左区 `~/cwd (branch)` + session
-// 用量簇（↑in ↓out R… [W…] [CH%] [$cost]）+ ctx 仪表 `{pct}%/{win}(auto)`，
-// 右区身份簇 `(provider) model • thought • mode • agents:N`；额度簇右对齐
-// 在活动行尾（appendFooterRightZone）。分段门与分隔符、右对齐最小间距、
-// 截断标记均对齐 pi footer：左区行尾 "..." 截断 → 右区按剩余宽度截断
-// （无标记）。
+// Footer 布局（pi-mono footer 同构）：活动行行首 `~/cwd (branch)`（formatPwdLine）
+// + 行尾右对齐额度簇（appendFooterRightZone）；meta 行左区 session 用量簇
+// （↑in ↓out R… [W…] [CH%] [$cost]）+ ctx 仪表 `{pct}%/{win}(auto)`，右区
+// 身份簇 `(provider) model • thought • mode • agents:N`。分段门与分隔符、
+// 右对齐最小间距、截断标记均对齐 pi footer：左区行尾 "..." 截断 → 右区
+// 按剩余宽度截断（无标记）。
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { resolveCompactContextWindowForModel } from "@zcode/shared";
 import type { ContextUsage } from "@zcode/tui/internals";
 import type { PiTheme } from "./theme.js";
 import type { AppStore, UsageTotals } from "./store.js";
@@ -120,6 +121,33 @@ function contextUsageWithModelWindow(s: AppStore["state"]): ContextUsage {
 }
 
 /**
+ * 展示用 ctx 终态 = 目录回退窗口再按每会话压缩上限收紧：GLM 会话分母 =
+ * `min(cap, 窗口)`，窗口缺失时直接取 cap（`?/262k` 仍可比 `?/1.0M` 诚实）。
+ * core 在 有效窗口−21K−13K ≈ 228K 触发 auto-compact——不收紧的话 1M 分母
+ * 把 100% 刻度放到触发线 ~4.4 倍处。cap 谓词与 attach 下发同源
+ * （`@zcode/shared`），发送与展示不会漂移。info-panel 的 ctx 行同用此终态。
+ */
+export function effectiveContextUsage(s: AppStore["state"]): {
+  usage: ContextUsage;
+  compactCapped: boolean;
+} {
+  const usage = contextUsageWithModelWindow(s);
+  const cap = resolveCompactContextWindowForModel(
+    s.model ? splitModelLabel(s.model).model : undefined,
+  );
+  if (cap === undefined) return { usage, compactCapped: false };
+  const window = usage.contextWindow;
+  return {
+    usage: {
+      ...usage,
+      contextWindow:
+        window === undefined || window <= 0 ? cap : Math.min(cap, window),
+    },
+    compactCapped: true,
+  };
+}
+
+/**
  * 可用 provider 数：modelOptions 里去重后的 providerId 数（pi
  * `getAvailableProviderCount()` 同角色）。快照缺席时按 1 处理——不凭空
  * 显示 provider 前缀。
@@ -192,9 +220,13 @@ export function appendFooterRightZone(input: {
   const { line, right, theme, width } = input;
   if (!right || width < 1) return line;
   const styled = theme.dim(right);
-  const gap = width - visibleWidth(line) - visibleWidth(styled);
+  // 调用方传入的是 Loader/Text.render 已补到满宽的行（尾部填充空格是
+  // 装饰不是内容）：直接量 line 宽 gap 恒 <2，右区永不落位——必须按
+  // 去尾填充后的内容宽计算间距。
+  const content = line.replace(/ +$/, "");
+  const gap = width - visibleWidth(content) - visibleWidth(styled);
   if (gap < 2) return line;
-  return `${line}${" ".repeat(gap)}${styled}`;
+  return `${content}${" ".repeat(gap)}${styled}`;
 }
 
 /** stats 行左区：用量簇 + $ + ctx 仪表（pi footer 同序），空段跳过。 */
@@ -209,7 +241,12 @@ const formatStatsLeftSegments = (
   if (usage) segments.push({ text: usage });
   const cost = formatCostSegment(s.usageTotals?.costUsd);
   if (cost) segments.push({ text: cost });
-  const ctx = contextSegmentParts(contextUsageWithModelWindow(s), { autoCompact: s.autoCompact });
+  // (auto)：pi 语义是 auto-compact 设置态；piz 的 GLM cap 激活时分母即
+  // 压缩预算，同样渲染（见 tui-pi-frontend.md `(auto)` 条目）。
+  const ctxSource = effectiveContextUsage(s);
+  const ctx = contextSegmentParts(ctxSource.usage, {
+    autoCompact: s.autoCompact || ctxSource.compactCapped,
+  });
   if (ctx.text) {
     segments.push({
       isContext: true,
@@ -267,42 +304,12 @@ const composeFooterZones = (input: {
   return `${left}${theme.dim(padding + right)}`;
 };
 
-/** stats 行（无 cwd 前缀）：用量簇 + ctx | 身份簇。 */
+/** stats 行（meta 行，无 cwd 前缀——cwd 已上移到活动行行首）：用量簇 + ctx | 身份簇。 */
 export function formatStatsLine(input: { state: AppStore["state"]; width: number; theme: PiTheme }): string {
   const { state, width, theme } = input;
   if (width < 1) return "";
   return composeFooterZones({
     left: renderStatsLeft(state, theme),
-    right: formatIdentityCluster(state) ?? "",
-    theme,
-    width,
-  });
-}
-
-/**
- * meta 行（footer 第二行）：`~/cwd (branch)` 前缀 + stats 左区 | 身份簇。
- * cwd 与用量簇之间两空格；左区超宽从行尾 "..." 截断——cwd 在最前最后丢，
- * 用量/ctx 读数先行收缩（与原 stats 行同序）。
- */
-export function formatMetaLine(input: {
-  branch?: string;
-  cwdLabel?: string;
-  state: AppStore["state"];
-  width: number;
-  theme: PiTheme;
-}): string {
-  const { state, width, theme } = input;
-  if (width < 1) return "";
-  const pwd = formatPwdLine({ branch: input.branch, cwdLabel: input.cwdLabel, width });
-  const statsLeft = renderStatsLeft(state, theme);
-  const left = [
-    pwd ? theme.dim(pwd) : "",
-    statsLeft,
-  ]
-    .filter((part) => part.length > 0)
-    .join("  ");
-  return composeFooterZones({
-    left,
     right: formatIdentityCluster(state) ?? "",
     theme,
     width,
