@@ -102,8 +102,20 @@ submission/acceptance status is **unverified**; no fork PR links have been recor
 | P001 | Extra-usage request path: signing and auth/security error policy in adapters request-security-edition and root shared policy; code presence does not prove allowance eligibility | `86ab5b13`, `df8bc4a7`; adapters `client-request-signing.test.ts`; [design](apps/zcode-cli/docs/design/v2/model/client-request-signing.md) | Only retire the local implementation when a verified replacement preserves mandatory signing and the supported extra-usage request path |
 | P002 | Original TUI controls, paste routing, live transcript echo of drained queue inputs (`TurnSteerDrained.drainedInputs` → user rows in the shared reducer, idempotent by messageId with pendingInputId fallback, sensitive-prompt redaction on echo, visibility aligned with both resume authorities — no intent/text-based skip, `/compact` text not re-interpreted as visibility) and extracted frontend interfaces: CLI tui package | `090276d9`, `31a770cc`, `c0abfcb1`, `6ee50f58`, `c0527374` + `f4780a2b` review fixups; the 2026-10-27 merge into main supersedes the earlier id-less echo variant (`a40b6960`); tui keymap/paste/exit tests, `tui-events.test.ts` (drained row, duplicate delivery, pendingInputId fallback, compact intent renders like resume, `/compact`-looking text) | No remaining piz dependency, or upstream equivalent passes relevant regressions; no wholesale deletion without dependency audit |
 | P003 | pi frontend: tui-pi, CLI selection/build wiring, architecture registration, clipboard image paste (`ctrl+v`/`alt+v`), `/skill` argument completion, kitty key-release filtering in chord dispatch, constant three-row footer (activity + pwd/branch row + two-zone stats row; 2026-10-27 verbatim pi parity: `↑↓R[W] CH% $cost ctx(auto)` segment gates + ctx threshold coloring + `•` identity separators + provider-prefix rule + provider-balance-style pwd-row quota slot), startup `PiBanner` (logo/version/hints/model scope), `userBg` user message block, `markdown*` terminal theme, transcript rendering polish (borderless volume-balanced markdown tables with fence-aware scanning + narrow-table width guard, `json`-fence pretty-printing for provider tool narration, thought/tool part-row restyle + inter-part rhythm; `TranscriptMarkdown` in tui-pi), `!` shell escape (interactive bash/zsh `$SHELL` `+m -ic` in an isolated session/process group so rc aliases/functions apply, non-bash/zsh, missing or non-executable `$SHELL` falls back to deterministic non-interactive `/bin/bash -c`; `!!` opt-out; output keeps the tail at 64k chars / 2000 lines and spills the full output to `<tmpdir>/piz-shell-<hex>.log` (0600) with a `[Output truncated. Full output: …]` notice in block, transcript row, status line and collapsed display — resolution history: interactive `80729ec8`/`f5241576` → deterministic `8888d7e9` (pi port) → interactive again `07e8b06a` on the hardened runner; `8888d7e9`'s head truncation superseded by `8fbbfba5`) | `570ebd20` through `7e859585` and later skills/image-paste commits plus `b0468c92`, `76335676`, `4422deb7`, `058685af`, `4163f747`, `63f379a2`, `f4780a2b`, `!` port `80729ec8`→`8888d7e9`→`8fbbfba5`, interactive resolution `4d0b7a5a`/`07e8b06a`; tui-pi tests incl. projection, composer, history (incl. kitty press/repeat/release), panels, terminal-drain, mentions, shell, wrapping, image-paste, banner, footer and transcript-markdown; [design](apps/zcode-cli/docs/design/v2/tui-pi-frontend.md) | Upstream frontend meets our interaction and resource requirements |
-| P004 | Shared core and thin attach client: bootstrap socket listener, CLI attach/spawn/build, root shared protocol; attach `/skill` list + suggestions via `skills/referenceCatalog` additive fields; attach custom-command catalog via new `commands/referenceCatalog` (composer `/` panel + `/help`; expansion stays in the core input facade, local `listAttachCustomCommands` scan removed); coding-plan quota read via new `usage/codingPlanQuota` (account-level snapshot fetched core-side from the Registry's coding-plan provider — API-key access from provider config **or** zhipu-account individual-coding-plan entitlement via the account credential port `providerRuntimeHeadersPort` (2026-10-28; same owner as model-request auth, manual plan key or OAuth-derived project token), feeding the tui-pi footer quota cluster; readUsageQuota absent → cluster silent; tui-pi failure diagnostics deduped per message + 60s idle-tick backoff so permanent no-credential states log exactly once per episode); herdr pane lifecycle reporter for `zcode-attach` (bounded retry + 30s heartbeat re-assert + always-on throttled stderr diagnostics, since a single lost `working` report pins herdr idle/done for a whole turn) plus `ZCODE_ATTACH_CORE` spawn marker suppressing the shared core's zcode hook | `32dc8799` through later attach fixes including `61abbc11`, plus `887668fb`..`d68db6ab` and the 2026-10-24 reporter-durability commit; CLI attach tests, bootstrap socket-listener + skill-reference-catalog, root shared attach contract, `attach-herdr-reporter` (incl. retry/argv-reuse/heartbeat regressions) + `app-server-spawn` marker tests; [design](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md) | Upstream shared-core mode covers no-plugin isolation, matched builds, sessions, reconnect and low per-client cost |
+| P004 | Shared core and thin attach client: bootstrap socket listener, CLI attach/spawn/build, root shared protocol; attach `/skill` list + suggestions via `skills/referenceCatalog` additive fields; attach custom-command catalog via new `commands/referenceCatalog` (composer `/` panel + `/help`; expansion stays in the core input facade, local `listAttachCustomCommands` scan removed); coding-plan quota read via new `usage/codingPlanQuota` (account-level snapshot fetched core-side from the Registry's coding-plan provider — API-key access from provider config **or** zhipu-account individual-coding-plan entitlement via the account credential port `providerRuntimeHeadersPort` (2026-10-28; same owner as model-request auth, manual plan key or OAuth-derived project token), feeding the tui-pi footer quota cluster; readUsageQuota absent → cluster silent; tui-pi failure diagnostics deduped per message + 60s idle-tick backoff so permanent no-credential states log exactly once per episode); herdr pane lifecycle reporter for `zcode-attach` (bounded retry + 30s heartbeat re-assert + always-on throttled stderr diagnostics, since a single lost `working` report pins herdr idle/done for a whole turn) plus `ZCODE_ATTACH_CORE` spawn marker suppressing the shared core's zcode hook; attach bare `/resume` opens the commandCenter session picker (workspace-scoped `session/list`, full schema validation, current session excluded, updatedAt desc — no latest-session guessing) and `/resume <id|unique-prefix>` shares the entry resolver with workspace on `session/resume`; startup + `/new` `session/create` uses `persistence:"deferred"` so unsent drafts stay out of `session/list` until the first accepted send promotes them | `32dc8799` through later attach fixes including `61abbc11`, plus `887668fb`..`d68db6ab` and the 2026-10-24 reporter-durability commit; CLI attach tests, bootstrap socket-listener + skill-reference-catalog, root shared attach contract, `attach-herdr-reporter` (incl. retry/argv-reuse/heartbeat regressions) + `app-server-spawn` marker tests; `patch/resume-session-picker` attach-adapter picker/error regressions + deferred create assertions, bootstrap `session-selection-protocol` deferred→immediate admission; [design](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md) | Upstream shared-core mode covers no-plugin isolation, matched builds, sessions, reconnect and low per-client cost |
 | P005 | Interactive unresolved slash input routed as a normal prompt | piz `2f55f457`; allowance has a different patch `c6b36ad5`; coverage (audited 2026-10-26): verbatim forward incl. attachments + default no-opt-in "Unknown command" + headless e2e `--prompt /nope` + attach e2e via real command center asserting exactly one `session/send` + custom-command expansion precedence + recognized builtins staying local (cli.unit / attach-adapter); TUI-lane wiring pinned by `ff7bf885` (2026-10-26); still open: attach unresolved-slash **with attachments** over a real socket | Upstream equivalent verified on piz, including recognized slash commands |
+
+**Session-health invariants (merged `9abdd086`, promoted in the `e37ed9d9` pair):**
+draft-aware subagent reads preserve deferred persistence and real missing-parent
+errors; trusted no-plugin command discovery must avoid bundled-plugin seed/hash
+work without freezing workspace commands; numeric usage counters need an exact,
+number-only redaction exception. Regression handles are
+`session-lifecycle-logging`, the pre-first-prompt cases in `session-persistence`,
+`logging`, `plugins`, `command-reference-catalog`, and the no-plugin snapshot
+case in `zcode-protocol`. Retire these fixes when upstream covers those same
+invariants; do not duplicate the upstream model-selection deferral fix.
+See the [2026-11-03 verification record](docs/fork/reports/2026-11-03-session-health.md)
+for the source checks and artifact limitations; it is not an installation record.
 
 **Pending audit, not a carried-patch claim:** allowance-only `da309372` and
 `bac3682c` provide queue/transcript behavior absent from piz's ancestry; compare
@@ -160,7 +172,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `5f36e28b` pair (f1a0c45e contents + attach exit-resume hint after TUI teardown + provider auth-failure log payload on 401/403), promoted 2026-11-02 from main after the recorded verification — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `e37ed9d9` pair (session-health merge `9abdd086` + lean test-gates merge `a8254e2a` + no-plugin regression config-scope fix), promoted 2026-11-03 from clean main after the recorded verification — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -300,6 +312,40 @@ identity or enable inherited upload/update paths without a separate audit.
   policy: modify/delete conflicts under those prefixes resolve to
   "stay deleted" mechanically during sync merges.
 
+### 2026-11-01 — attach input submission migrated to v4 `v4/command`
+
+- piz's send path no longer touches `session/send`/`session/stop` (both marked
+  `@deprecated` upstream; host consumers already removed): idle submit and
+  Ctrl+Q replay go through `v4/command` `sendText`, busy Enter through
+  `requestedDelivery:"guide"`, stop (abort + stop&quit) through `v4/command`
+  `stop`, attachments through `v4/attachment/begin→chunk→commit` refs with
+  disk-path direct refs. Client queue ownership (Ctrl+Q local FIFO) unchanged;
+  signing untouched (it lives core-side).
+- New cli attach modules `attach-v4-command/attachments/input.ts`; legacy
+  inline attachment mapper deleted. Envelope/ACK/upload schemas shared with
+  `@zcode/shared/zcode-protocol-v4` (no private wire shapes). Design notes:
+  [tui-attach-shared-core.md](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md)
+  「输入提交迁移到 v4」.
+- Verification (worktree, dev build only — installed `piz` pair NOT touched):
+  `@zcode/cli` typecheck + oxlint clean; `architecture:check --changed` 0 new;
+  attach-adapter suite 43/46 pass — 3 failures spawn a real app-server binary
+  and fail identically on the unmodified baseline (10 more in the entry suites,
+  same class); no live-core e2e was run. Remaining legacy protocol surface
+  piz still needs is listed in the design doc section above.
+- 2026-11-02 core fix (first live e2e): every attach submit failed with a
+  `session_input → session(id)` FK error. Legacy `session/create` marks the
+  record `persistence:"immediate"` while the runtime only writes the session
+  row on first input; v4 admission trusted the record and wrote the ledger
+  first. Admission now also runs first-persistence when
+  `runtime.isSessionPersisted?.() === false` (absent method = no trigger).
+  Spec bullet in 「输入提交迁移到 v4」 不变量; regression
+  `bootstrap/tests/v4-legacy-create-admission.test.ts` (fails without the fix).
+  Live e2e (dev build on sync+v4 combo, scratch workspace, GLM-5.3): idle
+  submit, guide steer, Ctrl+Q queue/replay, double-Esc stop + new turn,
+  clipboard image upload, exit resume hint + `--resume` replay all pass.
+  Not verified live: signing/allowance on the v4 path. Pre-existing, seen on
+  installed piz too: user abort is logged `model.network.failed` and the UI
+  shows "Model request failed".
 ### 2026-11-01 — promotion of 158a31d2 (per-session compactContextWindow cap)
 
 - Merge `158a31d2` carried `patch/compact-context-window` to `main` unchanged
@@ -528,3 +574,116 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   gate (signing, allowance evidence, Ctrl-C signal path, memory matrix)
   unchanged.
 
+
+### 2026-11-02 — upstream sync 3.17.1 (sync/2026-10-30-a60ba6a7)
+
+- Base `3c5b2276` → `a60ba6a7` ("chore: sync ZCode source", 2026-10-30;
+  desktop 3.17.1 / CLI 0.17.1; 5,231 files, +216k/−611k — ~1,990 deleted
+  files are the upstream app-unit-test retirement; CLI/CUA suites keep
+  theirs). Two merge commits on the branch: upstream merge `7d0aecb3`, then
+  `1ce50ce3` reconciling parallel fork work that landed on `main`
+  (`610d1fd3`: shell spill/aliases, footer compact gauge, exit-resume hint,
+  auth-failure diagnostics) after the branch was cut.
+- Upstream merge: 12 unmerged paths (11 content + 1 modify/delete). Fork
+  rule handled `.agents/skills/e2e-case-lifecycle` (stay deleted);
+  `packages/shared/test/zcodeProtocol.test.ts` kept fork-side (upstream
+  retired it; it is P004's protocol-schema regression suite). Content
+  resolutions of note:
+  - `verification-policy.ts`: kept the real implementation, adopted
+    upstream's two signature changes — `readValidatedRequestVerificationConfig`
+    (delegates to our validating reader) and the 2-arg
+    `requiresRequestVerification` (start-plan + config.enabled/skipModelRequest
+    semantics, falls back to `requestVerificationInteractionAvailable=false`).
+    The start-plan fail-closed stance moved into the Host flow
+    (zcodeAgentService fails closed on invalid/missing config); signing doc
+    updated. Upstream's kept `contract.test.ts` passes against our impl.
+  - `zcode-protocol-entrypoint.ts`: official command endpoint, MCP node
+    fallback and `sessionDataFiles` reintegrated into the per-connection
+    lifecycle the auto-merge silently dropped; the endpoint's auth context
+    follows `latestProtocolServer` (same owner as the MCP auth port);
+    stateless `sessionDataFiles` shared across connection servers.
+  - `server-types.ts` `requireSession`: sync claim (`claimDetachedSession`)
+    runs BEFORE upstream's lifecycle readiness guard — the guard treats
+    unclaimed/foreign sessions as `unloaded` and would reject reconnect
+    resume-adoption.
+  - `server-operations.ts`: upstream's register-before-subscribe +
+    late-callback guard composed with the fork's `ownerContext` event
+    fanout; `activateSessionForResume` gained a pre-lifecycle active-record
+    fast path because lifecycle `initialize` short-circuits ready sessions
+    and was silently dropping resume `compactContextWindow` on active
+    records (caught by the compact-cap regression).
+  - `browser-control-broker.ts`: upstream's `childSessionParents` value
+    shape (`{parentSessionId}`) + fork's claimed-record lookup;
+    `session-resident-pool.ts` keeps both new methods
+    (`isDeactivationInFlight`, `operationCount`).
+  - `AGENTS.md`/`00-tool-change-chain.md`/`architecture-policy.yaml`/
+    `cli/package.json`: fork guide kept; both doc sections kept; both
+    baseline-entry sets kept; test lists composed.
+- Root vitest now uses the explicit `engineering-test-files.json` manifest
+  (test retirement). Fork seam: added 4 entries (shared
+  `zcodeProtocol.test.ts`, `usageCodingPlanQuotaSchema.test.ts`,
+  `app-server-attach` + `request-security-edition` contract tests) so the
+  protocol/signing regressions keep a `pnpm test` lane.
+- Follow-ups fixed during verification: `tui-pi/tests/status-line.test.ts`
+  import compaction (upstream's refreshed architecture checker counts it
+  over the 800-line cap; 811→798, identical coverage);
+  `attach-binary.smoke.test.ts` poll now requires the rendered mode token —
+  the old workspace-substring condition matched `script`'s command echo and
+  exited before the first frame (the 3.17.1 core boots to first frame later
+  than its pid-file self-registration; manual pty boot verified the full
+  banner/footer/quota-diagnostic render).
+- Battery on the final combined tree, all green unless stated: root
+  typecheck; CLI typecheck 36/36 (workspace grew 34→36); root lint 0
+  errors/83 warnings; CLI lint 0/74/7; `architecture:check --changed` 0;
+  adapters signing 13/13 + runner-status-fanout (auth payload) 9/9;
+  bootstrap socket-listener+zcode-protocol 138/138, quota+cold-resume
+  132/132, session-lifecycle/session-data 21/21; shared engineering set
+  95/95 (incl. upstream's new verification contract test); tui-pi 265/265
+  with a cwd caveat (4 footer/flush fixtures cannot fit this worktree's
+  73-col path at width 80 — pass from a short cwd; the pty test needs the
+  package cwd; sources unchanged by the sync); CLI suite **620/620 exit 0**
+  (main's stability fixes now included). Fresh dist pair + `build:attach`;
+  freshness greps: compactContextWindow ×11/×6, createOfficialCommandEndpoint
+  ×2, exit-resume hint ×1, providerResponseBody ×2.
+- Not exercised live (unverified): real model turn / signing against the
+  live provider / allowance evidence / Ctrl-C signal path / memory matrix
+  (full acceptance gate unchanged and still open); `piz` still runs the
+  158a31d2-promoted pair — promotion from `main` is a separate operator
+  decision after this branch merges.
+
+### 2026-11-03 — selected test runs (patch/fork-test-runner)
+
+- New fork-owned `apps/zcode-cli/scripts/fork-tests.mjs` (+ `fork-tests.test.mjs`).
+  On patch branches it runs only the tests reachable from what changed. Turbo
+  `...[merge-base]` picks the packages, and vitest `--changed` narrows to the
+  test files that import changed code. Signing and socket-listener always run.
+  `--full` is for sync branches and pre-promote. Upstream tests are selected,
+  never skipped or deleted: that would add sync conflicts and blind sync gates.
+- Each run strips the session env and puts TMPDIR on tmpfs (65k-row SQLite
+  fixture: 23s vs 19 min idle on btrfs). Failing files get a solo rerun, and a
+  pass on rerun is reported as FLAKY. Results are classified against
+  [known-test-failures.txt](docs/fork/known-test-failures.txt), seeded with
+  26 bootstrap failures that main already has (plugin/skill bundle class,
+  cause not investigated). cli without a built `dist/` is reported NOT RUN,
+  never pass. Root-workspace changes are reported NOT COVERED.
+- Policy and measurements: [verification.md](docs/fork/verification.md)
+  「Selected vs full runs」.
+
+### 2026-11-03 — merges + promotion of e37ed9d9 (session health + lean test gates)
+
+- Operator asked to merge and promote `patch/session-startup-health`.
+  Merged `--no-ff` as `9abdd086`: draft-safe `session/subagents` reads,
+  trusted no-plugin command-discovery gating before bundled asset work,
+  and exact numeric usage counters in diagnostic logs. While verification
+  ran, `patch/lean-test-gates` was merged on top as `a8254e2a` in the shared
+  checkout; promotion therefore used current clean `main`, not a reset.
+- A full-suite regression exposed a test-scope error in the new no-plugin
+  case: project config intentionally strips `plugins.enabled`. Fixed on
+  `main` as `e37ed9d9` by disabling plugins through user config; the trusted
+  `noPlugins` override still wins over an enabled user config.
+- Battery and installed-pair smoke are recorded in
+  [verification](docs/fork/verification.md) and the
+  [session-health report](docs/fork/reports/2026-11-03-session-health.md).
+  `promote-piz.sh` ran from clean `main` at `e37ed9d9`; no push, wrapper
+  change, live-core restart, model turn, signing/allowance proof, or
+  latency measurement was performed.

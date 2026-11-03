@@ -4,14 +4,15 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as plugins from "../src/plugins.js";
 import { zcodeCommandsReferenceCatalogResultSchema } from "@zcode/shared";
 import { getCommandReferenceCatalog } from "../src/zcode-protocol/command-reference-catalog.js";
 import type { ZCodeProtocolAgentServerContext } from "../src/zcode-protocol/server-types.js";
 
 function contextWithEnv(env: NodeJS.ProcessEnv): ZCodeProtocolAgentServerContext {
   return {
-    deps: { env },
+    deps: { env, noPlugins: true },
   } as unknown as ZCodeProtocolAgentServerContext;
 }
 
@@ -42,6 +43,15 @@ async function withFakeHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
 }
 
 describe("commands/referenceCatalog protocol", () => {
+  beforeEach(() => {
+    vi.spyOn(plugins, "resolveZCodePlugins").mockImplementation(() => {
+      throw new Error("noPlugins must not resolve plugins");
+    });
+  });
+  afterEach(() => {
+    expect(plugins.resolveZCodePlugins).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
   it("rescans workspace and user command roots per call", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "zcode-command-catalog-ws-"));
     try {
@@ -54,8 +64,9 @@ describe("commands/referenceCatalog protocol", () => {
           "description: User prompt",
         ]);
 
+        const context = contextWithEnv({ ...process.env });
         const result = await getCommandReferenceCatalog(
-          contextWithEnv({ ...process.env }),
+          context,
           { workspace: { workspacePath: workspace, workspaceKey: workspace } },
         );
 
@@ -73,6 +84,36 @@ describe("commands/referenceCatalog protocol", () => {
         expect(user).toMatchObject({ description: "User prompt", scope: "user" });
         // strict schema：真实回包形状必须可解析（客户端 × 服务端同版本口径）。
         expect(() => zcodeCommandsReferenceCatalogResultSchema.parse(result)).not.toThrow();
+
+        // 不缓存：同目录的新增、修改与删除在第二次调用立即可见。
+        await rm(join(workspace, ".zcode", "commands", "ws-review.md"));
+        await writeCommand(join(workspace, ".zcode", "commands"), "ws-new");
+        await writeCommand(join(home, ".zcode", "commands"), "user-good-prompt", [
+          "description: Updated user prompt",
+        ]);
+        const second = await getCommandReferenceCatalog(
+          context,
+          { workspace: { workspacePath: workspace, workspaceKey: workspace } },
+        );
+        expect(second.commands.map((command) => command.name).sort()).toEqual([
+          "user-good-prompt", "ws-new",
+        ]);
+        expect(second.commands.find((command) => command.name === "user-good-prompt")?.description)
+          .toBe("Updated user prompt");
+
+        const otherWorkspace = await mkdtemp(join(tmpdir(), "zcode-command-catalog-other-"));
+        await writeCommand(join(otherWorkspace, ".zcode", "commands"), "other-command");
+        try {
+          const other = await getCommandReferenceCatalog(
+            context,
+            { workspace: { workspacePath: otherWorkspace, workspaceKey: otherWorkspace } },
+          );
+          expect(other.commands.map((command) => command.name).sort()).toEqual([
+            "other-command", "user-good-prompt",
+          ]);
+        } finally {
+          await rm(otherWorkspace, { force: true, recursive: true });
+        }
         return undefined;
       });
     } finally {

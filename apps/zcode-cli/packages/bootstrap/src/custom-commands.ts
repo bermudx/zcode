@@ -9,8 +9,11 @@ import type {
 } from "@zcode/contracts";
 import { resolveZCodePlugins } from "./plugins.js";
 import { collectDisabledPaths } from "./skill-command-overrides.js";
+import { NO_PLUGINS_CONFIG_OVERRIDES } from "./app/app-config-options.js";
 
 export interface ListZCodeCustomCommandsOptions {
+  /** 受信入口策略，不能从客户端 runtimeConfig 读取。 */
+  noPlugins?: boolean;
   env?: NodeJS.ProcessEnv;
   homeDirectory?: string;
   logger?: Logger;
@@ -73,24 +76,28 @@ export async function loadZCodeCustomCommand(
 function createCustomCommandDiscovery(options: ListZCodeCustomCommandsOptions) {
   const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
   const configResult = createConfig({
+    ...(options.noPlugins === true ? { cliOverrides: NO_PLUGINS_CONFIG_OVERRIDES } : {}),
     env: options.env,
     projectConfigPath: options.projectConfigPath,
     workingDirectory,
     skipUserConfig: options.skipUserConfig,
     userConfigPath: options.userConfigPath,
   });
-  const pluginOutcome = resolveZCodePlugins({
-    configResult,
-    env: options.env,
-    logger: options.logger,
-    projectConfigPath: options.projectConfigPath,
-    skipUserConfig: options.skipUserConfig,
-    userConfigPath: options.userConfigPath,
-    workingDirectory,
-  });
+  // 关闭时不要进入插件解析：空目录之前的 bundled seed/hash 也属于被禁止的 IO。
+  const pluginOutcome = configResult.config.plugins.enabled
+    ? resolveZCodePlugins({
+        configResult,
+        env: options.env,
+        logger: options.logger,
+        projectConfigPath: options.projectConfigPath,
+        skipUserConfig: options.skipUserConfig,
+        userConfigPath: options.userConfigPath,
+        workingDirectory,
+      })
+    : undefined;
   return {
     adapter: createNodeCustomCommandAdapter({
-      extraResolvedRoots: pluginOutcome.commandRoots,
+      extraResolvedRoots: pluginOutcome?.commandRoots,
       disabledPaths: collectDisabledPaths(configResult.config.commandOverrides),
       homeDirectory: options.homeDirectory,
       additionalDirectories: options.additionalDirectories,

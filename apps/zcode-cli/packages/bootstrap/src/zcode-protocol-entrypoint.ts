@@ -1,4 +1,5 @@
-import { createConfig } from "@zcode/adapters/config";
+import { createMcpTransportFetch } from "@zcode/adapters";
+import { createConfig, resolvePath } from "@zcode/adapters/config";
 import { createNodeModelSelectionFacade } from "@zcode/provider-node";
 import { createNodeLoggerFactory } from "@zcode/adapters/logging";
 import { writeFile } from "node:fs/promises";
@@ -15,7 +16,7 @@ import {
   type ZCodeMcpResourceSample,
   type ZCodeMcpTelemetryEvent,
 } from "@zcode/shared";
-import type { SqliteSessionStore } from "@zcode/adapters/storage";
+import { createNodeSessionDataFiles, type SqliteSessionStore } from "@zcode/adapters/storage";
 import { traceContextToLogContext, createRootTraceContext } from "@zcode/contracts";
 import type { McpPort, ModelSelection } from "@zcode/contracts";
 import type { PresentationSurface } from "@zcode/core";
@@ -30,15 +31,22 @@ import {
   prepareProtocolStartupStorage,
 } from "./zcode-protocol/storage-startup.js";
 import { closeSessionStore, getSessionDbPath } from "./app/session-store.js";
+import { resolveMcpNodeFallbackProvider } from "./app/mcp-node-fallback.js";
+import { getCliStorageRoot, getProjectMemoryRoot } from "./app/paths.js";
 import { startProcessProviderRegistryRuntime } from "./app/process-provider-registry-runtime.js";
 import { scheduleStartupLogRetentionCleanup } from "./log-retention.js";
 import { resolveProcessProviderEndpointRoutingPort } from "./provider-endpoint-routing.js";
 import { StartupTimer, startupNow } from "./startup-logging.js";
 import { installZCodeProtocolAiSdkWarningLogger } from "./zcode-protocol/ai-sdk-warning-logger.js";
 import {
+  createOfficialCommandAuthHeadersPort,
   createOfficialMcpAuthHeadersPort,
   type OfficialMcpAuthRequestContext,
 } from "./zcode-protocol/official-mcp-auth-port.js";
+import {
+  createOfficialCommandEndpoint,
+  type OfficialCommandEndpoint,
+} from "./official-command-endpoint/index.js";
 import {
   appServerInfoSchema,
   createOfficialMcpTrustedOriginRegistry,
@@ -165,6 +173,7 @@ export async function runZCodeProtocolAgent(
   // 进程级 MCP pool 的反向请求（elicitation / 官方 auth）归最近接入的协议会话 owner。
   let latestProtocolServer: ZCodeProtocolAgentServer | undefined;
   let socketListener: ProtocolSocketListener | undefined;
+  let officialCommandEndpoint: OfficialCommandEndpoint | undefined;
   let mcpConnectionPool: McpConnectionPool | undefined;
   let mcpPort: McpPort | undefined;
   let mcpTelemetryTracker: McpTelemetryTracker | undefined;
@@ -289,6 +298,22 @@ export async function runZCodeProtocolAgent(
         resolveZCodeApiOrigin,
       }),
     };
+    // 官方插件命令进程的代理端点（技术方案 5.8）：CLI 不持有凭证，端点每个请求向 host 现取
+    // 身份头后转发给 zcode-server。和官方 MCP 用同一个 origin 表达式与网络配置。
+    const endpointEnv = options.env ?? process.env;
+    officialCommandEndpoint = createOfficialCommandEndpoint({
+      resolveHeaders: createOfficialCommandAuthHeadersPort({
+        // 多连接 socket 模式与官方 MCP auth 端口同一归属：最近接入的协议
+        // server 的会话上下文；无 owner 时端点按 official_auth_unavailable 拒绝。
+        resolveContext,
+        logger,
+      }).resolveHeaders,
+      resolveZCodeApiOrigin,
+      appVersion: endpointEnv.ZCODE_APP_VERSION?.trim() || options.version,
+      fetch: createMcpTransportFetch({ env: endpointEnv, network: configResult.config.network }),
+      logger,
+    });
+    const activeOfficialCommandEndpoint = officialCommandEndpoint;
     // MCP elicitation 归属到协议 server 的会话；pool 先于 server 创建，端口延迟绑定。
     // socket 多连接下归最近接入的 owner；--no-plugins 时本分支整体不构造。
     mcpConnectionPool =
@@ -314,12 +339,24 @@ export async function runZCodeProtocolAgent(
               noProxy: configResult.config.network.noProxy,
               caCertFile: configResult.config.network.caCertFile,
             },
+            nodeFallback: resolveMcpNodeFallbackProvider({
+              cliStorageRoot: getCliStorageRoot(resolvePath(configResult.config.storage.dir)),
+              logger,
+            }),
             officialMcpAuth,
             telemetry: mcpTelemetryTracker,
             workingDirectory: options.cwd,
           });
     mcpPort = mcpConnectionPool?.acquireLease({ leaseId: "protocol-settings" });
     const activeProviderRegistryRuntime = providerRegistryRuntime;
+    const protocolCliStorageRoot = getCliStorageRoot(resolvePath(configResult.config.storage.dir));
+    // 无状态端口（纯路径计算 + fs 操作），进程级一份，所有 per-connection server 共享。
+    const protocolSessionDataFiles = createNodeSessionDataFiles({
+      cliStorageRoot: protocolCliStorageRoot,
+      // 与会话运行时的记忆解析同一函数，删除的正是 CLI 读写的那个目录。
+      memoryRoot: ({ workspacePath, workspaceIdentity }) =>
+        getProjectMemoryRoot(protocolCliStorageRoot, workspacePath, workspaceIdentity),
+    });
     const modelSelectionFacade = createNodeModelSelectionFacade(
       activeProviderRegistryRuntime.runtime.registryService,
     );
@@ -456,16 +493,20 @@ export async function runZCodeProtocolAgent(
               : {}),
             ...(options.noPlugins === true ? { noPlugins: true } : {}),
             providerEndpointRoutingPort,
+            officialCommandEnv: (sessionId, workspace) =>
+              activeOfficialCommandEndpoint.envForSession(sessionId, workspace),
             sourceTitle: "electron",
             onToolExecResource: (params) =>
               connection.send({ method: zcodeProtocolNotifications.toolExecResource, params }),
           }),
         cwd: options.cwd,
+        noPlugins: options.noPlugins,
         env: options.env,
         loggerFactory,
         mcpPort,
         mcpTelemetry: mcpTelemetryTracker,
         sessionStore,
+        sessionDataFiles: protocolSessionDataFiles,
         // 断线重连/新客户端 resume 的收养入口：只找 detached owner，活连接
         // 上的 session 保持对原 client 的排他权。
         locateSessionOwner: (sessionId) => findDetachedSessionOwner(sessionId),
@@ -689,6 +730,12 @@ export async function runZCodeProtocolAgent(
     options.lifecycle?.requestShutdown();
     if (detachedSweepTimer) clearInterval(detachedSweepTimer);
     await socketListener?.close().catch(() => undefined);
+    await officialCommandEndpoint?.close().catch((error: unknown) => {
+      logger.warn("Official command endpoint close failed", {
+        error: error instanceof Error ? error.message : String(error),
+        event: "zcode_protocol.official_command_endpoint.close_failed",
+      });
+    });
     await cleanupProtocolRuntime({
       logger,
       deadlineAt: options.lifecycle?.deadlineAt,

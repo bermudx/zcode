@@ -111,4 +111,50 @@ describe("Session 原选择与输入协议", () => {
     }
     await request(server, zcodeProtocolMethods.sessionClose, { sessionId: app.sessionId });
   });
+
+  it("deferred 草稿不进 session/list，首条 send 被 accepted 后进入列表", async () => {
+    // core 侧草稿规则（record.persistence 镜像 runtime 持久化事实）：
+    // persistence:"deferred" 的 live record 被 session/list 跳过——attach 的
+    // 启动会话与 /new 靠它保证未发送的空会话不会被 picker / -c 选中；
+    // 首条 prompt 在 send admission 提升为 immediate，立即可列举。
+    let app!: ReturnType<typeof createFakeApp>;
+    let finish!: (value: never) => void;
+    const completion = new Promise<never>((resolve) => {
+      finish = resolve;
+    });
+    const sendInput = vi.fn(async () => ({
+      kind: "started_turn" as const,
+      turnId: "turn" as never,
+      completion,
+    }));
+    const server = new ZCodeProtocolAgentServer({
+      createZCodeApp: (options) => (app = createFakeApp(options, { sendInput })),
+    });
+    const workspace = { workspaceKey: "/fixture", workspacePath: "/fixture" };
+    await request(server, zcodeProtocolMethods.sessionCreate, {
+      persistence: "deferred",
+      workspace,
+    });
+    const draftList = (await request(server, zcodeProtocolMethods.sessionList, {
+      workspace,
+    })) as { sessions: Array<{ sessionId: string }> };
+    expect(draftList.sessions.map((session) => session.sessionId)).not.toContain(app.sessionId);
+    try {
+      await request(server, zcodeProtocolMethods.sessionSend, {
+        content: "hi",
+        sessionId: app.sessionId,
+      });
+      const afterSendList = (await request(server, zcodeProtocolMethods.sessionList, {
+        workspace,
+      })) as { sessions: Array<{ sessionId: string }> };
+      expect(afterSendList.sessions.map((session) => session.sessionId)).toContain(app.sessionId);
+      await vi.waitFor(() => expect(sendInput).toHaveBeenCalled());
+    } finally {
+      finish({} as never);
+      // 断言失败也必须回收会话 record，不留给本文件的其它用例。
+      await request(server, zcodeProtocolMethods.sessionClose, {
+        sessionId: app.sessionId,
+      });
+    }
+  });
 });

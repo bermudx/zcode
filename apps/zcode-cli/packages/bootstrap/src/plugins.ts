@@ -255,13 +255,16 @@ export function resolveZCodePlugins(options: ResolveZCodePluginsOptions = {}): P
   return discoverNodePluginsSync({
     config: configResult.config.plugins,
     env: options.env ?? process.env,
-    officialPluginRoots: resolveOfficialPluginRoots({
-      extraRoots: options.officialPluginRoots,
-      // cache 锁冲突已从 fatal 改为 degraded，普通插件入口也必须保留诊断日志。
-      logger: options.logger,
-      storageRoot: pluginStorageRoot,
-      suppressedBuiltins: new Set(configResult.config.plugins.suppressedBuiltins),
-    }),
+    // adapter 的 disabled gate 晚于参数求值；必须先挡住 bundled seed/hash。
+    officialPluginRoots: configResult.config.plugins.enabled
+      ? resolveOfficialPluginRoots({
+          extraRoots: options.officialPluginRoots,
+          // cache 锁冲突已从 fatal 改为 degraded，普通插件入口也必须保留诊断日志。
+          logger: options.logger,
+          storageRoot: pluginStorageRoot,
+          suppressedBuiltins: new Set(configResult.config.plugins.suppressedBuiltins),
+        })
+      : [],
     officialPluginsEnabledByDefault: DEFAULT_ENABLED_OFFICIAL_PLUGIN_IDS,
     storageRoot: pluginStorageRoot,
     workingDirectory,

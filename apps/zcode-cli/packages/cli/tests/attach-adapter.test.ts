@@ -8,6 +8,7 @@ import { ZCODE_PROTOCOL_VERSION, zcodeProtocolErrorCodes } from "@zcode/shared";
 import { getZCodeCopy } from "@zcode/i18n";
 import { connectAttachClient } from "../src/attach/attach-client.js";
 import { AttachSessionHandle } from "../src/attach/attach-session.js";
+import { uploadAttachment } from "../src/attach/attach-v4-attachments.js";
 import {
   AttachRuntime,
   createAttachPromptHandler,
@@ -71,6 +72,12 @@ function makeSnapshot(version: number = ZCODE_PROTOCOL_VERSION) {
       thoughtLevel: { available: [], current: "medium", enabled: true },
     },
   };
+}
+
+/** 完整的 wire sessionInfo（makeSnapshot().session 即服务端真实形状），
+ *  picker 的 session/list 校验走全量 schema，缺字段的残桩过不了。 */
+function sessionInfo(sessionId: string, overrides: Record<string, unknown> = {}) {
+  return { ...makeSnapshot().session, sessionId, ...overrides };
 }
 
 function rawEvent(params: {
@@ -261,35 +268,54 @@ test("subscribe 发送 raw eventFormat 且回放事件 revive 为 Date", async (
   }
 });
 
-test("submitPrompt → session/send，turn_complete 事件解析出响应", async () => {
+/** v4 command ACK（shared commandAckSchema 允许的成功形状）。 */
+const v4AckAccepted = (commandId: string) => ({
+  commandId,
+  revisionAtDecision: 1,
+  result: { delivery: "startNow", inputId: commandId, type: "inputAccepted" },
+  status: "accepted",
+});
+
+/** v4/command sendText 夹具：按 commandId 回放 turn_started + turn_complete。 */
+function respondV4SendText(
+  notify: (params: unknown) => void,
+  request: Captured,
+  options: { response?: string; turnId?: string } = {},
+): unknown {
+  const commandId = request.params.commandId as string;
+  const text = (request.params.payload as { text?: string }).text ?? "";
+  const turnId = options.turnId ?? `turn-${text}`;
+  queueMicrotask(() => {
+    notify(
+      rawEvent({
+        inputId: commandId,
+        payload: { inputId: commandId, input: text, turnNumber: 1 },
+        seq: 1,
+        turnId,
+        type: "turn_started",
+      }),
+    );
+    notify(
+      rawEvent({
+        payload: { response: options.response ?? `r-${text}`, resultType: "completed" },
+        seq: 2,
+        turnId,
+        type: "turn_complete",
+      }),
+    );
+  });
+  return v4AckAccepted(commandId);
+}
+
+test("submitPrompt → v4/command sendText，turn_complete 事件解析出响应", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
   const core = await startFakeCore(socketPath, (request, notify) => {
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      const inputId = request.params.inputId as string;
-      queueMicrotask(() => {
-        notify(
-          rawEvent({
-            inputId,
-            payload: { inputId, input: "hi", turnNumber: 1 },
-            seq: 1,
-            turnId: "turn-1",
-            type: "turn_started",
-          }),
-        );
-        notify(
-          rawEvent({
-            payload: { response: "hello back", resultType: "completed" },
-            seq: 2,
-            turnId: "turn-1",
-            type: "turn_complete",
-          }),
-        );
-      });
-      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    if (request.method === "v4/command") {
+      return respondV4SendText(notify, request, { response: "hello back", turnId: "turn-1" });
     }
     return {};
   });
@@ -297,9 +323,20 @@ test("submitPrompt → session/send，turn_complete 事件解析出响应", asyn
   try {
     await handle.subscribe();
     const result = await handle.submitPrompt("hi");
-    const send = core.requests.find((r) => r.method === "session/send");
+    const commands = core.requests.filter((r) => r.method === "v4/command");
+    assert.equal(commands.length, 1, "expected exactly one v4/command");
+    const send = commands[0];
     assert.equal(send?.params.sessionId, SID);
-    assert.equal(send?.params.content, "hi");
+    assert.equal(send?.params.type, "sendText");
+    assert.match(String(send?.params.commandId), /^attach-cmd-/);
+    assert.equal((send?.params.payload as { text?: string }).text, "hi");
+    // 空闲提交不指定 requestedDelivery（缺省 startNow 语义，忙时 admission 自动排队），
+    // 且恒带 keepQueueAndSend（仅 held/choice 生效，避免 v4 stop 后被 disposition 门拒绝）。
+    assert.equal((send?.params.payload as { requestedDelivery?: string }).requestedDelivery, undefined);
+    assert.equal(
+      (send?.params.payload as { heldQueueDisposition?: string }).heldQueueDisposition,
+      "keepQueueAndSend",
+    );
     assert.equal(result.response, "hello back");
     assert.equal(result.turnId, "turn-1");
     assert.equal(result.sessionId, SID);
@@ -323,15 +360,16 @@ test("submitPrompt 的 per-turn onEvent 回合结束即摘除：不随回合累�
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      const inputId = request.params.inputId as string;
+    if (request.method === "v4/command") {
+      const commandId = request.params.commandId as string;
+      const text = (request.params.payload as { text?: string }).text ?? "";
       turn += 1;
       const turnId = `turn-${turn}`;
       queueMicrotask(() => {
         notify(
           rawEvent({
-            inputId,
-            payload: { inputId, input: `p-${turn}`, turnNumber: turn },
+            inputId: commandId,
+            payload: { inputId: commandId, input: text, turnNumber: turn },
             seq: turn * 2 - 1,
             turnId,
             type: "turn_started",
@@ -346,7 +384,7 @@ test("submitPrompt 的 per-turn onEvent 回合结束即摘除：不随回合累�
           }),
         );
       });
-      return { accepted: true, sessionId: SID, stateRevision: turn };
+      return v4AckAccepted(commandId);
     }
     return {};
   });
@@ -388,7 +426,8 @@ test("submitPrompt 的 per-turn onEvent 回合结束即摘除：不随回合累�
   }
 });
 
-// P004-F1 的发送失败路径：session/send 被拒时 per-turn onEvent 同样要摘除。
+// P004-F1 的发送失败路径：sendText 的 ACK 被拒（rejected/failed 族）时
+// per-turn onEvent 同样要摘除。
 test("submitPrompt 发送失败后 per-turn onEvent 即摘除", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
@@ -396,9 +435,14 @@ test("submitPrompt 发送失败后 per-turn onEvent 即摘除", async () => {
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      // 拒绝以 rejected promise 返回：同步 throw 会逃出 socket data handler。
-      return Promise.reject(Object.assign(new Error("core rejected"), { code: -32000 }));
+    if (request.method === "v4/command") {
+      return {
+        commandId: request.params.commandId,
+        message: "core rejected",
+        reasonCode: "fault.command.executionFailed",
+        revisionAtDecision: 0,
+        status: "failed",
+      };
     }
     return {};
   });
@@ -411,7 +455,96 @@ test("submitPrompt 发送失败后 per-turn onEvent 即摘除", async () => {
       },
     }), /core rejected/);
     handle.ingestRawEvent(rawEvent({ seq: 9, type: "session_created" }));
-    assert.equal(events.length, 0, "onEvent must be detached after session/send failure");
+    assert.equal(events.length, 0, "onEvent must be detached after sendText failure");
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// ACK 失败必须把 pending 等待器一并摘掉：否则后续合法提交会被孤儿等待器的
+// firstPending 兜底错误地 settle 到别人的回合。
+test("submitPrompt ACK 拒绝后清理等待器，后续提交不受污染", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let rejected = false;
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "v4/command") {
+      const commandId = request.params.commandId as string;
+      if (!rejected) {
+        rejected = true;
+        return {
+          commandId,
+          reasonCode: "fault.command.executionFailed",
+          revisionAtDecision: 0,
+          status: "failed",
+        };
+      }
+      return respondV4SendText(notify, request);
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    await handle.subscribe();
+    await assert.rejects(() => handle.submitPrompt("no"), /fault\.command\.executionFailed/);
+    const ok = await handle.submitPrompt("yes");
+    assert.equal(ok.response, "r-yes", "next submit must settle to its own turn");
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// CommandInbox 以 (sessionId, commandId) 持久去重：重发拿到 duplicate 也算成功，
+// turn 的解析仍走事件流（关联幂等由 pendingInputId/turnId 保证）。
+test("submitPrompt 收到 duplicate ACK 视为成功，turn 仍由事件解析", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request, notify) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "v4/command") {
+      const commandId = request.params.commandId as string;
+      queueMicrotask(() => {
+        notify(
+          rawEvent({
+            inputId: commandId,
+            payload: { inputId: commandId, input: "dup", turnNumber: 1 },
+            seq: 1,
+            turnId: "turn-dup",
+            type: "turn_started",
+          }),
+        );
+        notify(
+          rawEvent({
+            payload: { response: "r-dup", resultType: "completed" },
+            seq: 2,
+            turnId: "turn-dup",
+            type: "turn_complete",
+          }),
+        );
+      });
+      return {
+        commandId,
+        revisionAtDecision: 3,
+        result: { delivery: "startNow", inputId: commandId, type: "inputAccepted" },
+        status: "duplicate",
+      };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    await handle.subscribe();
+    const result = await handle.submitPrompt("dup");
+    assert.equal(result.response, "r-dup");
   } finally {
     client.close();
     await core.close();
@@ -731,7 +864,7 @@ test("runAttachCommand 给传输接 stderr 诊断：畸形行有日志、连接�
   }
 });
 
-test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 session/send", async () => {
+test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 v4 sendText", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
   let finishFirstTurn: (() => void) | undefined;
@@ -739,15 +872,15 @@ test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 session/
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      const inputId = request.params.inputId as string;
-      const content = request.params.content as string;
+    if (request.method === "v4/command") {
+      const commandId = request.params.commandId as string;
+      const content = (request.params.payload as { text?: string }).text ?? "";
       const turnId = `turn-${content}`;
       queueMicrotask(() => {
         notify(
           rawEvent({
-            inputId,
-            payload: { inputId, input: content, turnNumber: 1 },
+            inputId: commandId,
+            payload: { inputId: commandId, input: content, turnNumber: 1 },
             seq: 1,
             turnId,
             type: "turn_started",
@@ -775,7 +908,7 @@ test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 session/
             }),
           );
       }
-      return { accepted: true, sessionId: SID, stateRevision: 1 };
+      return v4AckAccepted(commandId);
     }
     return {};
   });
@@ -791,18 +924,18 @@ test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 session/
     assert.equal(queued.kind, "queued");
     if (queued.kind === "queued") assert.equal(queued.queueLength, 1);
     assert.ok(received.some((event) => event.type === "turn_steer_queued"));
-    // 忙期间没有第二条 session/send——core 只收单并发 prompt。
+    // 忙期间没有第二条 sendText——排队语义在客户端 FIFO。
     assert.equal(
-      core.requests.filter((r) => r.method === "session/send").length,
+      core.requests.filter((r) => r.method === "v4/command").length,
       1,
     );
     finishFirstTurn!();
     await first;
-    // drain = microtask + 一次 session/send 往返。
+    // drain = microtask + 一次 v4/command 往返。
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const sends = core.requests.filter((r) => r.method === "session/send");
+    const sends = core.requests.filter((r) => r.method === "v4/command");
     assert.equal(sends.length, 2);
-    assert.equal(sends[1]?.params.content, "second");
+    assert.equal((sends[1]?.params.payload as { text?: string }).text, "second");
     // 合成 drained 事件携带 drainedInputs（含原文）：重放的新回合没有本地乐观
     // user row，TUI transcript 行由 drained payload 补出（2026-10-25 live 修复）。
     const drained = received.find(
@@ -816,8 +949,8 @@ test("sendInput 忙时本地排队，turn settle 后 drain 成第二条 session/
   }
 });
 
-test("stopActiveTurn 显式发 session/stop 并等回执；连接断开则尽力返回", async () => {
-  // "stop & quit" 路径：abortSignal 的 fire-and-forget sessionStop 之外再显式
+test("stopActiveTurn 显式发 v4/command stop 并等回执；连接断开则尽力返回", async () => {
+  // "stop & quit" 路径：abortSignal 的 fire-and-forget v4 stop 之外再显式
   // 发一次并等有界回执，保证退出前 stop 已落线。
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
@@ -825,7 +958,9 @@ test("stopActiveTurn 显式发 session/stop 并等回执；连接断开则尽力
   const { client, handle } = await makeHandle(socketPath);
   try {
     await handle.stopActiveTurn();
-    const stops = core.requests.filter((r) => r.method === "session/stop");
+    const stops = core.requests.filter(
+      (r) => r.method === "v4/command" && r.params.type === "stop",
+    );
     assert.equal(stops.length, 1);
     assert.equal(stops[0]?.params.sessionId, SID);
     // 连接已断开时 clientOf 抛错：尽力路径必须静默返回，不阻塞退出。
@@ -838,7 +973,7 @@ test("stopActiveTurn 显式发 session/stop 并等回执；连接断开则尽力
   }
 });
 
-test("sendInput '/model …' 经 commandCenter → session/setModel，不发 session/send", async () => {
+test("sendInput '/model …' 经 commandCenter → session/setModel，不发 v4 sendText", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
   const core = await startFakeCore(socketPath, (request) => {
@@ -888,8 +1023,10 @@ test("sendInput '/model …' 经 commandCenter → session/setModel，不发 ses
       "expected session/setModel request",
     );
     assert.ok(
-      !core.requests.some((r) => r.method === "session/send"),
-      "slash command must not reach session/send",
+      !core.requests.some(
+        (r) => r.method === "v4/command" && r.params.type === "sendText",
+      ),
+      "slash command must not reach the sendText command lane",
     );
   } finally {
     await runtime.close();
@@ -972,30 +1109,8 @@ test("首行为绝对路径的多行输入按普通 prompt 提交，而不是回
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      const inputId = request.params.inputId as string;
-      const content = request.params.content as string;
-      const turnId = "turn-forward";
-      queueMicrotask(() => {
-        notify(
-          rawEvent({
-            inputId,
-            payload: { inputId, input: content, turnNumber: 1 },
-            seq: 1,
-            turnId,
-            type: "turn_started",
-          }),
-        );
-        notify(
-          rawEvent({
-            payload: { response: `r-${content}`, resultType: "completed" },
-            seq: 2,
-            turnId,
-            type: "turn_complete",
-          }),
-        );
-      });
-      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    if (request.method === "v4/command") {
+      return respondV4SendText(notify, request, { turnId: "turn-forward" });
     }
     return {};
   });
@@ -1015,10 +1130,12 @@ test("首行为绝对路径的多行输入按普通 prompt 提交，而不是回
       workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
     });
     const result = await handler(text, {});
-    const sends = core.requests.filter((r) => r.method === "session/send");
-    assert.equal(sends.length, 1, "expected exactly one session/send");
+    const sends = core.requests.filter(
+      (r) => r.method === "v4/command" && r.params.type === "sendText",
+    );
+    assert.equal(sends.length, 1, "expected exactly one sendText command");
     // 原文逐字下发（含首行路径与空行）。
-    assert.equal(sends[0]?.params.content, text);
+    assert.equal((sends[0]?.params.payload as { text?: string }).text, text);
     assert.equal(result.response, `r-${text}`);
     assert.equal(result.response.includes("Unknown command"), false);
   } finally {
@@ -1154,6 +1271,10 @@ test("/new 之后 listModelOptions 仍返回完整 catalog", async () => {
     });
     const result = await handler("/new", {});
     assert.match(result.response ?? "", /Started new session/);
+    // /new 的会话与启动 create 同规是 deferred 草稿：首发前不进 session/list，
+    // 不被 picker / -c 选中。
+    const createCall = core.requests.find((r) => r.method === "session/create");
+    assert.equal(createCall?.params.persistence, "deferred");
     const models = (await handler.listModelOptions?.()) as Array<{
       ref?: { modelId?: string };
     }>;
@@ -1169,29 +1290,33 @@ test("/new 之后 listModelOptions 仍返回完整 catalog", async () => {
   }
 });
 
-// 回归证据（2026-10-22，`piz` 实测）：TUI 附件形状 {type,path} 直接进 session/send 时，
-// server 的 mapProtocolPromptAttachment 只读 kind/localPath，整条附件被静默丢弃——
-// `@src/alpha.ts` 提交成功、模型却什么都没收到。协议边界必须做一次形状转换。
-test("prompt 附件按 session/send 的协议形状下发（kind/localPath, kind/dataBase64）", async () => {
+// 回归证据（2026-10-22，`piz` 实测）：TUI 附件形状必须先经协议边界转换成 core
+// 认识的引用再提交——v4 迁移后磁盘路径直传 AttachmentRef（零拷贝），草稿占位
+// 附件（剪贴板图片 data URL、内联文本）经 begin/chunk/commit 寄存为 URI ref。
+test("prompt 附件按 v4 引用下发：磁盘路径直传，data URL/内联文本先寄存", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
+  let refCounter = 0;
   const core = await startFakeCore(socketPath, (request, notify) => {
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      const inputId = request.params.inputId as string;
-      queueMicrotask(() => {
-        notify(
-          rawEvent({
-            payload: { inputId, response: "ok" },
-            seq: 2,
-            turnId: "turn-attach",
-            type: "turn_complete",
-          }),
-        );
-      });
-      return { accepted: true };
+    if (request.method === "v4/attachment/begin") {
+      refCounter += 1;
+      return {
+        nextChunkIndex: 0,
+        state: "staging",
+        uploadId: request.params.uploadId,
+      };
+    }
+    if (request.method === "v4/attachment/chunk") {
+      return { nextChunkIndex: 1, uploadId: request.params.uploadId };
+    }
+    if (request.method === "v4/attachment/commit") {
+      return { ref: `zcode-artifact://up-${refCounter}` };
+    }
+    if (request.method === "v4/command") {
+      return respondV4SendText(notify, request, { turnId: "turn-attach" });
     }
     return {};
   });
@@ -1215,17 +1340,36 @@ test("prompt 附件按 session/send 的协议形状下发（kind/localPath, kind
       ],
       text: "review @src/alpha.ts",
     });
-    const send = core.requests.find((request) => request.method === "session/send");
-    assert.ok(send, "expected session/send");
-    assert.deepEqual(send.params.attachments, [
-      { filename: "src/alpha.ts", kind: "file", localPath: "src/alpha.ts" },
-      { filename: "attachment", kind: "file", textContent: "inline text" },
-      {
-        dataBase64: Buffer.from("png-bytes").toString("base64"),
-        filename: "shot.png",
-        kind: "image",
-        mimeType: "image/png",
-      },
+    const begins = core.requests.filter((r) => r.method === "v4/attachment/begin");
+    assert.equal(begins.length, 2, "path ref needs no upload; image + inline text do");
+    const imageBegin = begins.find((r) => r.params.mime === "image/png");
+    assert.ok(imageBegin, "expected the image upload begin");
+    assert.equal(imageBegin?.params.fileName, "shot.png");
+    assert.equal(imageBegin?.params.totalBytes, Buffer.byteLength("png-bytes"));
+    assert.equal(imageBegin?.params.totalChunks, 1);
+    assert.match(String(imageBegin?.params.checksum), /^sha256:[0-9a-f]{64}$/);
+    const textBegin = begins.find((r) => r.params.mime === "text/plain");
+    assert.equal(textBegin?.params.fileName, "attachment");
+    assert.equal(
+      core.requests.filter((r) => r.method === "v4/attachment/chunk").length,
+      2,
+    );
+    assert.equal(
+      core.requests.filter((r) => r.method === "v4/attachment/commit").length,
+      2,
+    );
+    const send = core.requests.find(
+      (r) => r.method === "v4/command" && r.params.type === "sendText",
+    );
+    assert.ok(send, "expected v4/command sendText");
+    // v4 引用进 payload.attachments（信封不再有顶层 attachments 字段）。
+    assert.deepEqual((send.params.payload as { attachments?: unknown[] }).attachments, [
+      // 磁盘路径直传：core 端按普通 file 路径附件读取（零上传）。
+      { bytes: 0, fileName: "src/alpha.ts", mime: "application/octet-stream", ref: "src/alpha.ts" },
+      // 内联文本与图片寄存为 artifact URI ref，core 在模型请求阶段读回
+      // （映射按附件数组顺序串行上传：文本先于图片提交）。
+      { bytes: 11, fileName: "attachment", mime: "text/plain", ref: "zcode-artifact://up-1" },
+      { bytes: 9, fileName: "shot.png", mime: "image/png", ref: "zcode-artifact://up-2" },
     ]);
   } finally {
     await runtime.close();
@@ -1233,6 +1377,273 @@ test("prompt 附件按 session/send 的协议形状下发（kind/localPath, kind
     await rm(dir, { force: true, recursive: true });
   }
 });
+
+// 寄存失败必须中止提交并回收暂存：半成品会占用 core 的暂存预算直到 TTL。
+test("附件寄存失败 → abort 暂存并让 submitPrompt 如实失败", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let aborted = false;
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "v4/attachment/begin") {
+      return { nextChunkIndex: 0, state: "staging", uploadId: request.params.uploadId };
+    }
+    if (request.method === "v4/attachment/chunk") {
+      return Promise.reject(Object.assign(new Error("chunk rejected"), { code: -32000 }));
+    }
+    if (request.method === "v4/attachment/abort") {
+      aborted = true;
+      return {};
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    await handle.subscribe();
+    const dataUrl = `data:image/png;base64,${Buffer.from("png-bytes").toString("base64")}`;
+    await assert.rejects(
+      handle.submitPrompt({
+        attachments: [{ content: dataUrl, path: "@shot.png", type: "image" }],
+        text: "with attachment",
+      }),
+      /chunk rejected/,
+    );
+    assert.equal(aborted, true, "staging must be aborted after a failed chunk");
+    assert.equal(
+      core.requests.some((r) => r.method === "v4/command"),
+      false,
+      "sendText must not fire when attachment staging fails",
+    );
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+for (const stage of ["begin", "chunk", "commit"] as const) {
+  test(`abort during attachment ${stage} is handled immediately and never sends the cancelled prompt`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "attach-upload-cancel-"));
+    const controller = new AbortController();
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const core = await startFakeCore(join(dir, "core.sock"), async (request) => {
+      if (request.method === `v4/attachment/${stage}`) await blocked;
+      if (request.method === "v4/attachment/begin") {
+        return { nextChunkIndex: 0, state: "staging", uploadId: request.params.uploadId };
+      }
+      if (request.method === "v4/attachment/chunk") {
+        return { nextChunkIndex: 1, uploadId: request.params.uploadId };
+      }
+      if (request.method === "v4/attachment/commit") return { ref: "zcode-artifact://cancel" };
+      return {};
+    });
+    const runtime = new AttachRuntime({ socketPath: core.socketPath });
+    await runtime.connect();
+    const handle = new AttachSessionHandle({
+      client: () => runtime.currentClient(), sessionId: SID, snapshot: makeSnapshot() as never,
+    });
+    runtime.registerSession(handle);
+    try {
+      const submission = assert.rejects(handle.submitPrompt({
+        attachments: [
+          { content: `data:image/png;base64,${Buffer.alloc(600_000).toString("base64")}`, path: "@first.png", type: "image" },
+          { content: "must not upload", type: "file" },
+        ],
+        text: "cancelled prompt",
+      }, { abortSignal: controller.signal }), /aborted/);
+      await waitFor(() => core.requests.some((r) => r.method === `v4/attachment/${stage}`));
+      const requestsAtAbort = core.requests.length;
+      controller.abort();
+      // 跨过 Node unhandledRejection 的检查轮次，不能等上传完成才观察 turnPromise。
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(core.requests.length, requestsAtAbort, "no unscoped stop while uploading");
+      release?.();
+      await submission;
+      const uploads = core.requests.filter((r) => r.method === "v4/attachment/begin");
+      assert.equal(uploads.length, 1, "do not upload the next attachment");
+      assert.equal(core.requests.some((r) => r.method === "v4/command"), false);
+      if (stage !== "commit") {
+        assert.equal(core.requests.some((r) => r.method === "v4/attachment/abort"), true);
+      }
+      if (stage === "chunk") {
+        assert.equal(core.requests.filter((r) => r.method === "v4/attachment/chunk").length, 1);
+        assert.equal(core.requests.some((r) => r.method === "v4/attachment/commit"), false);
+      }
+    } finally {
+      release?.();
+      await runtime.close();
+      await core.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+}
+
+test("already aborted submissions never upload or send commands", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-pre-abort-"));
+  const core = await startFakeCore(join(dir, "core.sock"), () => ({}));
+  const runtime = new AttachRuntime({ socketPath: core.socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(), sessionId: SID, snapshot: makeSnapshot() as never,
+  });
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    await assert.rejects(handle.submitPrompt({
+      attachments: [{ content: "not uploaded", type: "file" }], text: "no send",
+    }, { abortSignal: controller.signal }), /aborted/);
+    await assert.rejects(handle.submitPrompt("no send", { abortSignal: controller.signal }), /aborted/);
+    assert.equal(core.requests.length, 0);
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("a completed submission detaches its abort listener before the next turn", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-abort-listener-"));
+  const core = await startFakeCore(join(dir, "core.sock"), (request, notify) =>
+    respondV4SendText(notify, request));
+  const runtime = new AttachRuntime({ socketPath: core.socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(), sessionId: SID, snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const controller = new AbortController();
+  try {
+    await handle.submitPrompt("completed", { abortSignal: controller.signal });
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(core.requests.some((r) => r.method === "v4/command" && r.params.type === "stop"), false);
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("a late completion from an aborted turn cannot settle a newer pending prompt", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-stale-complete-"));
+  const core = await startFakeCore(join(dir, "core.sock"), (request, notify) => {
+    if (request.params.type === "stop") return v4AckAccepted(String(request.params.commandId));
+    if ((request.params.payload as { text?: string })?.text === "old") {
+      notify(rawEvent({
+        payload: { inputId: request.params.commandId, input: "old", turnNumber: 1 },
+        seq: 1, turnId: "old-turn", type: "turn_started",
+      }));
+    }
+    return v4AckAccepted(String(request.params.commandId));
+  });
+  const runtime = new AttachRuntime({ socketPath: core.socketPath });
+  await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(), sessionId: SID, snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const controller = new AbortController();
+  try {
+    const old = assert.rejects(handle.submitPrompt("old", { abortSignal: controller.signal }), /aborted/);
+    await waitFor(() => handle.eventSeq === 1);
+    controller.abort();
+    await old;
+    let settled = false;
+    const next = handle.submitPrompt("new").then((result) => { settled = true; return result; });
+    await waitFor(() => core.requests.filter((r) => r.params.type === "sendText").length === 2);
+    core.notify(rawEvent({
+      payload: { response: "stale" }, seq: 2, turnId: "old-turn", type: "turn_complete",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(settled, false, "explicit old turnId must not fall through to firstPending");
+    const sent = core.requests.find((r) => (r.params.payload as { text?: string })?.text === "new");
+    core.notify(rawEvent({
+      payload: { inputId: sent?.params.commandId, input: "new", turnNumber: 2 },
+      seq: 3, turnId: "new-turn", type: "turn_started",
+    }));
+    core.notify(rawEvent({
+      payload: { response: "fresh" }, seq: 4, turnId: "new-turn", type: "turn_complete",
+    }));
+    assert.equal((await next).response, "fresh");
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+for (const diagnostics of ["logger", "stderr", "throwing logger"] as const) {
+  test(`failed upload cleanup reports via ${diagnostics} without replacing the primary error`, async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "attach-upload-cleanup-"));
+    const core = await startFakeCore(join(dir, "core.sock"), async (request) => {
+      if (request.method === "v4/attachment/begin") {
+        return { nextChunkIndex: 0, state: "staging", uploadId: request.params.uploadId };
+      }
+      if (request.method === "v4/attachment/chunk") throw new Error("primary chunk failure");
+      if (request.method === "v4/attachment/abort") throw new Error("cleanup failure");
+      return {};
+    });
+    const client = await connectAttachClient(core.socketPath);
+    const lines: string[] = [];
+    if (diagnostics !== "logger") {
+      t.mock.method(process.stderr, "write", (line: string) => { lines.push(line); return true; });
+    }
+    try {
+      await assert.rejects(uploadAttachment(client, {
+        bytes: Buffer.from("upload"), connectionId: "conn", fileName: "fixture.txt",
+        mime: "text/plain", sessionId: SID,
+        logger: diagnostics === "stderr" ? undefined : {
+          warn: (message) => {
+            if (diagnostics === "throwing logger") throw new Error("logger failure");
+            lines.push(message);
+          },
+        },
+      }), /primary chunk failure/);
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /attach v4 upload abort cleanup failed \(uploadId attach-up-[^)]+\): cleanup failure/);
+      const begin = core.requests.find((r) => r.method === "v4/attachment/begin");
+      const abort = core.requests.find((r) => r.method === "v4/attachment/abort");
+      assert.equal(abort?.params.uploadId, begin?.params.uploadId);
+    } finally {
+      client.close();
+      await core.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+}
+
+for (const beginReply of ["malformed", "committed"] as const) {
+  test(`unexpected ${beginReply} begin receipt cleans up and never submits a prompt`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "attach-upload-begin-"));
+    const core = await startFakeCore(join(dir, "core.sock"), (request) => {
+      if (request.method === "v4/attachment/begin") {
+        return beginReply === "malformed" ? { state: "bad" } : {
+          nextChunkIndex: 1, ref: "zcode-artifact://unexpected",
+          state: "committed", uploadId: request.params.uploadId,
+        };
+      }
+      return {};
+    });
+    const client = await connectAttachClient(core.socketPath);
+    const handle = new AttachSessionHandle({
+      client, sessionId: SID, snapshot: makeSnapshot() as never,
+    });
+    try {
+      await assert.rejects(handle.submitPrompt({
+        attachments: [{ content: "upload", type: "file" }], text: "no send",
+      }));
+      assert.deepEqual(core.requests.map((r) => r.method), ["v4/attachment/begin", "v4/attachment/abort"]);
+      assert.equal(core.requests[0].params.uploadId, core.requests[1].params.uploadId);
+    } finally {
+      client.close();
+      await core.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+}
 
 // 裸 /skill 在 attach 下走 skills/referenceCatalog（session 权威快照）——
 // 修复前 deps.listSkills 未接线，恒回 "Skill listing is not available in this client."
@@ -1300,8 +1711,10 @@ test("裸 /skill 经 skills/referenceCatalog 取会话快照并格式化为命�
     assert.match(result.response ?? "", /alias lint/);
     assert.match(result.response ?? "", /Use \/skill <name> \[task\] to load one/);
     assert.ok(
-      !core.requests.some((r) => r.method === "session/send"),
-      "bare /skill must not reach session/send",
+      !core.requests.some(
+        (r) => r.method === "v4/command" && r.params.type === "sendText",
+      ),
+      "bare /skill must not reach the sendText command lane",
     );
   } finally {
     await runtime.close();
@@ -1317,20 +1730,20 @@ test("/skill <name> [task] 改写为 Skill tool 指令按普通 prompt 下发", 
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      const inputId = request.params.inputId as string;
+    if (request.method === "v4/command") {
+      const commandId = request.params.commandId as string;
       queueMicrotask(() => {
         notify(
           rawEvent({
-            inputId,
-            payload: { inputId, response: "skill turn done", resultType: "completed" },
+            inputId: commandId,
+            payload: { inputId: commandId, response: "skill turn done", resultType: "completed" },
             seq: 1,
             turnId: "turn-skill",
             type: "turn_complete",
           }),
         );
       });
-      return { accepted: true, sessionId: SID, stateRevision: 1 };
+      return v4AckAccepted(commandId);
     }
     return {};
   });
@@ -1349,9 +1762,11 @@ test("/skill <name> [task] 改写为 Skill tool 指令按普通 prompt 下发", 
       workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
     });
     const result = await handler("/skill fmt:lint fix my imports", {});
-    const send = core.requests.find((r) => r.method === "session/send");
-    assert.ok(send, "expected session/send");
-    const content = String(send.params.content);
+    const send = core.requests.find(
+      (r) => r.method === "v4/command" && r.params.type === "sendText",
+    );
+    assert.ok(send, "expected v4/command sendText");
+    const content = String((send.params.payload as { text?: string }).text);
     assert.match(content, /skill named `fmt:lint`/);
     assert.match(content, /Skill` tool with name `fmt:lint`/);
     assert.match(content, /fix my imports/);
@@ -1409,12 +1824,18 @@ const PERMISSION_OPTIONS = [
   },
 ];
 
-function interactionCoreResponder(request: Captured): unknown {
+function interactionCoreResponder(request: Captured, notify: (params: unknown) => void): unknown {
   if (request.method === "session/subscribe") {
     return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
   }
-  if (request.method === "session/send") {
-    return { accepted: true, sessionId: SID, stateRevision: 1 };
+  if (request.method === "v4/command") {
+    if (request.params.type === "sendText") {
+      queueMicrotask(() => notify(rawEvent({
+        payload: { inputId: request.params.commandId, turnNumber: 1 },
+        seq: 1, turnId: "turn-1", type: "turn_started",
+      })));
+    }
+    return v4AckAccepted(String(request.params.commandId));
   }
   return {};
 }
@@ -1469,7 +1890,7 @@ test("requestUserInput(AskUserQuestion) → wizard 请求 → accept + answers/a
         };
       },
     });
-    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    await waitFor(() => core.requests.some((r) => r.method === "v4/command"));
     core.sendRequest("srv-1", "interaction/requestUserInput", {
       input: {
         questions: [
@@ -1544,7 +1965,7 @@ test("requestUserInput 同 requestId 重发 → callback 只调一次，迟到�
         return { decision: "deny", reason: "Denied in TUI", resolvedAt: new Date() };
       },
     });
-    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    await waitFor(() => core.requests.some((r) => r.method === "v4/command"));
     const params = {
       requestId: "req-dup",
       schema: { interaction: "plan_approval", toolName: "ExitPlanMode" },
@@ -1584,7 +2005,7 @@ test("requestUserInput(ExitPlanMode) → 普通审批 allow → accept approve",
         return { decision: "allow", reason: "Approved in TUI", resolvedAt: new Date() };
       },
     });
-    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    await waitFor(() => core.requests.some((r) => r.method === "v4/command"));
     core.sendRequest("srv-1", "interaction/requestUserInput", {
       input: { plan: "do x" },
       prompt: "Review this implementation plan.",
@@ -1622,7 +2043,7 @@ test("requestPermission → 回 option.response 原文（无 resolvedAt）", asy
         return { decision: "deny", reason: "Denied in TUI", resolvedAt: new Date() };
       },
     });
-    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    await waitFor(() => core.requests.some((r) => r.method === "v4/command"));
     core.sendRequest("srv-1", "interaction/requestPermission", {
       input: { command: "rm x" },
       options: PERMISSION_OPTIONS,
@@ -1660,7 +2081,7 @@ test("requestPermission user-once 选项 → approvalMode 还原为 user-once", 
         return { decision: "allow", resolvedAt: new Date() };
       },
     });
-    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    await waitFor(() => core.requests.some((r) => r.method === "v4/command"));
     core.sendRequest("srv-1", "interaction/requestPermission", {
       input: {},
       options: [PERMISSION_OPTIONS[0], PERMISSION_OPTIONS[2]],
@@ -1712,7 +2133,7 @@ test("permission_resolved 事件撤下悬空交互 → 请求侧收到 error 应
         });
       },
     });
-    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    await waitFor(() => core.requests.some((r) => r.method === "v4/command"));
     core.sendRequest("srv-1", "interaction/requestPermission", {
       input: {},
       options: PERMISSION_OPTIONS,
@@ -1723,7 +2144,7 @@ test("permission_resolved 事件撤下悬空交互 → 请求侧收到 error 应
       toolCallId: "tc-1",
       toolName: "Bash",
     });
-    await waitFor(() => core.requests.some((r) => r.method === "session/send"));
+    await waitFor(() => core.requests.some((r) => r.method === "v4/command"));
     // 服务端先行 settle（自动应答/abort）→ resolved 事件必须撤下本端面板。
     core.notify(
       rawEvent({
@@ -1785,7 +2206,7 @@ test("无 handler（无在途回合）时 permission → deny / userInput → de
 
 // ── 自定义命令（commands/referenceCatalog）──
 // 契约：目录经协议取（瘦客户端不本地重扫），展开留在 core 的 input facade ——
-// 未知 `/name args` 必须原文转发 session/send（客户端侧展开会砍 !`cmd` 动态语法）。
+// 未知 `/name args` 必须原文转发 v4 sendText（客户端侧展开会砍 !`cmd` 动态语法）。
 
 const commandCatalog = {
   commands: [
@@ -1834,8 +2255,10 @@ test("/help 列出自定义命令（commands/referenceCatalog 目录）", async 
       workspacePath: "/tmp/ws",
     });
     assert.ok(
-      !core.requests.some((r) => r.method === "session/send"),
-      "help must not reach session/send",
+      !core.requests.some(
+        (r) => r.method === "v4/command" && r.params.type === "sendText",
+      ),
+      "help must not reach the sendText command lane",
     );
   } finally {
     await runtime.close();
@@ -1844,19 +2267,13 @@ test("/help 列出自定义命令（commands/referenceCatalog 目录）", async 
   }
 });
 
-test("/review 参数原文转发 session/send（展开在 core 的 input facade，不在客户端）", async () => {
+test("/review 参数原文转发 v4 sendText（展开在 core 的 input facade，不在客户端）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
   const core = await startFakeCore(socketPath, (request, notify) => {
     if (request.method === "commands/referenceCatalog") return commandCatalog;
-    if (request.method === "session/send") {
-      const inputId = request.params.inputId as string;
-      const content = request.params.content as string;
-      queueMicrotask(() => {
-        notify(rawEvent({ inputId, payload: { inputId }, seq: 1, turnId: "t", type: "turn_started" }));
-        notify(rawEvent({ payload: { response: "ok", resultType: "completed" }, seq: 2, turnId: "t", type: "turn_complete" }));
-      });
-      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    if (request.method === "v4/command") {
+      return respondV4SendText(notify, request, { turnId: "t" });
     }
     return {};
   });
@@ -1875,10 +2292,15 @@ test("/review 参数原文转发 session/send（展开在 core 的 input facade�
       workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
     });
     await handler("/review apps/cli/src/main.ts", {});
-    const sends = core.requests.filter((r) => r.method === "session/send");
-    assert.equal(sends.length, 1, "expected exactly one session/send");
+    const sends = core.requests.filter(
+      (r) => r.method === "v4/command" && r.params.type === "sendText",
+    );
+    assert.equal(sends.length, 1, "expected exactly one sendText command");
     // 逐字转发：客户端不做任何展开/改写 —— core 的 facade 负责并记 displayInput。
-    assert.equal(sends[0]?.params.content, "/review apps/cli/src/main.ts");
+    assert.equal(
+      (sends[0]?.params.payload as { text?: string }).text,
+      "/review apps/cli/src/main.ts",
+    );
   } finally {
     await runtime.close();
     await core.close();
@@ -1960,8 +2382,11 @@ async function startBusyFixture(
   dir: string,
   respondSteer: (
     request: Captured,
-  ) => unknown = () => ({},
-  ),
+    notify: (params: unknown) => void,
+  ) => unknown = (request) => ({
+    ...v4AckAccepted(String(request.params.commandId)),
+    result: { delivery: "queue", inputId: request.params.commandId, type: "inputAccepted" },
+  }),
 ): Promise<{
   core: FakeCore;
   handle: AttachSessionHandle;
@@ -1973,21 +2398,31 @@ async function startBusyFixture(
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      if (request.params.delivery === "steer") return respondSteer(request);
-      const inputId = request.params.inputId as string;
-      queueMicrotask(() => {
-        notify(
-          rawEvent({
-            inputId,
-            payload: { inputId, input: request.params.content, turnNumber: 1 },
-            seq: 1,
-            turnId: "turn-busy",
-            type: "turn_started",
-          }),
-        );
-      });
-      return { accepted: true, sessionId: SID, stateRevision: 1 };
+    if (request.method === "v4/command") {
+      if (request.params.type === "stop") return {};
+      if (request.params.type === "sendText") {
+        if ((request.params.payload as { requestedDelivery?: string }).requestedDelivery === "guide") {
+          return respondSteer(request, notify);
+        }
+        const commandId = request.params.commandId as string;
+        queueMicrotask(() => {
+          notify(
+            rawEvent({
+              inputId: commandId,
+              payload: {
+                inputId: commandId,
+                input: (request.params.payload as { text?: string }).text,
+                turnNumber: 1,
+              },
+              seq: 1,
+              turnId: "turn-busy",
+              type: "turn_started",
+            }),
+          );
+        });
+        return v4AckAccepted(commandId);
+      }
+      return {};
     }
     if (request.method === "session/discardPendingInputs") {
       return { removed: [] };
@@ -2017,36 +2452,43 @@ async function startBusyFixture(
   return { core, handle, runtime, settleFirstTurn };
 }
 
-test("busy sendInput delivery steer → session/send delivery:steer，回执 pendingInputId 直通", async () => {
+test("busy sendInput delivery steer → v4 sendText guide，pendingInputId 客户端自算", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-steer-"));
-  const steerReceipt = {
-    accepted: true,
-    sessionId: SID,
-    stateRevision: 2,
-    steerQueued: { pendingInputId: "core-p1", queueLength: 1, turnId: "turn-busy" },
-  };
-  const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir, () => steerReceipt);
+  const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir);
   const events: Array<{ payload: Record<string, unknown>; type: string }> = [];
   handle.addSink((event) => events.push(event as never));
   try {
     const result = await handle.sendInput("redirect please", { delivery: "steer" });
     assert.equal(result.kind, "queued");
+    const steerSend = core.requests.find(
+      (r) =>
+        r.method === "v4/command" &&
+        r.params.type === "sendText" &&
+        (r.params.payload as { requestedDelivery?: string }).requestedDelivery === "guide",
+    );
+    assert.ok(steerSend, "expected v4 sendText with requestedDelivery guide");
+    assert.equal((steerSend.params.payload as { text?: string }).text, "redirect please");
+    assert.equal(steerSend.params.sessionId, SID);
+    assert.equal(
+      (steerSend.params.payload as { heldQueueDisposition?: string }).heldQueueDisposition,
+      "keepQueueAndSend",
+    );
     if (result.kind === "queued") {
-      assert.equal(result.pendingInputId, "core-p1");
+      // core 以 queue_<commandId> 作队列项 id（intent.queueItemId → pendingInputId），
+      // 客户端无需等回执即可对齐 TUI 队列行的幂等 upsert 键。
+      assert.equal(result.pendingInputId, `queue_${steerSend.params.commandId}`);
       assert.equal(result.queueLength, 1);
     }
-    const steerSend = core.requests.find(
-      (r) => r.method === "session/send" && r.params.delivery === "steer",
-    );
-    assert.ok(steerSend, "expected session/send with delivery steer");
-    assert.equal(steerSend.params.content, "redirect please");
-    assert.equal(steerSend.params.sessionId, SID);
-    // steer 不落本地 follow-up 队列：settle 后不得重放第二条 session/send。
+    // steer 不落本地 follow-up 队列：settle 后不得重放第二条 sendText。
     settleFirstTurn();
     await new Promise((resolve) => setTimeout(resolve, 60));
-    const sends = core.requests.filter((r) => r.method === "session/send");
+    const sends = core.requests.filter(
+      (r) => r.method === "v4/command" && r.params.type === "sendText",
+    );
     assert.equal(
-      sends.filter((r) => r.params.delivery !== "steer").length,
+      sends.filter(
+        (r) => (r.params.payload as { requestedDelivery?: string }).requestedDelivery !== "guide",
+      ).length,
       1,
       "steer must not re-enter the local follow-up queue",
     );
@@ -2063,18 +2505,84 @@ test("busy sendInput delivery steer → session/send delivery:steer，回执 pen
   }
 });
 
-test("steer 被拒（guard.steerRejected.*）回退本地 follow-up 队列", async () => {
+for (const eventsBeforeAck of [true, false]) {
+  test(`guide admitted after idle returns a real started_turn (events ${eventsBeforeAck ? "before" : "after"} ACK)`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "attach-steer-idle-"));
+    const { core, handle, runtime } = await startBusyFixture(dir, (request, notify) => {
+      const notifyTurns = (): void => {
+        notify(rawEvent({
+          payload: { response: "old done", resultType: "completed" },
+          seq: 2, turnId: "turn-busy", type: "turn_complete",
+        }));
+        notify(rawEvent({
+          payload: { inputId: request.params.commandId, input: "new prompt", turnNumber: 2 },
+          seq: 3, turnId: "turn-raced", type: "turn_started",
+        }));
+        notify(rawEvent({
+          payload: { response: "new response", resultType: "completed" },
+          seq: 4, turnId: "turn-raced", type: "turn_complete",
+        }));
+      };
+      if (eventsBeforeAck) notifyTurns();
+      else setTimeout(notifyTurns, 20);
+      return v4AckAccepted(String(request.params.commandId));
+    });
+    const events: string[] = [];
+    handle.addSink((event) => events.push(event.type));
+    try {
+      const outcome = await handle.sendInput("new prompt", { delivery: "steer" });
+      assert.equal(outcome.kind, "started_turn", "accepted guide is not necessarily queued");
+      if (outcome.kind === "started_turn") {
+        assert.equal(outcome.result.turnId, "turn-raced");
+        assert.equal(outcome.result.response, "new response");
+      }
+      assert.equal(events.includes("turn_steer_queued"), false, "no phantom steering row");
+      assert.equal(events.includes("turn_steer_drained"), false, "TUI started_turn owns user echo");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(core.requests.filter((r) => r.method === "v4/command" && r.params.type === "sendText").length, 2,
+        "the accepted input must never be replayed");
+    } finally {
+      await runtime.close();
+      await core.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+}
+
+test("a late guide rejection still flushes its local fallback after the old turn settled", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-steer-late-reject-"));
+  const { core, handle, runtime } = await startBusyFixture(dir, async (request, notify) => {
+    notify(rawEvent({
+      payload: { response: "done", resultType: "completed" },
+      seq: 2, turnId: "turn-busy", type: "turn_complete",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      commandId: request.params.commandId, reasonCode: "fault.command.inputRejected",
+      revisionAtDecision: 0, status: "rejected",
+    };
+  });
+  try {
+    const outcome = await handle.sendInput("fallback", { delivery: "steer" });
+    assert.equal(outcome.kind, "queued");
+    await waitFor(() => core.requests.filter((r) => r.method === "v4/command" && r.params.type === "sendText").length === 3);
+    const replay = core.requests.filter((r) => r.method === "v4/command" && r.params.type === "sendText")[2];
+    assert.equal((replay.params.payload as { text: string }).text, "fallback");
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("steer 被拒（ACK failed/rejected 族）回退本地 follow-up 队列", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-steer-reject-"));
-  // responder 里同步 throw 会炸掉 socket data handler：协议错误必须以
-  // rejected promise 的形式进入 fake core 的应答链。
-  const rejectSteer = (): Promise<never> => {
-    const error = new Error(
-      "Steer rejected: turn_not_steerable",
-    ) as Error & { code: number; data: unknown };
-    error.code = -32010;
-    error.data = { reasonCode: "guard.steerRejected.turn_not_steerable" };
-    return Promise.reject(error);
-  };
+  const rejectSteer = (request: Captured): unknown => ({
+    commandId: request.params.commandId,
+    reasonCode: "fault.command.inputRejected",
+    revisionAtDecision: 0,
+    status: "rejected",
+  });
   const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir, rejectSteer);
   const events: Array<{ payload: Record<string, unknown>; type: string }> = [];
   handle.addSink((event) => events.push(event as never));
@@ -2097,7 +2605,7 @@ test("steer 被拒（guard.steerRejected.*）回退本地 follow-up 队列", asy
   }
 });
 
-test("steer 协议级失败（非 guard.steerRejected）如实上抛", async () => {
+test("steer 协议级失败（传输/schema 错误，非 ACK 拒绝）如实上抛", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-steer-error-"));
   const rejectSteer = (): Promise<never> => Promise.reject(new Error("socket exploded"));
   const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir, rejectSteer);
@@ -2115,7 +2623,7 @@ test("steer 协议级失败（非 guard.steerRejected）如实上抛", async () 
   }
 });
 
-test("busy sendInput delivery queue → 本地 follow-up 队列，不触 steer 协议", async () => {
+test("busy sendInput delivery queue → 本地 follow-up 队列，不触 v4 命令面", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-queue-"));
   const { core, handle, runtime, settleFirstTurn } = await startBusyFixture(dir);
   const events: Array<{ payload: Record<string, unknown>; type: string }> = [];
@@ -2124,9 +2632,14 @@ test("busy sendInput delivery queue → 本地 follow-up 队列，不触 steer �
     const result = await handle.sendInput("after you finish", { delivery: "queue" });
     assert.equal(result.kind, "queued");
     assert.equal(
-      core.requests.some((r) => r.method === "session/send" && r.params.delivery === "steer"),
+      core.requests.some(
+        (r) =>
+          r.method === "v4/command" &&
+          r.params.type === "sendText" &&
+          (r.params.payload as { requestedDelivery?: string }).requestedDelivery === "guide",
+      ),
       false,
-      "explicit queue must not touch the steer protocol lane",
+      "explicit queue must not touch the v4 steer lane",
     );
     const queued = events.find((event) => event.type === "turn_steer_queued");
     assert.ok(queued);
@@ -2148,20 +2661,24 @@ test("discardPendingInputs：本地项摘除合成 discarded，core 项走 sessi
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
-    if (request.method === "session/send") {
-      const inputId = request.params.inputId as string;
+    if (request.method === "v4/command") {
+      const commandId = String(request.params.commandId);
       queueMicrotask(() => {
         core.notify(
           rawEvent({
-            inputId,
-            payload: { inputId, input: request.params.content, turnNumber: 1 },
+            inputId: commandId,
+            payload: {
+              inputId: commandId,
+              input: (request.params.payload as { text?: string }).text,
+              turnNumber: 1,
+            },
             seq: 1,
             turnId: "turn-busy",
             type: "turn_started",
           }),
         );
       });
-      return { accepted: true, sessionId: SID, stateRevision: 1 };
+      return v4AckAccepted(commandId);
     }
     if (request.method === "session/discardPendingInputs") {
       remoteRemoved = request.params.pendingInputIds as string[];
@@ -2259,22 +2776,309 @@ test("createAttachPromptHandler 暴露 removeQueuedInputs 端口并随句柄生�
   }
 });
 
-// 回归证据（P004-F2，2026-10-26 评审）：TUI 内裸 /resume 曾用 sessions.at(-1)
-// 取“最近会话”——server 的 session/list 返回顺序不保证（实测创建序/任意序
-// 混排，attach-command 的入口路径因此改过显式排序），会静默恢复陈旧会话。
-// TUI 内必须走同一裁决：按 updatedAt（退化 createdAt）显式取最大。
-test("TUI 裸 /resume 按 updatedAt 取最近会话，而不是列表末位", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "attach-resume-latest-"));
+// 回归证据（2026-11-02）：attach 曾缺 CommandCenterDeps.listSessions，TUI 裸
+// /resume 落到 resumeApp 按 updatedAt 猜"最近会话"——刚绑定的当前会话往往
+// 最新，picker 意图被静默降级成恢复自己。现与 monolith 同规走 composer
+// picker：列表按 updatedAt 降序、剔除当前会话，选定前零 resume/create。
+test("TUI 裸 /resume 打开会话 picker：按 updatedAt 降序且剔除当前会话", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-picker-"));
   const socketPath = join(dir, "core.sock");
-  // 故意混排：陈旧会话不在末位、最新会话在中间。
+  // 故意混排，并掺入比已保存会话更新的当前会话：picker 只列已保存会话，
+  // 当前绑定不能成为"恢复自己"的条目。
   const listed = [
-    { id: "sess-middle", updatedAt: 200 },
-    { id: "sess-newest", updatedAt: 300 },
-    { id: "sess-stale", updatedAt: 100 },
+    sessionInfo("sess-stale", { title: "stale session", updatedAt: 100 }),
+    sessionInfo(SID, { title: "current draft", updatedAt: 999 }),
+    sessionInfo("sess-newest", { title: "newest session", updatedAt: 300 }),
+    sessionInfo("sess-fork", {
+      parentSessionId: "sess-parent-0001",
+      title: "forked session",
+      updatedAt: 200,
+    }),
   ];
   const core = await startFakeCore(socketPath, (request) => {
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/list") {
+      return { sessions: listed };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = await handler("/resume", {});
+    const selection = result.selection;
+    assert.equal(selection?.title, "Resume Session");
+    assert.equal(selection?.placement, "composer");
+    assert.deepEqual(
+      selection?.items.map((item) => item.id),
+      ["sess-newest", "sess-fork", "sess-stale"],
+    );
+    assert.equal(selection?.items[0]?.command, "/resume sess-newest");
+    assert.equal(selection?.items[0]?.primary, "newest session");
+    assert.match(selection?.items[0]?.secondary ?? "", /\/tmp\/ws/);
+    assert.match(selection?.items[1]?.meta ?? "", /fork of sess-parent-0001/);
+    // 列表请求必须携带 workspace ref（core 按它定界）。
+    const listCall = core.requests.find((r) => r.method === "session/list");
+    assert.deepEqual(listCall?.params.workspace, {
+      workspaceKey: "/tmp/ws",
+      workspacePath: "/tmp/ws",
+    });
+    // picker 展示期间不做任何绑定变更或 resume/create。
+    assert.equal(handler.getMainSessionId?.(), SID);
+    assert.ok(!core.requests.some((r) => r.method === "session/resume"));
+    assert.ok(!core.requests.some((r) => r.method === "session/create"));
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 选定项的 command（/resume <full id>）走与入口同一 resolver：
+// session/resume 携带 workspace ref，绑定/换 transcript 到目标会话。
+test("picker 选定项经 /resume <id> 恢复目标会话并携带 workspace", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-pick-"));
+  const socketPath = join(dir, "core.sock");
+  const listed = [
+    sessionInfo("sess-alpha", { title: "alpha", updatedAt: 300 }),
+    sessionInfo("sess-beta", { title: "beta", updatedAt: 200 }),
+  ];
+  const restored = [
+    {
+      info: {
+        agent: "main",
+        messageId: "m1",
+        role: "user",
+        sessionId: "sess-alpha",
+        time: { created: 1 },
+      },
+      parts: [
+        {
+          messageId: "m1",
+          partId: "p1",
+          sessionId: "sess-alpha",
+          text: "restored transcript",
+          type: "text",
+        },
+      ],
+    },
+  ];
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return {
+        eventSeq: 0,
+        events: [],
+        rawEvents: [],
+        sessionId: request.params.sessionId,
+      };
+    }
+    if (request.method === "session/list") {
+      return { sessions: listed };
+    }
+    if (request.method === "session/resume") {
+      return { sessionId: request.params.sessionId };
+    }
+    if (request.method === "session/messages") {
+      return { messages: restored };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const first = await handler("/resume", {});
+    const command = first.selection?.items[0]?.command;
+    assert.equal(command, "/resume sess-alpha");
+    const result = await handler(command!, {});
+    assert.equal(handler.getMainSessionId?.(), "sess-alpha");
+    assert.match(result.response ?? "", /Resumed session sess-alpha/);
+    const resumeCall = core.requests.find((r) => r.method === "session/resume");
+    assert.equal(resumeCall?.params.sessionId, "sess-alpha");
+    assert.deepEqual(resumeCall?.params.workspace, {
+      workspaceKey: "/tmp/ws",
+      workspacePath: "/tmp/ws",
+    });
+    assert.deepEqual(result.restoredMessages?.[0]?.parts, [
+      { text: "restored transcript", type: "text" },
+    ]);
+    assert.ok(!core.requests.some((r) => r.method === "session/create"));
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 空列表分支：渲染 picker 既有空态（不再退回 resumeApp 猜最近会话），
+// 绑定不变、零 resume/create。
+test("TUI 裸 /resume 空列表渲染 picker 空态", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-empty-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/list") {
+      return { sessions: [] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    const result = await handler("/resume", {});
+    assert.equal(result.selection?.title, "Resume Session");
+    assert.deepEqual(result.selection?.items, []);
+    assert.equal(result.selection?.emptyMessage, "No saved sessions found for this directory.");
+    assert.equal(handler.getMainSessionId?.(), SID);
+    assert.ok(!core.requests.some((r) => r.method === "session/resume"));
+    assert.ok(!core.requests.some((r) => r.method === "session/create"));
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 列表传输失败必须原样抛错：退回"猜最近会话"会在 core 半挂时静默恢复
+// 陈旧会话——picker 意图不允许降级成猜测。
+test("TUI 裸 /resume 列表传输失败原样抛错，不回退猜测", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-listfail-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/list") {
+      // 同步 throw 会逃出假 core 的 data handler（不落地成 error 应答）；
+      // 传输失败要回一个 rejected promise，让 server 侧 catch 成协议错误。
+      return Promise.reject(new Error("core gone"));
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    await assert.rejects(handler("/resume", {}), /core gone/);
+    assert.equal(handler.getMainSessionId?.(), SID);
+    assert.ok(!core.requests.some((r) => r.method === "session/resume"));
+    assert.ok(!core.requests.some((r) => r.method === "session/create"));
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// 畸形列表载荷必须显式抛错（全量 schema 校验）：残缺会话进入 picker 会
+// 产出缺 id/目录的"幽灵"条目，比直接失败更难排查。
+test("TUI 裸 /resume 畸形列表载荷显式抛错", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-malformed-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/list") {
+      // 缺 sessionId/workspace/title 等必需字段：过不了 zcodeSessionInfoSchema。
+      return { sessions: [{ id: "sess-legacy", updatedAt: 100 }] };
+    }
+    return {};
+  });
+  const runtime = new AttachRuntime({ socketPath });
+  const client = await runtime.connect();
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  try {
+    const handler = createAttachPromptHandler({
+      client,
+      initialHandle: handle,
+      runtime,
+      workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+    });
+    await assert.rejects(handler("/resume", {}));
+    assert.equal(handler.getMainSessionId?.(), SID);
+    assert.ok(!core.requests.some((r) => r.method === "session/resume"));
+    assert.ok(!core.requests.some((r) => r.method === "session/create"));
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// /resume <id> 在 TUI 内走与入口同一前缀裁决：唯一短前缀展开成完整 id，
+// 歧义前缀在任何绑定/resume 之前报错。
+test("TUI /resume <唯一前缀> 展开为完整 id 恢复", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-prefix-"));
+  const socketPath = join(dir, "core.sock");
+  const fullId = "sess_99f180d5-a07d-4424-87d7-5dda4402a881";
+  const listed = [
+    sessionInfo(fullId, { title: "target", updatedAt: 200 }),
+    sessionInfo("sess_3852f4bf", { title: "other", updatedAt: 100 }),
+  ];
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/subscribe") {
+      return {
+        eventSeq: 0,
+        events: [],
+        rawEvents: [],
+        sessionId: request.params.sessionId,
+      };
     }
     if (request.method === "session/list") {
       return { sessions: listed };
@@ -2302,15 +3106,11 @@ test("TUI 裸 /resume 按 updatedAt 取最近会话，而不是列表末位", as
       runtime,
       workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
     });
-    const result = (await handler("/resume", {})) as { response?: string };
+    const result = await handler("/resume sess_99f180d5", {});
+    assert.match(result.response ?? "", new RegExp(`Resumed session ${fullId}`));
+    assert.equal(handler.getMainSessionId?.(), fullId);
     const resumeCall = core.requests.find((r) => r.method === "session/resume");
-    assert.ok(resumeCall, "expected session/resume request");
-    assert.equal(resumeCall.params.sessionId, "sess-newest");
-    assert.match(result.response ?? "", /Resumed session sess-newest/);
-    assert.ok(
-      !core.requests.some((r) => r.method === "session/create"),
-      "bare /resume must not silently create a new session",
-    );
+    assert.equal(resumeCall?.params.sessionId, fullId);
   } finally {
     await runtime.close();
     await core.close();
@@ -2318,20 +3118,19 @@ test("TUI 裸 /resume 按 updatedAt 取最近会话，而不是列表末位", as
   }
 });
 
-// P004-F2 的空列表分支：显式报错（与入口 -c 的 “No resumable session found”
-// 同语义），不再静默留在当前会话装作成功。
-test("TUI 裸 /resume 空列表显式报错", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "attach-resume-empty-"));
+test("TUI /resume <歧义前缀> 在任何绑定或 resume 前报错", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-resume-ambig-"));
   const socketPath = join(dir, "core.sock");
+  const listed = [
+    sessionInfo("sess_dup_aaaa", { updatedAt: 200 }),
+    sessionInfo("sess_dup_bbbb", { updatedAt: 100 }),
+  ];
   const core = await startFakeCore(socketPath, (request) => {
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
     if (request.method === "session/list") {
-      return { sessions: [] };
-    }
-    if (request.method === "session/messages") {
-      return { messages: [] };
+      return { sessions: listed };
     }
     return {};
   });
@@ -2350,16 +3149,15 @@ test("TUI 裸 /resume 空列表显式报错", async () => {
       runtime,
       workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
     });
-    await assert.rejects(handler("/resume", {}), /No resumable session found for \/tmp\/ws/);
+    await assert.rejects(handler("/resume sess_dup", {}), /ambiguous: matches 2 sessions/);
+    assert.equal(handler.getMainSessionId?.(), SID);
     assert.ok(!core.requests.some((r) => r.method === "session/resume"));
-    assert.ok(!core.requests.some((r) => r.method === "session/create"));
   } finally {
     await runtime.close();
     await core.close();
     await rm(dir, { force: true, recursive: true });
   }
 });
-
 
 // 回归证据（2026-11-14，`piz` 页脚排查）：subscribeSessionEvents 曾绑定在调用时刻
 // 的 current 句柄——/resume /new /fork 换绑后，TUI 常驻 sink 留在旧句柄上，

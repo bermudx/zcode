@@ -31,7 +31,9 @@ import {
   type SendInputOptions,
   type SteerQueueContext,
 } from "./attach-steer.js";
-import { toProtocolAttachments } from "./attach-attachments.js";
+import { newUploadConnectionId } from "./attach-v4-attachments.js";
+import { toV4AttachmentRefs } from "./attach-v4-input.js";
+import { newCommandId, sendTextCommand } from "./attach-v4-command.js";
 import { resolveCompactContextWindowForModel } from "./attach-compact-cap.js";
 import {
   projectAttachTranscriptMessages,
@@ -45,8 +47,6 @@ import { resolveTuiModelSelection } from "../command-center/handlers/model.js";
 
 const TURN_STARTED = "turn_started";
 const TURN_END_TYPES = new Set(["turn_complete", "turn_error"]);
-
-const PROMPT_INPUT_ID_PREFIX = "attach-input";
 
 /** 与本地 formatLegacyRuntimeModelValue 同形：providerId/modelId。
  * 状态行按 "/" 取尾段显示；Ctrl+P 轮换、/model 参数匹配都依赖完整 ref。 */
@@ -63,6 +63,7 @@ export type AttachSessionEvent = SessionEvent;
 
 type PendingTurn = {
   inputId: string;
+  onStarted?: () => void;
   resolve: (result: TuiSubmitPromptResult) => void;
   reject: (error: Error) => void;
   turnId?: string;
@@ -84,20 +85,22 @@ export class AttachSessionHandle {
   private readonly pendingTurns = new Map<string, PendingTurn>();
   private readonly pendingByTurnId = new Map<string, PendingTurn>();
   private lastSeq = 0;
-  private inputCounter = 0;
   private locale: TuiSubmitPromptResult["locale"];
-  /** core 的 session/send 忙时直接拒绝；busy 输入停本地队列，settle 后自动 flush。 */
+  /** core 忙时 v4 admission 自动排队；busy 输入仍停本地队列，settle 后自动 flush。 */
   private readonly queuedInputs: QueuedLocalInput[] = [];
   private queueCounter = 0;
   private localEventCounter = 0;
   private lastActiveTurnId: string | undefined;
   private flushingQueue = false;
+  /** 附件暂存的 connectionId 命名空间：本句柄一份即可（uploadId 每次上传独立随机）。 */
+  private uploadConnectionId = newUploadConnectionId();
   /** 当前等待中的 permission 回调；同一连接一次交互只挂一个。 */
   activeRequestPermission:
     | ((request: unknown, options?: unknown) => Promise<unknown>)
     | undefined;
   /** 当前回合的 abortSignal：Ctrl-C/本地 abort 要同步撤下等待中的审批面板。 */
   private activeTurnAbortSignal: AbortSignal | undefined;
+  private activeInputId: string | undefined;
   /** 按业务 requestId 去重的在途交互（permission/userInput 反向请求）。 */
   private readonly interactions = new PendingInteractions();
 
@@ -170,16 +173,17 @@ export class AttachSessionHandle {
       if (pending) {
         pending.turnId = event.turnId;
         this.pendingByTurnId.set(String(event.turnId), pending);
+        pending.onStarted?.();
       }
       return;
     }
     if (!TURN_END_TYPES.has(event.type)) return;
-    // 回合结束时 broker 请求必然已 settle/cancel；仍挂着的交互都是孤儿。
-    this.interactions.drop();
+    // 迟到回合不能撤新交互，也不能借 firstPending 结算后续输入（只允许无 turnId 兼容）。
+    if (!event.turnId || event.turnId === this.lastActiveTurnId) this.interactions.drop();
     const pending =
       (event.turnId ? this.pendingByTurnId.get(String(event.turnId)) : undefined) ??
       this.findPendingByInputId(payload.inputId) ??
-      this.firstPending();
+      (!event.turnId ? this.firstPending() : undefined);
     if (!pending) return;
     this.pendingTurns.delete(pending.inputId);
     if (pending.turnId) this.pendingByTurnId.delete(pending.turnId);
@@ -245,85 +249,102 @@ export class AttachSessionHandle {
     };
   }
 
-  private nextInputId(): string {
-    return `${PROMPT_INPUT_ID_PREFIX}-${++this.inputCounter}`;
-  }
-
   /** CommandCenterApp.submitPrompt：普通 prompt（slash 已由 commandCenter 路由走）。 */
   async submitPrompt(
     prompt: TuiPromptInput,
-    options?: {
-      abortSignal?: AbortSignal;
-      onEvent?: (event: SessionEvent) => void | Promise<void>;
-      requestPermission?: (
-        request: unknown,
-        requestOptions?: unknown,
-      ) => Promise<unknown>;
-    },
+    options?: SendInputOptions,
   ): Promise<TuiSubmitPromptResult> {
-    const inputId = this.nextInputId();
+    const outcome = await this.submitInput(prompt, options);
+    if (outcome.kind !== "started_turn") throw new Error("Unexpected queued prompt result");
+    return outcome.result;
+  }
+
+  private async submitInput(
+    prompt: TuiPromptInput,
+    options?: SendInputOptions,
+    steer?: { activeTurnId?: string },
+  ): Promise<TuiSendInputResult> {
+    if (options?.abortSignal?.aborted) throw new Error("aborted");
+    const inputId = newCommandId();
     const text = typeof prompt === "string" ? prompt : prompt.text;
     const modelSelection =
       typeof prompt === "string" ? undefined : prompt.modelSelection;
-    // per-turn onEvent 挂上就要摘：回合 settle / 发送失败时摘除（与 monolith
-    // prompt-command 的 finally 语义对齐）。曾只挂不摘——TUI 每次提交都带
-    // onEvent，sinks 每回合净增一个闭包，后续每条事件扇出到全部陈旧回调。
-    const unsubscribeOnEvent = options?.onEvent
-      ? this.addSink((event) => void options.onEvent?.(event))
-      : undefined;
-    if (options?.requestPermission) {
-      this.activeRequestPermission = options.requestPermission as (
-        request: unknown,
-        requestOptions?: unknown,
-      ) => Promise<unknown>;
-    }
-    this.activeTurnAbortSignal = options?.abortSignal;
-    const turnPromise = new Promise<TuiSubmitPromptResult>((resolve, reject) => {
-      this.pendingTurns.set(inputId, { inputId, resolve, reject });
-      options?.abortSignal?.addEventListener(
-        "abort",
-        () => {
-          void this.clientOf()
-            .request(zcodeProtocolMethods.sessionStop, { sessionId: this.sessionId })
-            .catch(() => undefined);
-          this.pendingTurns.delete(inputId);
-          reject(new Error("aborted"));
-        },
-        { once: true },
-      );
-    });
-    try {
-      await this.clientOf().request(zcodeProtocolMethods.sessionSend, {
-        attachments: typeof prompt === "string" ? undefined : toProtocolAttachments(prompt.attachments),
-        content: text,
-        inputId,
-        modelSelection,
-        sessionId: this.sessionId,
-      });
-    } catch (error) {
+    let unsubscribeOnEvent: (() => void) | undefined;
+    const claimActiveInput = (): void => {
+      // guide 的临时等待器不能覆盖旧回合的交互归属；真正 started 后才交接。
+      this.activeInputId = inputId;
+      this.activeRequestPermission = options?.requestPermission;
+      this.activeTurnAbortSignal = options?.abortSignal;
+      unsubscribeOnEvent ??= options?.onEvent
+        ? this.addSink((event) => void options.onEvent?.(event))
+        : undefined;
+    };
+    if (!steer) claimActiveInput();
+    let commandSent = false;
+    const onAbort = (): void => {
+      // 上传期间没有 core turn，不能无目标 stop 误停共享会话中的其他输入。
+      if (commandSent) void requestSessionStopBestEffort(this.clientOf, this.sessionId);
+      const pending = this.pendingTurns.get(inputId);
       this.pendingTurns.delete(inputId);
-      unsubscribeOnEvent?.();
-      this.activeRequestPermission = undefined;
-      this.activeTurnAbortSignal = undefined;
-      throw error;
-    }
+      if (pending?.turnId) this.pendingByTurnId.delete(pending.turnId);
+      pending?.reject(new Error("aborted"));
+    };
+    const turnPromise = new Promise<TuiSubmitPromptResult>((resolve, reject) => {
+      this.pendingTurns.set(inputId, { inputId, onStarted: claimActiveInput, resolve, reject });
+    });
+    // Bug 根因：上传/ACK 等待期间 abort 会先拒绝 turnPromise，必须立即观察其 rejection。
+    void turnPromise.catch(() => undefined);
+    options?.abortSignal?.addEventListener("abort", onAbort, { once: true });
     try {
-      return await turnPromise;
+      // 附件先寄存为 v4 引用（begin/chunk/commit 或磁盘路径直传），失败即中止提交；
+      // 之后 sendText 只携带引用，不内联内容。
+      const attachments =
+        typeof prompt === "string"
+          ? undefined
+          : await toV4AttachmentRefs(this.clientOf(), {
+              abortSignal: options?.abortSignal,
+              attachments: prompt.attachments ?? [],
+              connectionId: this.uploadConnectionId,
+              sessionId: this.sessionId,
+            });
+      if (options?.abortSignal?.aborted) throw new Error("aborted");
+      commandSent = true;
+      if (steer) {
+        const queued = await steerActiveTurn(
+          this.steerQueueContext(), text, options, steer.activeTurnId, inputId,
+        );
+        if (queued) return queued;
+      } else {
+        await sendTextCommand(this.clientOf(), {
+          commandId: inputId,
+          payload: {
+            ...(attachments ? { attachments } : {}),
+            heldQueueDisposition: "keepQueueAndSend",
+            ...(modelSelection ? { modelSelection } : {}),
+            text,
+          },
+          sessionId: this.sessionId,
+        });
+      }
+      return { kind: "started_turn", result: await turnPromise };
     } finally {
+      options?.abortSignal?.removeEventListener("abort", onAbort);
+      const pending = this.pendingTurns.get(inputId);
+      this.pendingTurns.delete(inputId);
+      if (pending?.turnId) this.pendingByTurnId.delete(pending.turnId);
       unsubscribeOnEvent?.();
-      this.activeRequestPermission = undefined;
-      this.activeTurnAbortSignal = undefined;
+      if (this.activeInputId === inputId) {
+        this.activeInputId = undefined;
+        this.activeRequestPermission = undefined;
+        this.activeTurnAbortSignal = undefined;
+      }
+      this.scheduleQueuedFlush();
     }
   }
 
   /**
-   * CommandCenterApp.sendInput：busy 时按 delivery 分 lane（pi-mono 对齐）：
-   * - `delivery:"steer"`（Enter）：经 `session/send delivery:"steer"` 直驱 core
-   *   steerTurn 注入 active turn pendingInputs；真实 turn_steer_queued 事件驱动
-   *   UI。拒绝（settle 竞态 / turn 不可 steer / 附件）回退本地 follow-up 队列。
-   * - 缺省与 `delivery:"queue"`（Ctrl+Q）：本地排队，settle 后
-   *   flushQueuedInputs 逐条重放为新回合（core 的 session/send 只收一个并发
-   *   prompt，排队语义在客户端）。
+   * busy Enter 走 guide，按 ACK 区分 queued 与 idle 竞态启动的新回合；
+   * 拒绝回退本地 FIFO。Ctrl+Q 与缺省输入始终由本地 FIFO 持有并在 settle 后重放。
    */
   async sendInput(
     input: TuiPromptInput,
@@ -348,7 +369,7 @@ export class AttachSessionHandle {
         typeof input !== "string" && (input.attachments?.length ?? 0) > 0;
       const ctx = this.steerQueueContext();
       if (options?.delivery === "steer" && !hasAttachments) {
-        return steerActiveTurn(ctx, text, options, activeTurnId);
+        return this.submitInput(input, options, { activeTurnId });
       }
       return queueFollowUpInput(ctx, input, options, text, activeTurnId);
     }
@@ -361,7 +382,6 @@ export class AttachSessionHandle {
     return {
       clientOf: () => this.clientOf(),
       emitSinkEvent: (type, payload) => this.emitSinkEvent(type, payload),
-      nextInputId: () => this.nextInputId(),
       nextQueueCounter: () => ++this.queueCounter,
       queuedInputs: this.queuedInputs,
       sessionId: this.sessionId,
@@ -759,9 +779,9 @@ export class AttachSessionHandle {
 
   /**
    * "stop & quit" 路径的 server 端停止：turnAbort.abort() 只触发 fire-and-forget
-   * 的 sessionStop，socket 若先关停不掉。这里显式再发一次并等有界回执——
-   * sessionStop 幂等，重复无害；超时按尽力而为返回，退出不被阻塞
-   * （实现见 attach-session-stop.ts）。
+   * 的 v4 stop，socket 若先关停不掉。这里显式再发一次并等有界回执——
+   * v4 stop 对 idle 会话是 no-op ACK，重复无害；超时按尽力而为返回，退出不被
+   * 阻塞（实现见 attach-session-stop.ts）。
    */
   async stopActiveTurn(): Promise<void> {
     await requestSessionStopBestEffort(this.clientOf, this.sessionId);

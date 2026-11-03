@@ -11,6 +11,7 @@ import { ZCODE_PLUGIN_HOST_COMMAND } from "@zcode/contracts";
 import type { Logger } from "@zcode/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { resolveStartupPlugins } from "../src/app/startup-marks.js";
+import * as bundledPlugins from "../src/app/bundled-plugins.js";
 import {
   findMissingOfficialPluginSeedPaths,
   resolveOfficialPluginRoots,
@@ -39,6 +40,79 @@ import {
   isWorkspacePluginConfigPath,
 } from "../src/plugins.js";
 import { StartupTimer } from "../src/startup-logging.js";
+import { listZCodeCustomCommands } from "../src/custom-commands.js";
+
+describe("plugin discovery IO boundary", () => {
+  it("still resolves enabled official roots for startup and custom command discovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zcode-enabled-plugin-discovery-"));
+    const pluginRoot = join(root, "demo-plugin");
+    const resolveRoots = vi.spyOn(bundledPlugins, "resolveOfficialPluginRoots")
+      .mockReturnValue([pluginRoot]);
+    try {
+      await writeTestFile(join(pluginRoot, ".claude-plugin", "plugin.json"),
+        JSON.stringify({ name: "demo", version: "1.0.0", description: "Local test plugin" }));
+      await writeTestFile(join(pluginRoot, "commands", "review.md"),
+        "---\ndescription: Plugin review\n---\nReview changes.");
+      const userConfigPath = join(root, "user-config.json");
+      await writeTestFile(userConfigPath, JSON.stringify({
+        plugins: { enabled: true, enabledPlugins: { "demo@zcode-plugins-official": true } },
+      }));
+      const options = {
+        env: {}, userConfigPath, workingDirectory: root,
+        pluginStorageRoot: join(root, "plugins"),
+      };
+      const configResult = createConfig(options);
+      const direct = resolveZCodePlugins({ ...options, configResult });
+      const startup = resolveStartupPlugins({
+        ...options, configResult, cliStorageRoot: root, options,
+        startupTimer: createNoopStartupTimer(),
+      });
+      expect(direct.commandRoots).toHaveLength(1);
+      expect(startup.commandRoots).toEqual(direct.commandRoots);
+      const commands = await listZCodeCustomCommands({ ...options, homeDirectory: root });
+      expect(commands.commands).toContainEqual(expect.objectContaining({ source: "plugin" }));
+      expect(resolveRoots).toHaveBeenCalledTimes(3);
+    } finally {
+      resolveRoots.mockRestore();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("does not resolve official roots or seed bundled assets in either startup path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zcode-disabled-plugin-discovery-"));
+    const resolveRoots = vi.spyOn(bundledPlugins, "resolveOfficialPluginRoots")
+      .mockImplementation(() => { throw new Error("disabled plugins must not seed"); });
+    try {
+      const configResult = createConfig({
+        env: {},
+        workingDirectory: root,
+        skipUserConfig: true,
+        cliOverrides: { plugins: { enabled: false } },
+      });
+      const options = {
+        configResult,
+        env: {},
+        officialPluginRoots: [join(root, "must-not-read")],
+        pluginStorageRoot: join(root, "plugins"),
+        workingDirectory: root,
+      };
+      const direct = resolveZCodePlugins(options);
+      const startup = resolveStartupPlugins({
+        ...options,
+        cliStorageRoot: root,
+        options,
+        startupTimer: createNoopStartupTimer(),
+      });
+      expect(direct.plugins).toEqual([]);
+      expect(direct.commandRoots).toEqual([]);
+      expect(startup).toEqual(direct);
+      expect(resolveRoots).not.toHaveBeenCalled();
+    } finally {
+      resolveRoots.mockRestore();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+});
 
 const IOS_SIMULATOR_PLUGIN_ID = "ios-simulator@zcode-plugins-official";
 
@@ -614,7 +688,7 @@ describe("ZCode plugins", () => {
             id: "zcode-plugins-official",
             isOfficial: true,
             name: "zcode-plugins-official",
-            pluginCount: 14,
+            pluginCount: 15,
             source: {
               source: "url",
               url: "https://cdn-zcode.z.ai/zcode/official-plugin/marketplace.json",
@@ -2395,7 +2469,7 @@ describe("ZCode plugins", () => {
       expect(
         overview.marketplaces.find((marketplace) => marketplace.id === "zcode-plugins-official"),
       ).toMatchObject({
-        pluginCount: 14,
+        pluginCount: 15,
         source: {
           source: "url",
           url: "https://cdn-zcode.z.ai/zcode/official-plugin/marketplace.json",

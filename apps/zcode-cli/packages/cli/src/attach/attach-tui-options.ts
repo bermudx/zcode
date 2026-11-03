@@ -7,6 +7,7 @@ import {
   zcodeProtocolErrorCodes,
   zcodeProtocolMethods,
   zcodeProtocolNotifications,
+  zcodeSessionListResultSchema,
   zcodeUserInputRequestParamsSchema,
   type ZCodeSessionRawEvent,
 } from "@zcode/shared";
@@ -26,7 +27,11 @@ import { connectAttachClient, AttachProtocolError, type AttachClient } from "./a
 import { AttachSessionHandle, asCommandCenterApp } from "./attach-session.js";
 import { listAttachSkillCatalog, toCommandCenterSkillList } from "./attach-skills.js";
 import { listAttachCommandCatalog, toCommandCenterCustomCommandList } from "./attach-commands.js";
-import type { CommandCenterApp, CommandCenterDeps } from "../command-center.js";
+import type {
+  CommandCenterApp,
+  CommandCenterDeps,
+  CommandCenterSession,
+} from "../command-center.js";
 import { createCommandCenter, parseSlashCommand } from "../command-center.js";
 import type { TuiPromptHandler } from "../tui-command-state.js";
 
@@ -71,7 +76,8 @@ export class AttachProtocolVersionError extends Error {
 }
 
 /**
- * 解析 resume 目标（入口 -c/--resume 与 TUI 内裸 /resume 共用同一裁决）：
+ * 解析 resume 目标（入口 -c/--resume 与 TUI 内 /resume <id> 共用同一裁决；
+ * TUI 裸 /resume 由 commandCenter 的 session picker 承担，不走这里）：
  *   - 无 resume 意图 → undefined（调用方走 session/create，开新会话）
  *   - --resume <id>   → 完整 id；或本 workspace 内唯一匹配的 id 前缀
  *   - -c/--continue   → 本 workspace 最近一次会话
@@ -106,8 +112,9 @@ const listWorkspaceSessionsForResume = async (
   return toListedResumeSessions(listed);
 };
 
-/** “最近会话”裁决（入口 -c 与 TUI 裸 /resume 共用）：按 updatedAt（退化
- *  createdAt）显式取最大；空列表 / 首名无 id 抛显式错误，不静默降级。 */
+/** “最近会话”裁决（入口 -c 与 resumeApp 的 continue 兜底共用；TUI 裸
+ *  /resume 已改走 picker，不再猜最新）：按 updatedAt（退化 createdAt）
+ *  显式取最大；空列表 / 首名无 id 抛显式错误，不静默降级。 */
 export function pickMostRecentResumeSessionId(
   sessions: ListedResumeSession[],
   workspacePath: string,
@@ -513,6 +520,9 @@ export function createAttachPromptHandler(
 
   const newApp = async (): Promise<CommandCenterApp> => {
     const created = (await request(zcodeProtocolMethods.sessionCreate, {
+      // /new 与启动同规：首发前的空会话是 deferred 草稿，不进 session/list、
+      // 不被 picker / -c 选中；首条 prompt 被 accepted 时 core 提升为 immediate。
+      persistence: "deferred",
       workspace: options.workspace,
     })) as { session: { sessionId: string } };
     current = await toHandle(created.session.sessionId);
@@ -520,22 +530,25 @@ export function createAttachPromptHandler(
   };
 
   const resumeApp = async (sessionId?: string): Promise<CommandCenterApp> => {
-    if (!sessionId) {
-      // 裸 /resume 与入口 -c 同一“最近会话”裁决（pickMostRecentResumeSessionId）：
-      // session/list 顺序不保证，.at(-1) 会静默恢复陈旧会话；空列表显式报错，
-      // 不留在当前会话装作成功。
-      const listed = await request(zcodeProtocolMethods.sessionList, {
-        workspace: options.workspace,
-      });
-      sessionId = pickMostRecentResumeSessionId(
-        toListedResumeSessions(listed),
-        options.workspace.workspacePath,
-      );
+    // 与入口共用同一目标裁决：/resume <id|前缀> 直通/唯一前缀展开/多候选报错；
+    // 显式 id 的列表失败原样透传（可能是跨 workspace 完整 id），continue 的
+    // 列表失败、空列表与恢复失败一律抛错，绝不静默开新会话。sessionId 缺席
+    // （正常路径已由 picker 拦截，只作 deps 裁剪下的兜底）走 -c 同语义。
+    const target = await resolveAttachResumeTarget({
+      client: runtime.currentClient(),
+      continueSession: !sessionId,
+      resumeSessionId: sessionId,
+      workspace: options.workspace,
+    });
+    if (target === undefined) {
+      throw new Error(`No resumable session found for ${options.workspace.workspacePath}`);
     }
     const resumed = (await request(zcodeProtocolMethods.sessionResume, {
-      sessionId,
+      sessionId: target,
+      // 冷物化判定需要 workspace ref，与入口 resume 请求同形。
+      workspace: options.workspace,
     })) as { sessionId?: string };
-    current = await toHandle(resumed.sessionId ?? sessionId);
+    current = await toHandle(resumed.sessionId ?? target);
     return asCommandCenterApp(current);
   };
 
@@ -579,6 +592,30 @@ export function createAttachPromptHandler(
           workspace: options.workspace,
         }),
       ),
+    // 裸 /resume 的 composer picker 数据源：core 的 session/list 是本
+    // workspace 已持久化会话的唯一事实（deferred 草稿由 core 既有规则
+    // 过滤）。请求失败或载荷畸形原样抛给调用方——attach 缺这层时裸
+    // /resume 落到 resumeApp 猜"最近会话"，可能选中刚绑定的当前会话；
+    // 剔除 current.sessionId 避免 picker 出现"恢复自己"的条目。
+    listSessions: async (): Promise<CommandCenterSession[]> => {
+      const listed = zcodeSessionListResultSchema.parse(
+        await request(zcodeProtocolMethods.sessionList, {
+          workspace: options.workspace,
+        }),
+      );
+      return listed.sessions
+        .filter((session) => session.sessionId !== current.sessionId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .map(
+          (session): CommandCenterSession => ({
+            directory: session.workspace.workspacePath,
+            id: session.sessionId,
+            parentId: session.parentSessionId,
+            title: session.title,
+            updatedAt: session.updatedAt,
+          }),
+        );
+    },
     newApp,
     recordInputHistory: async (input) => {
       await current.recordInputHistory(input);
@@ -607,7 +644,7 @@ export function createAttachPromptHandler(
   submitPrompt.recallPreviousInput = (skip) => current.recallPreviousInputHistory(skip);
   submitPrompt.sendInput = async (input: TuiPromptInput, sendOptions) => {
     // /model /effort 是客户端侧命令（Ctrl+P 轮换、Ctrl+L 选择器都走 sendInput），
-    // 必须经 commandCenter → handle.setModel/setThoughtLevel；直接 session/send
+    // 必须经 commandCenter → handle.setModel/setThoughtLevel；直接 sendText
     // 会把命令文本当 prompt 发给模型（曾导致"轮换"只是模型聊了一句命令名）。
     const command = parseSlashCommand(
       typeof input === "string" ? input : input.text,

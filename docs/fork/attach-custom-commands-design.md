@@ -74,6 +74,25 @@ core 的 input facade，不加 `commands/load`，不在客户端接
 - **客户端侧展开（commands/load + loadCustomCommand dep）**：砍动态 shell
   展开、复制展开逻辑、协议面翻倍。否决（见决策第 2 条）。
 
+## 2026-11-03：受信 `--no-plugins` 发现边界
+
+- `noPlugins` 只来自进程入口 / server dependencies，不接受客户端 workspace、
+  session 或 runtimeConfig 参数覆盖。入口持有同一策略：runtime startup、
+  session snapshot、`commands/referenceCatalog`、workspace presentation、V4
+  workspace config 与 input facade 的命令展开全部传递该门禁。
+- 每次命令发现仍使用公共 `createConfig`，受信门禁以既有 CLI override 应用，
+  保留 user/workspace 普通命令与 commandOverrides；不缓存、不截断目录，
+  不增加跨 workspace 配置根。目录与展开均以本次调用的 workspace 为准。
+- 有效 `plugins.enabled=false` 时，自定义命令发现不调用插件 resolver；
+  startup 与通用插件 resolver 必须在调用 `resolveOfficialPluginRoots` 之前
+  检查开关，避免空结果之前已经 seed/hash 内置插件资产。正常 enabled 路径不变。
+- 顺序：trusted entrypoint → server deps / app options → 本次配置解析 →
+  plugin gate → 普通命令扫描 → snapshot/catalog/展开。配置文件仍是命令元数据
+  的唯一权威，没有第二份目录状态或会话冻结缓存。
+- 回归覆盖 disabled config 不解析/seed 插件、no-plugin snapshot 保留 builtin
+  与 workspace 命令、目录跨调用与 workspace 的新鲜度及输入展开。此修复只证明
+  禁止的发现 IO 被移除；历史 snapshot 1383/1161ms 尚未受控归因，不作为性能收益。
+
 ## 已知边界（记录，不修）
 
 - 目录在 attach 启动时取一次（`loadStartupOptions`），会话中新增/删除的命令

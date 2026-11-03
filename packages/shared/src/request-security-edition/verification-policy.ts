@@ -56,6 +56,13 @@ export function readRequestVerificationConfig(
   };
 }
 
+export function readValidatedRequestVerificationConfig(
+  configs: RequestVerificationClientConfig | null | undefined,
+): RequestVerificationConfig | null {
+  // 官方 stub 直接返回 null；开源版沿用 §3.5 的读取语义作为校验读取：
+  // captcha 配置缺失或形态不合法时返回 null，不猜测默认开启，也不放大跳过开关。
+  return readRequestVerificationConfig(configs);
+}
 export function requestVerificationClaimHeaders(
   proof: RequestVerificationProof,
 ): Record<string, string> {
@@ -89,8 +96,18 @@ export function allowRequestVerificationHeaders(
   return allowed;
 }
 
-export function requiresRequestVerification(access: { mode: string } | undefined): boolean {
-  return access?.mode === START_PLAN_ACCESS_MODE;
+export function requiresRequestVerification(
+  access: { mode: string } | undefined,
+  config?: RequestVerificationConfig | null,
+): boolean {
+  // 官方语义（3.17.1 起带配置快照）：只有 start-plan 可能需要交互；配置显式
+  // 关闭或 skipModelRequest 时直接放行，其余情况由发行策略（交互能力）决定。
+  // 开源版交互能力为 false，因此这里对 start-plan 也不再无条件 fail-closed——
+  // 该判定移入 Host 流程：配置读取失败/缺失时由 zcodeAgentService 显式报错。
+  if (access?.mode !== START_PLAN_ACCESS_MODE) return false;
+  if (config?.enabled === false) return false;
+  if (config?.skipModelRequest === true) return false;
+  return requestVerificationInteractionAvailable;
 }
 
 export function isRequestVerificationMessage(message: string): boolean {

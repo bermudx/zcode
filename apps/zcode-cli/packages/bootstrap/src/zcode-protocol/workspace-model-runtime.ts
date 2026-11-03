@@ -27,6 +27,7 @@ export async function readWorkspacePresentation(
     workspace: params.workspace,
     mode: "build" as const,
     slashCommands: await listProtocolSlashCommands({
+      noPlugins: context.deps.noPlugins,
       // 灰度门是 Host 判定的 workspace 级事实，目录装配读进程缓存。
       dynamicWorkflowEnabled: context.appRuntimePreferences.dynamicWorkflowEnabled,
       env: context.deps.env,
@@ -82,6 +83,7 @@ export async function createWorkspaceZCodeApp(
     createProviderRuntimeHeadersPort(context, workspace);
   return context.deps.createZCodeApp({
     ...options,
+    ...(context.deps.noPlugins === true ? { noPlugins: true } : {}),
     onOffPeakLifecycleEvent: (event) =>
       context.notify({
         method: V4_NOTIFICATIONS.offPeakLifecycle,

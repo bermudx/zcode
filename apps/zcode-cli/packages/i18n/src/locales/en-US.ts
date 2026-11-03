@@ -70,7 +70,7 @@ Slash Commands:
   /mode [mode]          Show or switch permission mode: build, edit, plan, yolo, or guarded
   /model [id]           Show or switch the current session model
   /new                  Start a fresh session in the TUI
-  /resume [sessionId]   Resume a session by sessionId; omit it for latest in cwd
+  /resume [sessionId]   Resume a session by sessionId; omit it to pick from saved sessions
   /rewind [latest|checkpointId]  Show latest checkpoint or restore workspace files
   /skill [name] [task]  List skills, or force the next prompt to load one
   /goal [action]        Show or set the current session goal

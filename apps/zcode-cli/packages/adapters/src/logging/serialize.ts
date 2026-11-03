@@ -12,6 +12,33 @@ export interface SerializedLogError {
 
 export type SerializableLogEntry = Record<string, unknown>;
 
+// token 数值统计不是凭据；只放行现有日志字段的非负整数，不能按后缀放宽敏感 key 规则。
+const NUMERIC_USAGE_FIELDS = new Set([
+  "tokens",
+  "inputTokens",
+  "outputTokens",
+  "totalTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+  "usageInputTokens",
+  "usageOutputTokens",
+  "usageTotalTokens",
+  "usageCacheReadTokens",
+  "usageCacheWriteTokens",
+  "usageReasoningTokens",
+]);
+
+function isNumericUsageCounter(key: string, value: unknown): boolean {
+  return (
+    NUMERIC_USAGE_FIELDS.has(key) &&
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 0
+  );
+}
+
 export class DefaultLogRedactor implements LogRedactor {
   private readonly sensitiveKeyPattern =
     /(?:api[-_]?key|authorization|cookie|credential|password|secret|token)/i;
@@ -39,7 +66,7 @@ export class DefaultLogRedactor implements LogRedactor {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, entryValue]) => [
         key,
-        this.sensitiveKeyPattern.test(key)
+        this.sensitiveKeyPattern.test(key) && !isNumericUsageCounter(key, entryValue)
           ? "[Redacted]"
           : this.redactValue(entryValue, seen, depth + 1),
       ]),

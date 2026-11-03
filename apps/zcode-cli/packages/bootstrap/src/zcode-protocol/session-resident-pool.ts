@@ -94,22 +94,17 @@ export class SessionResidentPool {
    * 获取协议请求租约。全进程计数防跨 session 的 async workspace 操作与 sampler
    * 回收并发；按 session 计数表达精确所有权并参与该 session 的 eligibility。
    */
-  async acquireOperation(
-    sessionIdsInput?: string | readonly string[],
-  ): Promise<() => void> {
+  async acquireOperation(sessionIdsInput?: string | readonly string[]): Promise<() => void> {
     const sessionIds = [
       ...new Set(
-        (typeof sessionIdsInput === "string" ? [sessionIdsInput] : sessionIdsInput ?? []).filter(
+        (typeof sessionIdsInput === "string" ? [sessionIdsInput] : (sessionIdsInput ?? [])).filter(
           (sessionId) => sessionId.length > 0,
         ),
       ),
     ];
     this.activeOperationCount += 1;
     for (const sessionId of sessionIds) {
-      this.operationLeaseCounts.set(
-        sessionId,
-        (this.operationLeaseCounts.get(sessionId) ?? 0) + 1,
-      );
+      this.operationLeaseCounts.set(sessionId, (this.operationLeaseCounts.get(sessionId) ?? 0) + 1);
     }
 
     let released = false;
@@ -231,6 +226,10 @@ export class SessionResidentPool {
   /** 同步版在途判定：requireSession 等同步收养路径不能 await，用它拒绝抢半死 record。 */
   isDeactivationInFlight(sessionId: string): boolean {
     return this.inFlightDeactivations.has(sessionId);
+  }
+
+  operationCount(sessionId: string): number {
+    return this.operationLeaseCounts.get(sessionId) ?? 0;
   }
 
   private isEligible(sessionId: string, facts: SessionResidencyFacts): boolean {

@@ -23,12 +23,15 @@ export function resolveStartupPlugins(input: {
   const pluginOutcome = discoverNodePluginsSync({
     config: input.configResult.config.plugins,
     env: input.env ?? process.env,
-    officialPluginRoots: resolveOfficialPluginRoots({
-      extraRoots: input.options.officialPluginRoots,
-      logger: input.logger,
-      storageRoot: pluginStorageRoot,
-      suppressedBuiltins: new Set(input.configResult.config.plugins.suppressedBuiltins),
-    }),
+    // adapter 的 disabled gate 晚于参数求值；必须先挡住 bundled seed/hash。
+    officialPluginRoots: input.configResult.config.plugins.enabled
+      ? resolveOfficialPluginRoots({
+          extraRoots: input.options.officialPluginRoots,
+          logger: input.logger,
+          storageRoot: pluginStorageRoot,
+          suppressedBuiltins: new Set(input.configResult.config.plugins.suppressedBuiltins),
+        })
+      : [],
     // defaultEnabled 的 official plugin (如 skill-creator) 只有在这里
     // 把名单传给 discoverNodePluginsSync 才会真正默认开启。CLI 子命令路径
     // (resolveZCodePlugins) 和应用启动路径都要传，否则 `/skill skill-creator` 在会话里

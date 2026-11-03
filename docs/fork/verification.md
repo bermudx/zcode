@@ -89,6 +89,106 @@ inventing a package test command. Expand coverage for changed protocol/bootstrap
 behavior. Run broad/full suites only when requested; focused checks are not a
 claim that the full upstream suite passed.
 
+### Selected vs full runs: `fork-tests.mjs`
+
+Don't `.skip` or delete upstream tests to save time. That adds sync conflicts and
+blinds `sync/*` branches, where upstream changes exactly the code those tests
+cover. Select tests instead:
+
+```sh
+# patch/* branches — tests reachable from what the branch changed (vs merge-base with main)
+mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs            # --dry-run shows the plan
+# sync/* branches and before promote-piz.sh — every CLI-workspace package
+mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full
+```
+
+- Selection: turbo `...[base]` gives the changed packages plus their dependents.
+  Inside vitest packages, `vitest --changed <base>` narrows that to the test files
+  whose import graph reaches a changed file. On attach-v4, that was 26 of 232
+  bootstrap files. node:test packages (cli, tui, tui-pi) run their whole package
+  script, and cli also runs `attach-resume-target.test.ts`. Signing and
+  socket-listener always run.
+- cli tests exec `packages/cli/dist/*.cjs`. If dist is missing, cli is
+  reported NOT RUN (exit 1, never a pass). Build first: CLI-workspace
+  `turbo run build` plus root `@zcode/model-option-map` (SEA tests). A stale
+  dist is your responsibility.
+- The script itself strips the session-env list (above), so the `env -u …`
+  prefix isn't needed.
+- TMPDIR goes to a fresh `/dev/shm` dir. Bootstrap SQLite tests fsync on
+  every write, and on btrfs `/tmp` that dominates. Measured 2026-11-03:
+  `dynamic-workflow-report-reads` 65,536-item test 23s wall on tmpfs vs
+  19 min idle (1146s, then fails its 120s timeout) and 26 min under suite
+  load on btrfs.
+  `session-persistence.test.ts:1135` fails on btrfs and passes on tmpfs.
+- Each failing vitest file gets one rerun, alone and at `--maxWorkers=1`.
+  If it passes then, it's reported as FLAKY, which is visible but doesn't
+  fail the run. Retrying failing files together didn't work: under load
+  (another agent's suite, load average ~28), `protocol-unbound-resume`
+  failed 11/11 in a batch and passed 11/11 solo.
+- Tests can leave artifacts in package dirs (adapters' full suite left an
+  untracked `packages/adapters/backup/`). Turbo then counts that package as
+  changed. Check `git status` after full runs.
+- Failures are classified against
+  [known-test-failures.txt](known-test-failures.txt): NEW (exit 1), known,
+  and STALE (a known entry that now passes; remove it). Add entries only
+  with a baseline run on main as evidence.
+- Changed files outside `apps/zcode-cli` are reported as NOT COVERED: root
+  vitest is broken (see the 2026-11-01 battery). A selected run is never a
+  full-suite result.
+
+### Lean fork gates: typecheck, engineering subset, plugin tier (2026-11-03)
+
+Desktop/Web/Electron tests are already excluded from every fork gate (root
+Vitest discovers no app unit tests; the 644 desktop WebdriverIO E2E files run
+only under the desktop package's own `test:e2e`). Do not delete them. The lean
+gates below shrink what patch/pre-promote runs *select*; sync branches still
+run the upstream sets in full.
+
+**A — piz typecheck** (`pnpm typecheck:piz`, `scripts/fork-typecheck.mjs`):
+CLI-workspace turbo typecheck (35 packages) plus the root shared surface the
+CLI core actually imports (`packages/shared` incl. its testing fixtures,
+`rpc`, `provider`, `provider-node`, `model-option-map` via `tsc -b`). It does
+not compile desktop (main/host/e2e/remote-main), ui, web, e2e-report,
+dev-docs or zcode-cua. This replaces root `pnpm typecheck` on patch and
+pre-promote gates; root typecheck remains the sync-branch gate.
+
+**B — engineering subset** (`pnpm test:engineering:piz-affected`,
+`scripts/run-affected-engineering-tests.mjs --set piz`): the upstream
+engineering list has 161 files, 151 of them desktop. The fork default runs
+only `scripts/fork-engineering-test-files.json` (7 files). A file earns its
+place only when its *subject* is in the shipped/shared surface — not because
+it transitively imports `@zcode/shared/test-ids`, and not when it tests a
+desktop E2E helper under `packages/desktop/test/e2e/helpers/` (coding-plan
+mock servers, provider seed writers, upstream-model fixtures are E2E
+harness, excluded on that basis). Keepers: the 4 `packages/shared` contract/
+schema tests (attach P004, signing-policy P001, coding-plan quota, protocol),
+`credentialFault` (subject is `@zcode/shared/node` atomic private write +
+file lock), `customOpenAIProviderStore` and `modelProviderRestartConfig`
+(subjects are `@zcode/provider` / `@zcode/provider-node` config round-trips).
+The runner validates the manifest against the upstream list (unknown or
+duplicate entries are a script error, never a silent pass). The upstream
+`--set all` behaviour is the default and unchanged; run
+`pnpm test:engineering` in full on sync branches. `verify:pre-push` uses the
+piz-affected variant.
+
+**C — plugin tier in `fork-tests.mjs`** (`--full --exclude-plugins`,
+pre-promote only): excludes the test tasks of plugin packages the no-plugin
+shared core does not load — `@zcode/android-emulator-plugin`,
+`@zcode/ios-simulator-plugin`, `@zcode/browser-use-plugin`,
+`@zcode/office-runtime`, `@zcode/zcode-site-plugin`,
+`@zcode/plugin-creator-plugin`, `@zcode/zcode-cua-plugin`. Excluded packages
+are printed, never silently skipped. Bootstrap's bundled-plugin *seeding*
+tests are not in this tier (seeding still runs at startup) and
+`@zcode/node-repl-host` stays (built-in host, not a plugin package). Sync
+branches run plain `--full`.
+
+Measured on this machine (warm caches, 2026-11-03): the piz engineering
+subset runs 7 files / 101 tests in ~7s; `typecheck:piz` took ~54s (turbo 36
+tasks, 29 cached) against ~12s for the incremental root `tsc -b` — the saving
+is not running *both* gates plus the desktop projects on patch branches, not
+beating warm `tsc -b`; cold-cache figures are unmeasured. `--full
+--exclude-plugins` plans 14 packages against 21 for plain `--full`.
+
 ## Build and artifact checks
 
 Observed CLI scripts (not a complete clean-bootstrap recipe):
@@ -855,3 +955,67 @@ Open items:
   generation.
 - A not-delivered notice for a task whose own branch generation is stale is
   dropped by the existing per-taskId branch fence.
+## 2026-11-02 — upstream sync battery (sync/2026-10-30-a60ba6a7, tree 1ce50ce3)
+
+Full battery for the 3.17.1 sync; results summary in
+[FORK.md](../../FORK.md) maintenance log. New invocation notes:
+
+- Root vitest is now manifest-driven (`engineering-test-files.json`,
+  upstream's app-test retirement). The fork's shared protocol/signing tests
+  run via `mise exec -- pnpm exec vitest run --project engineering
+  packages/shared` after adding the four entries to the manifest (the old
+  `packages/*/test/**` discovery include is gone).
+- tui-pi tests must run from a cwd shorter than the 80-col fixtures: 4
+  footer/harness-flush tests fail when the cwd label alone crowds out the
+  status text (this herdr worktree path is ~73 cols). Run
+  `tsx --test <pkg>/tests/*.test.ts` from `/tmp`, plus
+  `tests/terminal-drain.test.ts` from the package dir (its pty test needs
+  the package cwd). 265/265 in that split; not a code regression.
+- `architecture:check --changed` now admits fork files absent from
+  upstream's refreshed snapshot; `status-line.test.ts` was trimmed 811→798
+  lines (import compaction, same coverage) for the max-file-lines cap.
+- `pnpm fmt:check` (oxfmt) reports ~1655 upstream files with format drift
+  after the sync — upstream-wide, not gated for this fork's batteries, and
+  deliberately not reformatted inside the sync merge.
+
+## 2026-11-03 — merges + promotion of e37ed9d9 (session health + lean test gates)
+
+`patch/session-startup-health` merged `--no-ff` as `9abdd086`
+(draft-safe `session/subagents`, no-plugin discovery gating, numeric usage
+log counters). During verification, `patch/lean-test-gates` was merged on
+top as `a8254e2a`; promotion used current clean `main`. The full bootstrap
+run exposed a new-test scope error (project config strips
+`plugins.enabled`), fixed on main as `e37ed9d9` by moving the disabled
+case to user config. Battery on final main, all green unless stated:
+
+- Dependencies restored with `mise exec -- pnpm install --frozen-lockfile`
+  (the post-sync checkout lacked new workspace links; no manifest/lockfile
+  change). Root typecheck passed; CLI typecheck **36/36**; root lint
+  **0 errors / 83 warnings**; CLI lint **0 errors / 74 warnings / 7
+  accepted**; `architecture:check --changed --base a27f62f4` **0**
+  violations (broad `zcode-cli` remains unmanaged).
+- Full CLI-workspace tests completed in batches: adapters **2529**,
+  bootstrap **3369** (0 new, 5 known, 21 stale known entries now passing),
+  contracts **342**, core **4681**, dynamic-workflow **2034**,
+  dynamic-workflow-runtime **100**, all other vitest packages 0 new
+  failures (**13,420** vitest results total); node:test suites CLI
+  **637/637 + 11/11**, tui **256/256**, tui-pi **265/265**,
+  plugin-creator **8/8**. Signing and socket-listener always-run gates are
+  included. One first-pass dynamic-workflow stack-trace failure passed its
+  solo rerun; the post-fix bootstrap rerun had 0 new failures.
+- Fresh pair: CLI graph **12/12** + `build:attach` + root
+  `@zcode/model-option-map`. Freshness greps in `dist/zcode.cjs` and
+  frozen `dist-runtime/zcode.cjs`: `isSessionPersisted` ×6, `noPlugins`
+  ×16, `usageInputTokens` ×2, `NUMERIC_USAGE_FIELDS` ×3.
+- `promote-piz.sh` from clean `main` at `e37ed9d9`.
+- Installed-pair smoke (real `piz`, pty, scratch workspace + isolated
+  `ZCODE_DATA_BASE_DIR`): boot → double Ctrl-C → exit 0 with hint
+  `piz --resume sess_3e4ef4d4-8432-4d2e-a1c6-bf3d84446505`; printed command
+  run verbatim → exit 0 and same id re-hinted. Scratch core stopped via
+  its own pid file after `/proc/<pid>/cwd` + socket-info workspace checks;
+  operator live cores/clients untouched.
+
+NOT exercised live (unverified): a real model turn, live signing or
+extra-usage allowance evidence, snapshot latency improvement, Ctrl-C
+signal path, and the client-count memory matrix. Do not restart live cores;
+core-side fixes apply at each core's next start.
