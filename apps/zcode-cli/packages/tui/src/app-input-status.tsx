@@ -4,7 +4,8 @@ import type { ContextUsage } from "./app-model.js";
 import { DEFAULT_TUI_COPY } from "./app-locale.js";
 import { palette } from "./app-model.js";
 import { modelDisplayParts } from "./app-model-ref.js";
-import { spinnerFrame, useSpinnerFrame } from "./app-motion.js";
+import { spinnerFrame, useShimmerFrame } from "./app-motion.js";
+import { formatElapsedMs } from "./state.js";
 import { displayWidth, truncateDisplay } from "./app-terminal-width.js";
 
 const h = React.createElement as (
@@ -22,6 +23,7 @@ const COMPOSER_STATUS_MIN_METADATA_WIDTH = 8;
 const STATUS_MIN_CONTEXT_WIDTH = 4;
 const COMPOSER_STATUS_FALLBACK_WIDTH = 80;
 const COMPOSER_STATUS_MIN_CONTENT_WIDTH = 8;
+const ACTIVE_STATUS_RIGHT_CLUSTER_GAP_WIDTH = 2;
 const TOKEN_COUNT_KILO = 1_000;
 const TOKEN_COUNT_MEGA = TOKEN_COUNT_KILO * TOKEN_COUNT_KILO;
 const TOKEN_COUNT_DECIMAL_PLACES = 1;
@@ -34,12 +36,14 @@ type InputComposerStatusParts = {
 
 export function InputActiveStatus({
   active,
+  activeTurnStartedAtMs,
   contentWidth,
   contextUsage,
   copy = DEFAULT_TUI_COPY,
   frameMs,
 }: {
   active: boolean;
+  activeTurnStartedAtMs?: number;
   contentWidth?: number;
   contextUsage?: ContextUsage;
   copy?: TuiCopy;
@@ -47,23 +51,38 @@ export function InputActiveStatus({
 }): React.ReactElement {
   if (frameMs !== undefined || !active) {
     return inputActiveStatusRow(copy, active ? spinnerFrame(frameMs ?? 0) : undefined, {
+      activeTurnStartedAtMs,
       contentWidth,
       contextUsage,
+      nowMs: frameMs,
     });
   }
-  return h(InputActiveStatusContent, { contentWidth, contextUsage, copy });
+  return h(InputActiveStatusContent, {
+    activeTurnStartedAtMs,
+    contentWidth,
+    contextUsage,
+    copy,
+  });
 }
 
 function InputActiveStatusContent({
+  activeTurnStartedAtMs,
   contentWidth,
   contextUsage,
   copy,
 }: {
+  activeTurnStartedAtMs?: number;
   contentWidth?: number;
   contextUsage?: ContextUsage;
   copy: TuiCopy;
 }): React.ReactElement {
-  return inputActiveStatusRow(copy, useSpinnerFrame(true), { contentWidth, contextUsage });
+  const frameMs = useShimmerFrame(true);
+  return inputActiveStatusRow(copy, spinnerFrame(frameMs), {
+    activeTurnStartedAtMs,
+    contentWidth,
+    contextUsage,
+    nowMs: frameMs,
+  });
 }
 
 export function InputComposerStatus({
@@ -85,16 +104,27 @@ export function InputComposerStatus({
 export function inputActiveStatusRow(
   copy: TuiCopy,
   frame?: string,
-  options: { contentWidth?: number; contextUsage?: ContextUsage } = {},
+  options: {
+    activeTurnStartedAtMs?: number;
+    contentWidth?: number;
+    contextUsage?: ContextUsage;
+    nowMs?: number;
+  } = {},
 ): React.ReactElement {
+  const available = activeStatusContextBadgeWidth({
+    contentWidth: options.contentWidth,
+    copy,
+    frame,
+  });
   const contextBadge = fitStatusContextBadge(
     inputContextUsageBadge(options.contextUsage),
-    activeStatusContextBadgeWidth({
-      contentWidth: options.contentWidth,
-      copy,
-      frame,
-    }),
+    available,
   );
+  // elapsed 只在活动帧（spinner 在行内）时出现；frame 缺席 = 无活动指示面。
+  const elapsed = frame
+    ? activeTurnElapsedLabel(options.activeTurnStartedAtMs, options.nowMs)
+    : undefined;
+  const rightCluster = activeStatusRightCluster({ available, contextBadge, elapsed });
   return h(
     "box",
     {
@@ -118,9 +148,33 @@ export function inputActiveStatusRow(
           h("text", { style: { fg: palette.muted } }, copy.input.activeStatusHint),
         )
       : null,
-    contextBadge ? h("box", { style: { flexGrow: 1, minWidth: 1 } }) : null,
-    contextBadge ? h("text", { style: { fg: palette.muted, flexShrink: 0 } }, contextBadge) : null,
+    rightCluster ? h("box", { style: { flexGrow: 1, minWidth: 1 } }) : null,
+    rightCluster ? h("text", { style: { fg: palette.muted, flexShrink: 0 } }, rightCluster) : null,
   );
+}
+
+// 右簇同 pi footer 口径：turn 级 elapsed 在前、session 级 ctx 仪表殿后。
+// 余量不足先丢 elapsed——新指示不让位既有 ctx 读数。
+function activeStatusRightCluster(input: {
+  available?: number;
+  contextBadge?: string;
+  elapsed?: string;
+}): string | undefined {
+  const ctxWidth = input.contextBadge ? displayWidth(input.contextBadge) : 0;
+  const gapWidth = ctxWidth > 0 ? ACTIVE_STATUS_RIGHT_CLUSTER_GAP_WIDTH : 0;
+  const showElapsed =
+    input.elapsed !== undefined &&
+    input.available !== undefined &&
+    ctxWidth + gapWidth + displayWidth(input.elapsed) <= input.available;
+  const parts = [showElapsed ? input.elapsed : undefined, input.contextBadge].filter(
+    (part): part is string => Boolean(part),
+  );
+  return parts.length > 0 ? parts.join(" ".repeat(ACTIVE_STATUS_RIGHT_CLUSTER_GAP_WIDTH)) : undefined;
+}
+
+function activeTurnElapsedLabel(startedAtMs?: number, nowMs?: number): string | undefined {
+  if (startedAtMs === undefined) return undefined;
+  return formatElapsedMs((nowMs ?? Date.now()) - startedAtMs);
 }
 
 export function inputComposerStatusRow({

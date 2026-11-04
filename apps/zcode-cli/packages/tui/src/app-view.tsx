@@ -53,6 +53,7 @@ export function AppView(props: {
   subagents?: SubagentsController;
   toggleSidebar?: () => boolean;
   activeTurnId?: TurnId;
+  activeTurnStartedAtMs?: number;
   approvalQueue: ApprovalPrompt[];
   busy: boolean;
   cacheStats?: CacheStats;
@@ -201,6 +202,7 @@ export function AppView(props: {
               selection: actionSelection,
             })
           : h(ComposerInputArea, {
+              activeTurnStartedAtMs: props.activeTurnStartedAtMs,
               focused: !readOnly,
               busy: props.busy,
               contentWidth: actionPanelContentWidth,
@@ -233,6 +235,7 @@ export function AppView(props: {
 
 export function ComposerInputArea(props: {
   focused?: boolean;
+  activeTurnStartedAtMs?: number;
   busy: boolean;
   contentWidth: number;
   contextUsage: ContextUsage;
@@ -329,6 +332,7 @@ export function ComposerInputArea(props: {
     }),
     h(InputActiveStatus, {
       active: props.busy,
+      activeTurnStartedAtMs: props.activeTurnStartedAtMs,
       contentWidth: props.contentWidth,
       contextUsage: props.contextUsage,
       copy: props.copy,

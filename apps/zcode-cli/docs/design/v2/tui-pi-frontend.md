@@ -166,9 +166,11 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     空闲时 spinner 位留空格对齐、显示 `status` 或留白。`activeTurnId`
     并入活动判定与 `quitChoice.turnBusy` 同口径——attach 会话远端发起
     的 turn 也可见 spinner；指示切换只在 busy 沿变化时发生。行尾右对齐
-    额度簇（pi provider-balance 同式，`appendFooterRightZone`）：账号级
-    读数不占 meta 行的 session 左区；`theme.dim`，间距 ≥2 列，余量不足
-    丢额度读数不截 status/spinner。pwd 与 status 两空格分隔；pwd 超宽
+    簇（pi provider-balance 同式，`appendFooterRightZone`）：turn 级
+    elapsed（`activeTurnStartedAtMs`，见 tui-turn-elapsed.md）在前，
+    账号级额度簇殿后保持行尾锚点——账号级读数不占 meta 行的 session
+    左区；`theme.dim`，间距 ≥2 列，余量不足丢右簇不截 status/spinner。
+    pwd 与 status 两空格分隔；pwd 超宽
     行尾 "..." 截断（cwd 存活最久，status/额度先行收缩——与原 meta 行
     「cwd 在左区最前、最后丢」同优先级）。
   - meta 行（`MetaLine` + `status-line.ts` 纯格式化 `formatStatsLine`）：

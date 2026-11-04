@@ -125,6 +125,32 @@ test("busy with empty status shows the interrupt hint; long status never wraps",
   }
 });
 
+test("activity row shows right-aligned turn elapsed only while a turn is active", async () => {
+  const h = createHarness();
+  try {
+    // 锚点先于 activeTurnId 落 store（与 turn_started case 同序），不出现
+    // 「active 无锚」帧。
+    h.store.set("activeTurnStartedAtMs", Date.now() - 65_000);
+    h.store.set("activeTurnId", "turn-1" as TurnId);
+    const busyTop = strip(footerRows(h.app)[0] ?? "");
+    assert.match(busyTop, SPINNER);
+    // 行尾右对齐（无额度簇时 elapsed 即行尾）。
+    assert.ok(busyTop.trimEnd().endsWith("1m 05s"), busyTop);
+    // turn settle（两个键各自清）后 elapsed 消失，行仍为两行。
+    h.store.set("activeTurnId", undefined);
+    h.store.set("activeTurnStartedAtMs", undefined);
+    const idleRows = footerRows(h.app);
+    assert.equal(idleRows.length, 2);
+    assert.doesNotMatch(strip(idleRows[0] ?? ""), /m \d\ds|\ds\b/);
+    // busy 边（本地提交侧）同样透传锚点。
+    h.store.set("activeTurnStartedAtMs", Date.now() - 3_000);
+    h.store.set("busy", true);
+    assert.match(strip(footerRows(h.app)[0] ?? ""), /3s/);
+  } finally {
+    await h.stop();
+  }
+});
+
 test("effectiveContextUsage clamps the gauge to the GLM compact cap", () => {
   // GLM + 1M 投影窗口 → min(262k, 1M)；provider 前缀剥掉后按 bare id 匹配。
   const glm = effectiveContextUsage(

@@ -59,6 +59,31 @@ export const formatDuration = (durationMs: number | undefined): string => {
   return `${Math.round(durationMs / 1_000)}s`;
 };
 
+const MS_PER_SECOND = 1_000;
+const MS_PER_MINUTE = 60 * MS_PER_SECOND;
+const MS_PER_HOUR = 60 * MS_PER_MINUTE;
+
+/**
+ * Turn-elapsed formatting (tui-turn-elapsed.md): ms below a second, seconds
+ * below a minute, `Xm YYs` below an hour, `Xh YYm ZZs` at/above an hour.
+ * Negative input (clock skew vs the recorded anchor) clamps to `0ms`.
+ */
+export const formatElapsedMs = (elapsedMs: number | undefined): string => {
+  if (elapsedMs === undefined || !Number.isFinite(elapsedMs)) return "-";
+  const clamped = Math.max(0, elapsedMs);
+  // 锚点是分数毫秒（performance.timeOrigin + performance.now()）：截断而非
+  // 四舍五入，否则 999.6 会渲染成越界的 `1000ms`。
+  if (clamped < MS_PER_SECOND) return `${Math.floor(clamped)}ms`;
+  const totalSeconds = Math.floor(clamped / MS_PER_SECOND);
+  if (clamped < MS_PER_MINUTE) return `${totalSeconds}s`;
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (clamped < MS_PER_HOUR) return `${totalMinutes}m ${String(seconds).padStart(2, "0")}s`;
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+};
+
 export const truncatePlain = (value: string, maxLength: number): string => {
   if (value.length <= maxLength) return value;
   if (maxLength <= 3) return value.slice(0, Math.max(0, maxLength));

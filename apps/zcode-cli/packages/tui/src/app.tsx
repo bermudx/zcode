@@ -81,7 +81,16 @@ export function TuiApp({
   );
   const [statusDetails, setStatusDetails] = useState<string[]>([]);
   const [traceId, setTraceId] = useState<string | undefined>();
-  const [activeTurnId, setActiveTurnId] = useState<TurnId | undefined>();
+  const [activeTurnId, setActiveTurnIdState] = useState<TurnId | undefined>();
+  // activeTurnId 的同步镜像：settle 守卫（app-result）在 state updater
+  // 之外读当前活跃回合、并把两个字段的清理放在同一次调用里。所有写入
+  // 都经下面的 setActiveTurnId 包装，镜像与 state 不会脱节。
+  const activeTurnIdRef = useRef<TurnId | undefined>(undefined);
+  const setActiveTurnId = useCallback((turnId: TurnId | undefined) => {
+    activeTurnIdRef.current = turnId;
+    setActiveTurnIdState(turnId);
+  }, []);
+  const [activeTurnStartedAtMs, setActiveTurnStartedAtMs] = useState<number | undefined>();
   const [contextUsage, setContextUsage] = useState<ContextUsage>({});
   const [cacheStats, setCacheStats] = useState<CacheStats | undefined>();
   const [usage, setUsage] = useState<ModelUsageSummary | undefined>();
@@ -168,9 +177,11 @@ export function TuiApp({
   );
 
   const applyResult = useTuiApplyResult({
+    activeTurnIdRef,
     fallback: { locale, loginRequired, mode, model },
     modifiedFileToolCallIds: modifiedFileToolCallIdsRef.current,
     setActiveTurnId,
+    setActiveTurnStartedAtMs,
     setCacheStats,
     setContextUsage,
     setEffortOptions,
@@ -200,6 +211,7 @@ export function TuiApp({
     copy: copy.tui,
     getMainSessionId: options.getMainSessionId,
     setActiveTurnId,
+    setActiveTurnStartedAtMs,
     setCacheStats,
     setContextUsage,
     setLastError,
@@ -252,6 +264,7 @@ export function TuiApp({
     requestPermission,
     resolveSubmittedText,
     resolveSubmittedModel: (value) => modelCommand.selectedOption(value)?.ref,
+    setActiveTurnStartedAtMs,
     setBusy,
     setDraftAttachments,
     setDraftValue,
@@ -392,6 +405,7 @@ export function TuiApp({
     subagents,
     toggleSidebar: sidebar.toggleSidebar,
     activeTurnId,
+    activeTurnStartedAtMs,
     approvalQueue,
     busy,
     cacheStats,

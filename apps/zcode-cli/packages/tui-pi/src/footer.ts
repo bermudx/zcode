@@ -5,6 +5,7 @@
 // 截断，窄终端/长 status 也不会撑高 footer）。
 
 import { Container, Loader, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { formatElapsedMs } from "@zcode/tui/internals";
 import { appendFooterRightZone, formatPwdLine, formatStatsLine } from "./status-line.js";
 import type { AppStore } from "./store.js";
 import type { PiTheme } from "./theme.js";
@@ -21,8 +22,12 @@ export const ACTIVITY_IDLE_INDICATOR = { frames: [" "] };
  * 额度簇右对齐在行尾（账号级读数不占 meta 行的 session 左区）——
  * 余量不足时丢额度不截 status（appendFooterRightZone）。
  */
+/** 行尾右簇内 turn 级 elapsed 与账号级额度簇的间距（与右区最小间距同宽）。 */
+const FOOTER_RIGHT_CLUSTER_GAP = "  ";
+
 export class ActivityLine extends Loader {
   private quotaText: string | undefined;
+  private turnStartMs: number | undefined;
   private branch: string | undefined;
   private cwdLabel = "";
 
@@ -42,6 +47,10 @@ export class ActivityLine extends Loader {
     this.quotaText = quotaText;
   }
 
+  setTurnStartMs(turnStartMs: number | undefined): void {
+    this.turnStartMs = turnStartMs;
+  }
+
   override render(width: number): string[] {
     const pwd = formatPwdLine({ branch: this.branch, cwdLabel: this.cwdLabel, width });
     const styledPwd = pwd ? this.theme.dim(pwd) : "";
@@ -53,10 +62,19 @@ export class ActivityLine extends Loader {
         ? `${styledPwd}  ${statusLine}`
         : styledPwd
       : statusLine;
+    // 行尾右簇：turn 级 elapsed 在前（每 spinner tick 重算，无独立定时器），
+    // 账号级额度簇殿后保持行尾锚点；余量不足整个右区一起丢（appendFooterRightZone）。
+    const elapsed =
+      this.turnStartMs === undefined
+        ? undefined
+        : formatElapsedMs(Date.now() - this.turnStartMs);
+    const right = [elapsed, this.quotaText]
+      .filter((part): part is string => Boolean(part))
+      .join(FOOTER_RIGHT_CLUSTER_GAP);
     return [
       appendFooterRightZone({
         line,
-        right: this.quotaText,
+        right: right || undefined,
         theme: this.theme,
         width,
       }),
@@ -129,6 +147,7 @@ export class StatusFooter extends Container {
       this.activityActive = active;
       this.activity.setIndicator(active ? undefined : ACTIVITY_IDLE_INDICATOR);
     }
+    this.activity.setTurnStartMs(active ? state.activeTurnStartedAtMs : undefined);
     this.activity.setMessage(state.status || (active ? input.idleHint : ""));
     this.activity.setLocation({ branch: state.workspaceGitBranch, cwdLabel: input.cwdLabel });
     this.activity.setQuota(input.quotaText);

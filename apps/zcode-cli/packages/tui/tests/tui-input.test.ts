@@ -30,6 +30,7 @@ import {
 import { SPINNER_FRAME_INTERVAL_MS, SPINNER_WIDTH, spinnerFrame } from "../src/app-motion.js";
 import { palette } from "../src/app-model.js";
 import { modelDisplayParts } from "../src/app-model-ref.js";
+import { formatElapsedMs } from "../src/state.js";
 
 const TEST_STATUS_PROPS = { model: "default-deepseek/deepseek-v4-pro", thoughtLevel: "max" };
 
@@ -144,6 +145,58 @@ test("formats and renders the active status context meter on the right", () => {
   assert.ok(
     collectElementStyles(row).some((style) => style?.flexGrow === 1 && style.minWidth === 1),
   );
+});
+
+test("formats turn elapsed into ms/s/min/hour units", () => {
+  assert.equal(formatElapsedMs(500), "500ms");
+  assert.equal(formatElapsedMs(12_000), "12s");
+  assert.equal(formatElapsedMs(65_000), "1m 05s");
+  assert.equal(formatElapsedMs(3_723_000), "1h 02m 03s");
+  // 分数锚点截断：999.6 不得四舍五入成越界的 1000ms。
+  assert.equal(formatElapsedMs(999.6), "999ms");
+  // 时钟回拨钳到 0ms，不显示负时长。
+  assert.equal(formatElapsedMs(-50), "0ms");
+  assert.equal(formatElapsedMs(undefined), "-");
+});
+
+test("renders the turn elapsed on the right while a turn is active", () => {
+  const copy = getZCodeCopy("en-US").tui;
+  const frame = spinnerFrame(0);
+  const contextUsage = { contextUsed: 24_100, contextWindow: 1_000_000 };
+
+  // turn 级 elapsed 在前、session 级 ctx 仪表殿后（同 pi footer 右簇序）。
+  const withMeter = collectTextNodes(
+    inputActiveStatusRow(copy, frame, {
+      activeTurnStartedAtMs: 0,
+      contentWidth: 80,
+      contextUsage,
+      nowMs: 65_000,
+    }),
+  );
+  assert.equal(withMeter.at(-1)?.text, "1m 05s  24.1K (2%)");
+
+  // 无 ctx 读数时 elapsed 独占右簇。
+  const solo = collectTextNodes(
+    inputActiveStatusRow(copy, frame, { activeTurnStartedAtMs: 0, nowMs: 65_000 }),
+  );
+  assert.equal(solo.at(-1)?.text, "1m 05s");
+
+  // 窄终端先丢 elapsed 保留既有 ctx 仪表。
+  const narrow = collectTextNodes(
+    inputActiveStatusRow(copy, frame, {
+      activeTurnStartedAtMs: 0,
+      contentWidth: 30,
+      contextUsage,
+      nowMs: 65_000,
+    }),
+  );
+  assert.equal(narrow.at(-1)?.text, "24.1K (2%)");
+
+  // active 缺席（无 spinner 帧）时锚点不渲染。
+  const idle = collectTextNodes(
+    inputActiveStatusRow(copy, undefined, { activeTurnStartedAtMs: 0, contextUsage, nowMs: 65_000 }),
+  );
+  assert.equal(idle.at(-1)?.text, "24.1K (2%)");
 });
 
 test("reserves one active status row while idle and empty", () => {

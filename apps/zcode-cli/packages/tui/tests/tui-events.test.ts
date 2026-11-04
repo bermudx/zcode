@@ -679,6 +679,55 @@ test("submitting compact slash command creates timeline row without a user row",
   assert.equal(state.messages[0]?.timeline?.command, "/compact keep failures");
 });
 
+test("clears a stale turn anchor before opening the busy gate on a new idle turn", async () => {
+  const state = createSessionEventState();
+  const calls: string[] = [];
+  const options: TuiOptions = {
+    noColor: true,
+    stderr: process.stderr,
+    stdin: process.stdin,
+    stdout: process.stdout,
+    // 模拟 settle 事件从未到达的传输失败：上一回合锚点残留，本次提交被拒。
+    submitPrompt: async () => {
+      throw new Error("transport lost");
+    },
+  };
+
+  await submitIdleTurn({
+    applyResult: () => {
+      throw new Error("a rejected turn should not apply a result");
+    },
+    applySessionEvent: state.apply,
+    draftAttachments: [],
+    options,
+    requestPermission: async () => {
+      throw new Error("permission should not be requested");
+    },
+    setActiveTurnStartedAtMs: (startedAtMs) => {
+      calls.push(`anchor:${String(startedAtMs)}`);
+    },
+    setBusy: (busy) => {
+      calls.push(`busy:${String(busy)}`);
+    },
+    setDraftAttachments: () => {},
+    setDraftValue: () => {},
+    setLastError: () => {},
+    setLiveModelText: () => {},
+    setMessages: state.setMessages,
+    setSelection: () => {},
+    setSlashSelection: () => {},
+    setStatus: () => {},
+    setStatusDetails: () => {},
+    text: "hello again",
+    turnRef: { current: undefined },
+  });
+
+  // 锚点清理必须排在 busy:true 之前：busy 是 OpenTUI 的渲染门，顺序反了
+  // 残留锚点会在新回合的接收间隙闪现上一回合的耗时。
+  assert.deepEqual(calls.slice(0, 2), ["anchor:undefined", "busy:true"]);
+  assert.equal(calls.at(-1), "busy:false");
+});
+
 test("redacts manual coding plan api keys from local transcript rows", () => {
   assert.equal(
     redactSensitivePromptForTranscript("/login zai-coding-plan-api-key zai-secret-key"),
