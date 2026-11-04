@@ -71,7 +71,9 @@ const MS_PER_HOUR = 60 * MS_PER_MINUTE;
 export const formatElapsedMs = (elapsedMs: number | undefined): string => {
   if (elapsedMs === undefined || !Number.isFinite(elapsedMs)) return "-";
   const clamped = Math.max(0, elapsedMs);
-  if (clamped < MS_PER_SECOND) return `${Math.round(clamped)}ms`;
+  // 锚点是分数毫秒（performance.timeOrigin + performance.now()）：截断而非
+  // 四舍五入，否则 999.6 会渲染成越界的 `1000ms`。
+  if (clamped < MS_PER_SECOND) return `${Math.floor(clamped)}ms`;
   const totalSeconds = Math.floor(clamped / MS_PER_SECOND);
   if (clamped < MS_PER_MINUTE) return `${totalSeconds}s`;
   const seconds = totalSeconds % 60;

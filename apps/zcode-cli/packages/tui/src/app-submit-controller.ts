@@ -24,6 +24,7 @@ export function useSubmitValue(input: {
   requestPermission: TuiRequestPermission;
   resolveSubmittedText: (submittedValue: string) => string;
   resolveSubmittedModel?: (submittedValue: string) => ModelSelection | undefined;
+  setActiveTurnStartedAtMs?: (startedAtMs: number | undefined) => void;
   setBusy: (value: boolean) => void;
   setDraftAttachments: React.Dispatch<React.SetStateAction<DraftAttachment[]>>;
   setDraftValue: (value: string) => void;
@@ -76,6 +77,7 @@ export function useSubmitValue(input: {
         draftAttachments: input.draftAttachmentsRef.current,
         options: input.options,
         requestPermission: input.requestPermission,
+        setActiveTurnStartedAtMs: input.setActiveTurnStartedAtMs,
         setBusy: input.setBusy,
         setDraftAttachments: input.setDraftAttachments,
         setDraftValue: input.setDraftValue,

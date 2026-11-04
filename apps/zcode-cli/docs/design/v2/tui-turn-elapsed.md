@@ -30,6 +30,15 @@ immediate time signal.
   back to receive time.
 - `turn_complete`, `turn_error`/`model_error` (non-compact path), and the
   settle-result guard that clears `activeTurnId` clear it.
+- Starting an idle turn clears any leftover anchor before the busy gate
+  opens (`submitIdleTurn`, shared by both frontends). A turn whose settle
+  event never reaches the client (e.g. `submitPrompt` rejects on a
+  transport failure) therefore cannot resurface its elapsed count during
+  the next turn's acceptance gap.
+- The settle-result guard compares the settled turn id against a ref
+  mirror of `activeTurnId` and clears both fields outside any React state
+  updater — updaters stay pure, so the clear cannot be decoupled from the
+  `activeTurnId` change by a discarded or double-invoked render pass.
 - The anchor is written before `activeTurnId` in the `turn_started` case so
   per-key-notify stores (pi `AppStore`) present `active` and the anchor in
   the same frame.
@@ -78,9 +87,10 @@ If the turn aborts or the TUI closes, the same paths that clear
 `activeTurnId`/`busy` clear the anchor and the indicator disappears. If the
 clock moves backward relative to the recorded anchor, the display clamps
 elapsed time to `0ms` rather than showing a negative duration. A stale
-anchor (e.g. a turn ended without its settle events) is gated off by the
-`active` check at render time and is overwritten by the next
-`turn_started`.
+anchor (e.g. a turn ended without its settle events) does not resurface:
+the busy row is the render gate, so it is cleared when the next idle turn
+starts — before `busy` flips — and overwritten by the next `turn_started`.
+Sub-second values truncate (`999.6ms` renders `999ms`, never `1000ms`).
 
 ## Tests
 
@@ -88,5 +98,10 @@ anchor (e.g. a turn ended without its settle events) is gated off by the
   is running, driven by `activeTurnStartedAtMs`.
 - `turn_started` anchors to `executionStartedAt`; `turn_complete` clears.
 - The row disappears/clears after the turn settles.
+- Starting an idle turn clears a stale anchor before `busy` is set, even
+  when the new submission then rejects without any settle event.
+- The settle guard clears the matching active turn (and only that turn)
+  without side effects inside a state updater.
 - Duration formatting converts minute- and hour-long turns into larger
-  units and clamps negative input.
+  units, clamps negative input, and truncates fractional sub-second values
+  so it never renders `1000ms`.

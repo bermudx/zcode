@@ -152,6 +152,8 @@ test("formats turn elapsed into ms/s/min/hour units", () => {
   assert.equal(formatElapsedMs(12_000), "12s");
   assert.equal(formatElapsedMs(65_000), "1m 05s");
   assert.equal(formatElapsedMs(3_723_000), "1h 02m 03s");
+  // 分数锚点截断：999.6 不得四舍五入成越界的 1000ms。
+  assert.equal(formatElapsedMs(999.6), "999ms");
   // 时钟回拨钳到 0ms，不显示负时长。
   assert.equal(formatElapsedMs(-50), "0ms");
   assert.equal(formatElapsedMs(undefined), "-");

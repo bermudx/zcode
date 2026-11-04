@@ -22,8 +22,9 @@ type TuiApplyResultInput = {
     mode: CollaborationMode;
     model: string;
   };
+  activeTurnIdRef: React.MutableRefObject<TurnId | undefined>;
   modifiedFileToolCallIds: Set<string>;
-  setActiveTurnId: React.Dispatch<React.SetStateAction<TurnId | undefined>>;
+  setActiveTurnId: (turnId: TurnId | undefined) => void;
   setActiveTurnStartedAtMs?: (startedAtMs: number | undefined) => void;
   setCacheStats: React.Dispatch<React.SetStateAction<CacheStats | undefined>>;
   setContextUsage: React.Dispatch<React.SetStateAction<ContextUsage>>;
@@ -48,6 +49,23 @@ type TuiApplyResultInput = {
   workspaceDirectory?: string;
 };
 
+/**
+ * settle 守卫：result 携带的已 settle 回合仍是当前活跃回合时，连同计时
+ * 锚点一起清掉；不匹配（已有新回合接管）则什么都不动。调用方以普通值
+ * 调用 setter，不把副作用藏进 state updater。
+ */
+export function clearSettledActiveTurn(input: {
+  activeTurnId: TurnId | undefined;
+  // result.turnId 是未品牌化的 string，与品牌 TurnId 只做相等比较。
+  settledTurnId: string | undefined;
+  setActiveTurnId: (turnId: TurnId | undefined) => void;
+  setActiveTurnStartedAtMs?: (startedAtMs: number | undefined) => void;
+}): void {
+  if (!input.settledTurnId || input.activeTurnId !== input.settledTurnId) return;
+  input.setActiveTurnId(undefined);
+  input.setActiveTurnStartedAtMs?.(undefined);
+}
+
 export function useTuiApplyResult(input: TuiApplyResultInput) {
   return React.useCallback(
     (result: TuiSubmitPromptResult, preserveTurnState = false) => {
@@ -70,15 +88,16 @@ export function useTuiApplyResult(input: TuiApplyResultInput) {
       input.setLiveModelText("");
 
       // 同上（tui-pi applyResult）：result.turnId 是已 settle 回合，
-      // 不回写成 activeTurnId；仅当它仍被标记为活跃时清掉。
-      if (result.turnId) {
-        input.setActiveTurnId((current) => {
-          if (current !== result.turnId) return current;
-          // 计时锚点与 activeTurnId 同生命周期；StrictMode 双调用下重复清理幂等。
-          input.setActiveTurnStartedAtMs?.(undefined);
-          return undefined;
-        });
-      }
+      // 不回写成 activeTurnId；仅当它仍被标记为活跃时清掉。当前值读
+      // ref 镜像、两个 setter 都在 updater 之外调用——updater 必须纯，
+      // React 可能重复调用或丢弃它，副作用写在里面会与 activeTurnId
+      // 的变更脱钩。
+      clearSettledActiveTurn({
+        activeTurnId: input.activeTurnIdRef.current,
+        settledTurnId: result.turnId,
+        setActiveTurnId: input.setActiveTurnId,
+        setActiveTurnStartedAtMs: input.setActiveTurnStartedAtMs,
+      });
       // 换绑结果会同时携带 reset 与绑定种子（projection/usageTotals）：
       // 必须先清空再落种子，否则 reset 会把刚种上的快照读数抹掉。
       if (result.resetSessionProjection) {

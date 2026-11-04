@@ -485,6 +485,7 @@ export class PiTuiApp {
       draftAttachments,
       options: this.submitPipeline(),
       requestPermission: this.requestPermission,
+      setActiveTurnStartedAtMs: (ms) => store.set("activeTurnStartedAtMs", ms),
       setBusy: (v) => store.set("busy", v),
       setDraftAttachments: store.setter("draftAttachments"),
       setDraftValue: (v) => this.history.setDraftValue(v),

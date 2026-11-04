@@ -228,6 +228,7 @@ export async function submitIdleTurn(input: {
   draftAttachments: DraftAttachment[];
   options: TuiOptions;
   requestPermission: TuiRequestPermission;
+  setActiveTurnStartedAtMs?: (startedAtMs: number | undefined) => void;
   setBusy: (value: boolean) => void;
   setDraftAttachments: React.Dispatch<React.SetStateAction<DraftAttachment[]>>;
   setDraftValue: (value: string) => void;
@@ -255,6 +256,10 @@ export async function submitIdleTurn(input: {
     input.setDraftValue("");
     input.setDraftAttachments([]);
   }
+  // 上一回合的 settle 事件可能从未到达（如 submitPrompt 传输失败被拒），
+  // 锚点会残留。必须在 busy 打开渲染门之前清掉，否则新回合的
+  // turn_started 到达前会先显示上一回合的耗时。
+  input.setActiveTurnStartedAtMs?.(undefined);
   input.setBusy(true);
   input.setLastError(undefined);
   input.setStatus("Thinking...");
