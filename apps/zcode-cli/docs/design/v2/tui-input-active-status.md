@@ -5,7 +5,11 @@
 The TUI should reserve a small active-turn affordance and context meter row
 below the prompt input frame. While the agent is working, the line shows the
 same braille spinner used beside `Thinking`, followed by
-`esc to interrupt` on the left, and the current context meter on the right. When
+`esc to interrupt` on the left, and the current context meter on the right.
+While a turn is active the right cluster also carries the turn elapsed
+label (`activeTurnStartedAtMs`, see `tui-turn-elapsed.md`), placed before
+the context meter — turn-scoped first, session-scoped last at the row
+tail; under width pressure the elapsed label yields first. When
 the turn settles, the active hint disappears; if context usage is known, the
 right-side context meter may remain visible on the same row. If neither the
 active hint nor context meter is available, the row remains mounted as an empty

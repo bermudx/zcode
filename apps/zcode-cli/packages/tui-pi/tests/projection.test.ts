@@ -103,3 +103,21 @@ test("turn_started / turn_complete drive status and activeTurnId", async () => {
   assert.equal(h.store.state.activeTurnId, undefined);
   await h.stop();
 });
+
+test("turn_started anchors activeTurnStartedAtMs; settle events clear it", async () => {
+  const h = createHarness();
+  // executionStartedAt 在场即权威锚点（attach 远端 turn 的真实起点）。
+  h.app.applyEvent(
+    sessionEvent("turn_started", { executionStartedAt: 1_700_000_000_000 }, { turnId: "t-1" }),
+  );
+  assert.equal(h.store.state.activeTurnStartedAtMs, 1_700_000_000_000);
+  h.app.applyEvent(sessionEvent("turn_complete", {}, { turnId: "t-1" }));
+  assert.equal(h.store.state.activeTurnStartedAtMs, undefined);
+  // 字段缺失回退接收时刻；turn_error 同样清锚。
+  h.app.applyEvent(sessionEvent("turn_started", {}, { turnId: "t-2" }));
+  const anchored = h.store.state.activeTurnStartedAtMs;
+  assert.ok(anchored !== undefined && anchored <= Date.now() && anchored > Date.now() - 10_000);
+  h.app.applyEvent(sessionEvent("turn_error", {}, { turnId: "t-2" }));
+  assert.equal(h.store.state.activeTurnStartedAtMs, undefined);
+  await h.stop();
+});

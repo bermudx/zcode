@@ -24,6 +24,7 @@ type TuiApplyResultInput = {
   };
   modifiedFileToolCallIds: Set<string>;
   setActiveTurnId: React.Dispatch<React.SetStateAction<TurnId | undefined>>;
+  setActiveTurnStartedAtMs?: (startedAtMs: number | undefined) => void;
   setCacheStats: React.Dispatch<React.SetStateAction<CacheStats | undefined>>;
   setContextUsage: React.Dispatch<React.SetStateAction<ContextUsage>>;
   setEffortOptions: React.Dispatch<React.SetStateAction<NonNullable<TuiOptions["effortOptions"]>>>;
@@ -71,9 +72,12 @@ export function useTuiApplyResult(input: TuiApplyResultInput) {
       // 同上（tui-pi applyResult）：result.turnId 是已 settle 回合，
       // 不回写成 activeTurnId；仅当它仍被标记为活跃时清掉。
       if (result.turnId) {
-        input.setActiveTurnId((current) =>
-          current === result.turnId ? undefined : current,
-        );
+        input.setActiveTurnId((current) => {
+          if (current !== result.turnId) return current;
+          // 计时锚点与 activeTurnId 同生命周期；StrictMode 双调用下重复清理幂等。
+          input.setActiveTurnStartedAtMs?.(undefined);
+          return undefined;
+        });
       }
       // 换绑结果会同时携带 reset 与绑定种子（projection/usageTotals）：
       // 必须先清空再落种子，否则 reset 会把刚种上的快照读数抹掉。

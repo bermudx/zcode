@@ -82,6 +82,7 @@ export function TuiApp({
   const [statusDetails, setStatusDetails] = useState<string[]>([]);
   const [traceId, setTraceId] = useState<string | undefined>();
   const [activeTurnId, setActiveTurnId] = useState<TurnId | undefined>();
+  const [activeTurnStartedAtMs, setActiveTurnStartedAtMs] = useState<number | undefined>();
   const [contextUsage, setContextUsage] = useState<ContextUsage>({});
   const [cacheStats, setCacheStats] = useState<CacheStats | undefined>();
   const [usage, setUsage] = useState<ModelUsageSummary | undefined>();
@@ -171,6 +172,7 @@ export function TuiApp({
     fallback: { locale, loginRequired, mode, model },
     modifiedFileToolCallIds: modifiedFileToolCallIdsRef.current,
     setActiveTurnId,
+    setActiveTurnStartedAtMs,
     setCacheStats,
     setContextUsage,
     setEffortOptions,
@@ -200,6 +202,7 @@ export function TuiApp({
     copy: copy.tui,
     getMainSessionId: options.getMainSessionId,
     setActiveTurnId,
+    setActiveTurnStartedAtMs,
     setCacheStats,
     setContextUsage,
     setLastError,
@@ -392,6 +395,7 @@ export function TuiApp({
     subagents,
     toggleSidebar: sidebar.toggleSidebar,
     activeTurnId,
+    activeTurnStartedAtMs,
     approvalQueue,
     busy,
     cacheStats,

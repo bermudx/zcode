@@ -39,6 +39,8 @@ export type UsageTotals = {
 export class AppStore {
   readonly state = {
     activeTurnId: undefined as TurnId | undefined,
+    /** 当前 turn 的计时锚点（epoch ms）；与 activeTurnId 同生命周期。 */
+    activeTurnStartedAtMs: undefined as number | undefined,
     approvalQueue: [] as ApprovalPrompt[],
     busy: false,
     /** core auto-compact 设置态；契约字段落地前恒 undefined，footer 不显示 (auto)。 */

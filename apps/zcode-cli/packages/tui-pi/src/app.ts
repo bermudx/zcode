@@ -323,6 +323,7 @@ export class PiTuiApp {
       modifiedFileToolCallIds: this.store.modifiedFileToolCallIds,
       observeSessionEvent: this.store.observeSessionEvent,
       setActiveTurnId: (turnId) => this.store.set("activeTurnId", turnId),
+      setActiveTurnStartedAtMs: (ms) => this.store.set("activeTurnStartedAtMs", ms),
       setCacheStats: this.store.setter("cacheStats"),
       setContextUsage: this.store.setter("contextUsage"),
       setLastError: (message) => this.store.set("lastError", message),
@@ -390,7 +391,10 @@ export class PiTuiApp {
     store.set("traceId", result.traceId);
     store.set("liveModelText", "");
     // settle 回合不得回写 activeTurnId：socket 事件先清零，无条件回写会把已完成回合复活成 busy。
-    if (result.turnId && store.state.activeTurnId === result.turnId) store.set("activeTurnId", undefined);
+    if (result.turnId && store.state.activeTurnId === result.turnId) {
+      store.set("activeTurnId", undefined);
+      store.set("activeTurnStartedAtMs", undefined);
+    }
     // 换绑结果会同时携带 reset 与绑定种子（projection/usageTotals）：
     // 必须先清空再落种子，否则 reset 会把刚种上的快照读数抹掉。
     if (result.resetSessionProjection) {

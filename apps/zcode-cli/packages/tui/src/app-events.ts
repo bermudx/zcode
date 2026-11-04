@@ -37,6 +37,8 @@ import { asRecord, formatNumber, numberField, stringField } from "./state.js";
 
 type SessionEventHandlers = {
   setActiveTurnId: (turnId: TurnId | undefined) => void;
+  /** 计时锚点与 activeTurnId 同生命周期：turn_started 锚定、settle 清空。 */
+  setActiveTurnStartedAtMs?: (startedAtMs: number | undefined) => void;
   setCacheStats: React.Dispatch<React.SetStateAction<CacheStats | undefined>>;
   setContextUsage: React.Dispatch<React.SetStateAction<ContextUsage>>;
   setLastError: (message: string | undefined) => void;
@@ -69,6 +71,12 @@ export function applySessionEventToState(
       applySessionCreatedEvent(payload, handlers.setContextUsage);
       break;
     case SessionEventType.TurnStarted:
+      // executionStartedAt 是执行入口锚点：attach 会话远端 turn 也给出真实起点。
+      // 先写锚点再置 activeTurnId——按 key 逐个 notify 的 store 读方
+      // （tui-pi footer）在 active 沿到来时锚点已在场，计时与指示同帧出现。
+      handlers.setActiveTurnStartedAtMs?.(
+        numberField(payload, "executionStartedAt") ?? Date.now(),
+      );
       handlers.setActiveTurnId(event.turnId);
       handlers.setStatus(copy.status.thinking);
       break;
@@ -77,6 +85,7 @@ export function applySessionEventToState(
       applyTurnCompleteFallbackResponse(payload, handlers.setMessages);
       handlers.setStatus(copy.status.ready);
       handlers.setActiveTurnId(undefined);
+      handlers.setActiveTurnStartedAtMs?.(undefined);
       handlers.setQueuedInputs?.([]);
       break;
     case SessionEventType.TurnError:
@@ -91,6 +100,7 @@ export function applySessionEventToState(
       handlers.setStatus(copy.status.turnFailed);
       // 失败回合同样已 settle；不清 activeTurnId 会把后续所有提交锁进 busy 队列路径。
       handlers.setActiveTurnId(undefined);
+      handlers.setActiveTurnStartedAtMs?.(undefined);
       handlers.setQueuedInputs?.([]);
       break;
     case SessionEventType.TurnSteerQueued:
