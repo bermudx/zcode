@@ -687,3 +687,41 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   `promote-piz.sh` ran from clean `main` at `e37ed9d9`; no push, wrapper
   change, live-core restart, model turn, signing/allowance proof, or
   latency measurement was performed.
+
+### 2026-11-03 — worktree and branch cleanup (operator-requested)
+
+- The canonical checkout went back to `main` (`81ac3ef8`, ahead 17 of
+  `origin/main`); it had been sitting on the merged `patch/lean-test-gates`.
+  The auxiliary clean-main checkout `/home/daniel/build/piz-promote-main` is
+  gone, so `promote-piz.sh` now runs from this checkout — the gate only needs
+  HEAD `main` plus a clean tracked tree, no fixed path.
+- Removed worktrees, each clean with no untracked work (only regenerable
+  `node_modules`/`dist`/`.turbo` ignored artifacts): `piz-promote-main`,
+  `piz-session-health` (`patch/session-startup-health`),
+  `sync-2026-10-30-a60ba6a7`, and the herdr worktrees
+  `worktree-brave-cloud-bd48` / `worktree-lucky-valley-dbbc` — 17.4 GB of
+  content per `du`. On btrfs the real gain is smaller (df: 368→366 GB used,
+  ~2 GB) because worktree checkouts share extents.
+- Kept `~/.herdr/worktrees/piz/worktree-lucky-harbor-d8a4`: a live agent
+  session (`claude` plus running test processes) on the unmerged
+  `patch/lead-sidekick`. Its branch tip also moved during this cleanup
+  (`39c2e2b2`→`44f8c013`) — another reason not to touch it.
+- Deleted the 18 branches already merged into `main`. Their tips stay
+  reachable from `main` and can be restored with `git branch <name> <sha>`:
+  `patch/attach-v4-review-fixes` `386a28a2`, `patch/auth-failure-diagnostics`
+  `3cf8e1ff`, `patch/compact-context-window` `bdb5e953`,
+  `patch/exit-resume-hint` `6e16e0ce`, `patch/footer-compact-gauge`
+  `7859ed1a`, `patch/footer-path-top-left` `c7bb87c1`,
+  `patch/fork-test-runner` `4e36102f`, `patch/lean-test-gates` `bdf71561`,
+  `patch/quota-footer-rightzone` `35a2fe58`, `patch/resume-session-picker`
+  `5c93677f`, `patch/session-startup-health` `701aa0ef`,
+  `patch/shell-escape-aliases` `b5c1a799`, `patch/shell-output-spill`
+  `9ffe0ba5`, `patch/subagent-sendmessage-queue` `894c2b98`,
+  `sync/2026-10-30-a60ba6a7` `74f14afb`, `worktree/brave-cloud-bd48`
+  `8e044b18`, `worktree/lucky-harbor-d8a4` `9bce3ae5`,
+  `worktree/lucky-valley-dbbc` `610d1fd3`.
+- Retained because unmerged: `feat/allowance-herdr` (parked standalone
+  allowance reference) and `patch/lead-sidekick` / `patch/lead-sidekick-spec`.
+  No force delete was used (`git branch -d` refuses unmerged refs), nothing was
+  pushed, and no wrapper, live core or installed pair was touched. Branch names
+  in this log and in `docs/fork/*` are now historical labels, not live refs.
