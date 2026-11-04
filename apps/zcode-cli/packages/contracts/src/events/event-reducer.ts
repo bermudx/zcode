@@ -57,7 +57,18 @@ import {
   initialSessionProjection,
 } from "./event-reducer-helpers.js";
 
-function shouldModelCompleteUpdateContextUsed(payload: ModelCompletePayload): boolean {
+/**
+ * 主会话上下文水位的唯一裁决：只有主会话往返（或无法识别为 sidecar 的旧
+ * 事件）才能覆盖 ctx 读数。projection、V4 product projection 与 TUI live
+ * 通道共用同一谓词——sidecar（session_title/compact/目标校验等）在**同一
+ * sessionId** 上发 model_complete，session 闸门拦不住，必须按 querySource
+ * 裁。sidecar 多在回合间 idle 触发，采纳后没有 main_turn 覆盖时仪表会
+ * 一直停在 sidecar 的小读数上。
+ */
+export function shouldModelCompleteUpdateContextUsed(payload: {
+  querySource?: string;
+  stopReason?: string;
+}): boolean {
   if (payload.querySource !== undefined) {
     return payload.querySource === "main_turn";
   }

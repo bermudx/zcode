@@ -348,8 +348,9 @@ test("model_complete accumulates per-request usage + latestHitRate", async () =>
   try {
     h.resetOutput();
     h.app.applyEvent(sessionEvent("session_created", { contextWindow: 255_000 }));
-    // contextUsed 是最后一个请求的 input（context meter 口径）；累计 ↑↓R
-    // 必须跨两请求求和——1.8M+103k → ↑1.9M，103k/255k → 40.4%。
+    // contextUsed 是最后一个请求的 input+output（context meter 口径，与
+    // reducer getModelUsageContextTokens 一致）；累计 ↑↓R
+    // 必须跨两请求求和——1.8M+103k → ↑1.9M，(103k+23k)/255k → 49.4%。
     for (const usage of [
       { inputTokens: 1_800_000, outputTokens: 20_000, cacheReadTokens: 900_000 },
       { inputTokens: 103_000, outputTokens: 23_000, cacheReadTokens: 900_000 },
@@ -367,7 +368,7 @@ test("model_complete accumulates per-request usage + latestHitRate", async () =>
     assert.equal(h.store.state.cacheHitRate, 0.995);
     // Cumulative across both requests — not the second request's numbers alone.
     // ctx 仪表贴用量簇（同区，pi footer 同构），单空格分隔。
-    assert.match(h.output(), /↑1\.9M ↓43k R1\.8M CH99\.5% 40\.4%\/255k/);
+    assert.match(h.output(), /↑1\.9M ↓43k R1\.8M CH99\.5% 49\.4%\/255k/);
   } finally {
     await h.stop();
   }
@@ -709,7 +710,7 @@ test("model_complete payload.contextWindow seeds the ctx gauge (attach 无 sessi
     );
     await h.flush();
     assert.deepEqual(h.store.state.contextUsage, {
-      contextUsed: 267_000,
+      contextUsed: 267_005,
       contextWindow: 255_000,
     });
   } finally {

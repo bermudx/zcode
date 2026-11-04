@@ -6,10 +6,15 @@
 // 追加成主转写里的一条 agent 消息。
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SessionEventType, createSessionEvent, type SessionEvent } from "@zcode/contracts";
+import {
+  SessionEventType,
+  createSessionEvent,
+  type ModelUsageSummary,
+  type SessionEvent,
+} from "@zcode/contracts";
 import { getZCodeCopy } from "@zcode/i18n";
 import { applyMainSessionEvent } from "../src/app-session-event-handler.js";
-import type { Message } from "../src/app-model.js";
+import type { ContextUsage, Message } from "../src/app-model.js";
 import { EMPTY_TUI_WORKFLOW_MIRROR, type TuiWorkflowMirror } from "../src/app-workflow-mirror.js";
 
 const COPY = getZCodeCopy("en-US").tui;
@@ -28,6 +33,8 @@ function harness(getMainSessionId: () => string | undefined = () => MAIN) {
     statuses: [] as string[],
     lastEvents: [] as string[],
     mirror: EMPTY_TUI_WORKFLOW_MIRROR as TuiWorkflowMirror,
+    contextUsage: {} as ContextUsage,
+    usage: undefined as ModelUsageSummary | undefined,
   };
   const applied = new Set<string>();
   const input = {
@@ -35,7 +42,12 @@ function harness(getMainSessionId: () => string | undefined = () => MAIN) {
     getMainSessionId,
     setActiveTurnId: () => {},
     setCacheStats: () => {},
-    setContextUsage: () => {},
+    setContextUsage: (update: unknown) => {
+      state.contextUsage =
+        typeof update === "function"
+          ? (update as (current: ContextUsage) => ContextUsage)(state.contextUsage)
+          : (update as ContextUsage);
+    },
     setLastError: () => {},
     setLastEvent: (value: string) => state.lastEvents.push(value),
     setLiveModelText: () => {},
@@ -49,7 +61,14 @@ function harness(getMainSessionId: () => string | undefined = () => MAIN) {
     setNetworkRequests: () => {},
     setStatus: (value: string) => state.statuses.push(value),
     setTodos: () => {},
-    setUsage: () => {},
+    setUsage: (update: unknown) => {
+      state.usage =
+        typeof update === "function"
+          ? (update as (current: ModelUsageSummary | undefined) => ModelUsageSummary | undefined)(
+              state.usage,
+            )
+          : (update as ModelUsageSummary | undefined);
+    },
     setWorkflowMirror: (update: unknown) => {
       state.mirror =
         typeof update === "function"
@@ -193,4 +212,111 @@ test("drops actor events and deduplicates repeated main events", () => {
 test("an unknown main session id fails open so the transcript is never blank", () => {
   const h = harness(() => undefined);
   assert.equal(h.apply(event(ACTOR, SessionEventType.AssistantMessage, { content: "x" })), true);
+});
+
+// ── ctx 仪表只认主会话往返 ──
+// sidecar（session_title/compact/目标校验/tool_internal 嵌套用量）在主
+// sessionId 上发 model_complete，session 闸门拦不住；采纳其 usage 会把
+// ctx 读数打成 sidecar 小请求（实测 GLM 会话被标题请求打成 0.1%/262k），
+// 且 idle 期间没有 main_turn 覆盖会一直挂着。裁决与 event-reducer 共用。
+
+function modelComplete(payload: {
+  querySource?: string;
+  stopReason: string;
+  usage: { inputTokens: number; outputTokens: number };
+  contextWindow?: number;
+}): SessionEvent {
+  return event(MAIN, SessionEventType.ModelComplete, { content: "x", ...payload });
+}
+
+test("sidecar model_complete on the main session never moves the ctx meter or usage", () => {
+  const h = harness();
+  // 先落一条主会话读数，断言 sidecar 不覆盖它。
+  h.apply(
+    modelComplete({
+      querySource: "main_turn",
+      stopReason: "tool-calls",
+      usage: { inputTokens: 216_330, outputTokens: 449 },
+      contextWindow: 262_144,
+    }),
+  );
+  const settled = { ...h.state.contextUsage };
+
+  for (const sidecar of [
+    { querySource: "session_title", stopReason: "stop" },
+    { querySource: "compact", stopReason: "stop" },
+    { querySource: "goal_completion_verification", stopReason: "stop" },
+    { querySource: "subagent", stopReason: "stop" },
+    // 无 querySource 的嵌套用量（工具/子任务内部模型调用）靠 stopReason 识别。
+    { stopReason: "tool_internal" },
+  ]) {
+    h.apply(
+      modelComplete({
+        ...sidecar,
+        usage: { inputTokens: 244, outputTokens: 12 },
+        contextWindow: 999,
+      }),
+    );
+  }
+
+  assert.deepEqual(h.state.contextUsage, settled);
+  assert.equal(h.state.usage?.inputTokens, 216_330);
+});
+
+test("main_turn model_complete updates ctx used with input+output and refreshes the window", () => {
+  const h = harness();
+  h.apply(
+    modelComplete({
+      querySource: "main_turn",
+      stopReason: "stop",
+      usage: { inputTokens: 216_330, outputTokens: 449 },
+      contextWindow: 262_144,
+    }),
+  );
+  assert.equal(h.state.contextUsage.contextUsed, 216_779);
+  assert.equal(h.state.contextUsage.contextWindow, 262_144);
+});
+
+test("a legacy main-session model_complete without querySource still updates the meter", () => {
+  const h = harness();
+  h.apply(
+    modelComplete({
+      stopReason: "stop",
+      usage: { inputTokens: 5_000, outputTokens: 100 },
+      contextWindow: 200_000,
+    }),
+  );
+  assert.equal(h.state.contextUsage.contextUsed, 5_100);
+  assert.equal(h.state.contextUsage.contextWindow, 200_000);
+});
+
+test("compact boundary events drop the meter to the post-compact level immediately", () => {
+  const h = harness();
+  h.apply(
+    modelComplete({
+      querySource: "main_turn",
+      stopReason: "tool-calls",
+      usage: { inputTokens: 216_330, outputTokens: 449 },
+      contextWindow: 262_144,
+    }),
+  );
+  // session_compacted 嵌 compactBoundary 字段；truePost 优先于 post。
+  h.apply(
+    event(MAIN, SessionEventType.SessionCompacted, {
+      compactBoundary: {
+        boundaryId: "b1",
+        postCompactTokenCount: 40_000,
+        truePostCompactTokenCount: 42_500,
+      },
+    }),
+  );
+  assert.equal(h.state.contextUsage.contextUsed, 42_500);
+  // compact_boundary 事件 payload 本体即 boundary。
+  h.apply(
+    event(MAIN, SessionEventType.CompactBoundary, {
+      boundaryId: "b2",
+      postCompactTokenCount: 12_000,
+    }),
+  );
+  assert.equal(h.state.contextUsage.contextUsed, 12_000);
 });

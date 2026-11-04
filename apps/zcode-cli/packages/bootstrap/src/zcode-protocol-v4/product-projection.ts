@@ -63,6 +63,7 @@ import {
   ModelErrorCode,
   SessionEventType,
   getModelUsageContextTokens,
+  shouldModelCompleteUpdateContextUsed,
 } from "@zcode/contracts";
 import {
   clearSettledOutputPreviews,
@@ -4919,10 +4920,7 @@ export class ProductProjection {
     const payload = event.payload as ModelCompletePayload;
     const retryClearDeltas = this.acceptsActiveModelEvent(event) ? this.setApiRetry(null) : [];
     // 与旧 reducer 同一裁决：只有主会话往返才能覆盖 context 水位。
-    const isMainTurn =
-      payload.querySource !== undefined
-        ? payload.querySource === "main_turn"
-        : payload.stopReason !== "tool_internal";
+    const isMainTurn = shouldModelCompleteUpdateContextUsed(payload);
     if (isMainTurn) {
       this.outputContinuationTextRowId = null;
       this.guideDrainOpen = false;

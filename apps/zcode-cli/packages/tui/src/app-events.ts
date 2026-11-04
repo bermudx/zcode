@@ -1,5 +1,8 @@
 import {
+  getModelUsageContextTokens,
   SessionEventType,
+  shouldModelCompleteUpdateContextUsed,
+  type ModelUsage,
   type ModelUsageSummary,
   type SessionEvent,
   type TodoItem,
@@ -199,7 +202,14 @@ export function applySessionEventToState(
       handlers.setQueuedInputs?.([]);
       break;
     case SessionEventType.SessionCompacted:
+      // 与 projection 的 applyCompactBoundary 同口径：压缩落定后 meter 必须
+      // 立刻降到 post-compact 水位——下一个 main_turn model_complete 到来前
+      // （整个 idle 间隙）沿用压缩前读数就是另一种假水位。
+      applyCompactBoundaryContextUsage(payload, handlers.setContextUsage);
       handlers.setStatus(copy.status.compacted);
+      break;
+    case SessionEventType.CompactBoundary:
+      applyCompactBoundaryContextUsage(payload, handlers.setContextUsage);
       break;
     case SessionEventType.CompactStarted:
       applyCompactTimelineEvent(payload, handlers.setMessages);
@@ -349,6 +359,26 @@ function applyTurnErrorEvent(
   setMessages((current) => appendSystemErrorMessage(current, message));
 }
 
+/**
+ * compact 落定事件的 ctx 更新：优先 truePostCompactTokenCount（压缩后真实
+ * 组装的 token 数），退回 postCompactTokenCount；两者都缺时不动 meter——
+ * 宁可保持上一个读数也不伪造水位（reducer 同款 fallback 顺序）。
+ */
+function applyCompactBoundaryContextUsage(
+  payload: Record<string, unknown>,
+  setContextUsage: React.Dispatch<React.SetStateAction<ContextUsage>>,
+): void {
+  const boundary = asRecord(payload.compactBoundary);
+  // CompactBoundary 事件的 payload 本体即 boundary；SessionCompacted 嵌在
+  // compactBoundary 字段。两种形态都归一到同一份 record 读数。
+  const source = Object.keys(boundary).length > 0 ? boundary : payload;
+  const contextUsed =
+    numberField(source, "truePostCompactTokenCount") ??
+    numberField(source, "postCompactTokenCount");
+  if (contextUsed === undefined || !Number.isFinite(contextUsed) || contextUsed < 0) return;
+  setContextUsage((current) => ({ ...current, contextUsed }));
+}
+
 function applySessionCreatedEvent(
   payload: Record<string, unknown>,
   setContextUsage: React.Dispatch<React.SetStateAction<ContextUsage>>,
@@ -384,25 +414,39 @@ function applyModelCompleteEvent(
   setContextUsage: React.Dispatch<React.SetStateAction<ContextUsage>>,
   copy: TuiCopy,
 ): void {
+  // ctx 仪表与最近请求用量只认主会话往返：标题生成、compact 摘要、目标校验
+  // 等 sidecar 在**同一 sessionId** 上发 model_complete，isMainSessionEvent
+  // 拦不住，必须与 event-reducer/V4 product projection 用同一
+  // shouldModelCompleteUpdateContextUsed 裁决。sidecar 多在回合间 idle
+  // 触发，采纳后没有 main_turn 覆盖时读数会一直停在 sidecar 的小请求上。
+  const isMainTurnUsage = shouldModelCompleteUpdateContextUsed({
+    querySource: stringField(payload, "querySource"),
+    stopReason: stringField(payload, "stopReason"),
+  });
   const nextUsage = usageFromPayload(payload);
-  if (nextUsage) {
+  if (nextUsage && isMainTurnUsage) {
     setUsage(nextUsage);
-    if (nextUsage.inputTokens > 0) {
+  }
+  if (isMainTurnUsage) {
+    // 与 reducer 同口径 getModelUsageContextTokens（input+output）：只取
+    // input 会比 projection/attach 种子少算本轮输出。
+    const contextUsed = getModelUsageContextTokens(payload.usage as ModelUsage | undefined);
+    if (contextUsed !== undefined) {
       setContextUsage((current) => ({
         ...current,
-        contextUsed: nextUsage.inputTokens,
+        contextUsed,
       }));
     }
-  }
-  // core 的 main_turn model_complete 自带 contextWindow——attach 接入拿不到
-  // session_created（先 emit 后订阅），这里补上窗口并随回合刷新（换模型后
-  // 窗口变化也自校正）。
-  const contextWindow = contextWindowFromPayload(payload);
-  if (contextWindow !== undefined) {
-    setContextUsage((current) => ({
-      ...current,
-      contextWindow,
-    }));
+    // core 的 main_turn model_complete 自带 contextWindow——attach 接入拿不到
+    // session_created（先 emit 后订阅），这里补上窗口并随回合刷新（换模型后
+    // 窗口变化也自校正）。sidecar 可能挂别的模型的窗口，同样要 gate。
+    const contextWindow = contextWindowFromPayload(payload);
+    if (contextWindow !== undefined) {
+      setContextUsage((current) => ({
+        ...current,
+        contextWindow,
+      }));
+    }
   }
   setStatus(
     nextUsage
