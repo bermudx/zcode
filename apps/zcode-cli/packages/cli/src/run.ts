@@ -33,6 +33,7 @@ import { runTuiCommand } from "./tui-command.js";
 import { resolveTuiStartupLocale } from "./tui-startup-locale.js";
 import { createWorkspacePathSuggestionProvider } from "./tui-workspace-paths.js";
 import { runAttachCommand } from "./attach/attach-command.js";
+import { runAcpCommand } from "./attach/acp/acp-main.js";
 import {
   DEFAULT_CLI_WORKFLOW_MODE,
   normalizeWorkflowModeOption,
@@ -680,6 +681,9 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
   }
 
   switch (commandName(parsed.positionals)) {
+    case "acp":
+      // `zcode acp`：ACP v1 stdio 适配器（共享 core over socket），与 piz 同实现。
+      return await runAcpCommand(ctx, commandDeps, version, options);
     case "help":
       writeHelp(ctx.stdout, options.locale, options.detectedLocale);
       return 0;

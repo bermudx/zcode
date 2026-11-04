@@ -4,6 +4,7 @@
 // core 缺失时仍由 attach-command 经 PATH `zcode`（或 ZCODE_SERVER_BIN）拉起。
 import { runAttachCommand } from "./attach-command.js";
 import { parseAttachEntryArgs } from "./attach-entry-args.js";
+import { runAcpCommand } from "./acp/acp-main.js";
 
 declare const __CLI_VERSION__: string;
 
@@ -12,6 +13,7 @@ const ATTACH_PROCESS_NAME = "zcode-attach";
 const usage = `zcode-attach — pi-tui thin client for a shared ZCode core
 
 Usage:
+  zcode-attach acp                ACP v1 stdio agent adapter (shared core over socket)
   zcode-attach [--locale <en-US|zh-CN|auto>] [--no-color] [--verbose]
                [-c|--continue] [--resume <sessionId>] [--model <provider/model>]
                [--version] [-h|--help]
@@ -36,6 +38,15 @@ const main = async (): Promise<number> => {
   const { action, initialModel, options, resume } = parseAttachEntryArgs(
     process.argv.slice(2),
   );
+  if (action === "acp") {
+    // `piz acp`：ACP v1 stdio 适配器，业务全部经共享 core 的 socket 走。
+    return runAcpCommand(
+      { argv: process.argv, stderr: process.stderr, stdin: process.stdin, stdout: process.stdout },
+      { cwd: () => process.cwd(), env: process.env },
+      __CLI_VERSION__,
+      options,
+    );
+  }
   if (action === "help") {
     process.stdout.write(usage);
     return 0;

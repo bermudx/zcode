@@ -6,7 +6,7 @@ import type { GlobalOptions } from "@zcode/shared-types";
 import type { CliResumeRequest } from "../cli-types.js";
 
 export interface AttachEntryArgs {
-  action?: "help" | "version";
+  action?: "acp" | "help" | "version";
   /** `--model <ref>`：启动模型选择，交给 runAttachCommand 应用。 */
   initialModel?: string;
   options: GlobalOptions;
@@ -16,11 +16,14 @@ export interface AttachEntryArgs {
 export function parseAttachEntryArgs(argv: readonly string[]): AttachEntryArgs {
   const options: GlobalOptions = { force: false, json: false, noColor: false, verbose: false };
   const resume: CliResumeRequest = { continueSession: false };
-  let action: "help" | "version" | undefined;
+  let action: "acp" | "help" | "version" | undefined;
   let initialModel: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--locale") {
+    // `piz acp`：首个位置参数是 acp 时进入 ACP stdio 适配器（与 TUI 入口同二进制）。
+    if (i === 0 && arg === "acp") {
+      action = "acp";
+    } else if (arg === "--locale") {
       options.locale = argv[++i] as GlobalOptions["locale"];
     } else if (arg === "--no-color") {
       options.noColor = true;

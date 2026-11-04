@@ -6108,13 +6108,24 @@ test("loads dotenv for app-server only in development runtime", async () => {
   assert.equal(ctx.stderr.output(), "");
 });
 
-test("rejects the removed acp command", async () => {
+test("acp command runs the stdio ACP adapter and exits on stdin EOF", async () => {
+  // `zcode acp` 不再是未知命令：stdin EOF（ACP 客户端断开）即 detach 退出，
+  // 不挂起、不在 stdout 写协议外内容。
   const ctx = createContext(["acp"]);
-  const exitCode = await run(ctx);
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  let stdoutOutput = "";
+  stdout.on("data", (chunk) => {
+    stdoutOutput += String(chunk);
+  });
+  (ctx as { stdin: unknown }).stdin = stdin;
+  (ctx as { stdout: unknown }).stdout = stdout;
+  stdin.end();
+  const exitCode = await withTimeout(run(ctx), 10_000, "acp run did not exit on stdin EOF");
 
-  assert.equal(exitCode, 1);
-  assert.match(ctx.stderr.output(), /Unknown command: acp/);
-  assert.equal(ctx.stdout.output(), "");
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(ctx.stderr.output(), /Unknown command: acp/);
+  assert.equal(stdoutOutput, "");
 });
 
 test("returns an error for unknown commands", async () => {
