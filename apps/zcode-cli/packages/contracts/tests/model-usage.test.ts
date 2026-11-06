@@ -92,6 +92,17 @@ describe("model usage contracts", () => {
     expect(getModelUsageContextTokens({ totalTokens: 10, cacheReadTokens: 4 })).toBe(10);
   });
 
+  it("refuses an output-only reading — it is a fraction of context, not the context", () => {
+    // 只有 output 的 usage 不是上下文水位；input 缺报时让位 provider total，
+    // total 也缺则放弃这次读数，调用方保留上一个可信水位。
+    expect(getModelUsageContextTokens({ outputTokens: 449 })).toBeUndefined();
+    expect(getModelUsageContextTokens({ outputTokens: 449, totalTokens: 216_000 })).toBe(216_000);
+    // cache-read-only 仍可重建 input window，照常返回 input+output。
+    expect(
+      getModelUsageContextTokens({ outputTokens: 449, cacheReadTokens: 50_000 }),
+    ).toBe(50_449);
+  });
+
   it("uses normalized total input as input window tokens", () => {
     expect(
       getModelUsageInputWindowTokens({

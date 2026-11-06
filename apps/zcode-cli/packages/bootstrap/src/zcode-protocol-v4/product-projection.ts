@@ -63,6 +63,7 @@ import {
   ModelErrorCode,
   SessionEventType,
   getModelUsageContextTokens,
+  shouldModelCompleteUpdateContextUsed,
 } from "@zcode/contracts";
 import {
   clearSettledOutputPreviews,
@@ -4919,10 +4920,7 @@ export class ProductProjection {
     const payload = event.payload as ModelCompletePayload;
     const retryClearDeltas = this.acceptsActiveModelEvent(event) ? this.setApiRetry(null) : [];
     // 与旧 reducer 同一裁决：只有主会话往返才能覆盖 context 水位。
-    const isMainTurn =
-      payload.querySource !== undefined
-        ? payload.querySource === "main_turn"
-        : payload.stopReason !== "tool_internal";
+    const isMainTurn = shouldModelCompleteUpdateContextUsed(payload);
     if (isMainTurn) {
       this.outputContinuationTextRowId = null;
       this.guideDrainOpen = false;
@@ -4979,7 +4977,10 @@ export class ProductProjection {
       }
     }
     if (!isMainTurn) return [...deltas, ...retryClearDeltas];
-    const usedTokens = getModelUsageContextTokens(usage) ?? 0;
+    // 读数不可得（如 output-only usage）时保留上一个可信水位，与
+    // getModelUsageContextTokens 的「放弃本次读数」语义一致——不写 0 造更低水位。
+    const usedTokens =
+      getModelUsageContextTokens(usage) ?? this.contextWindowState.usedTokens;
     this.contextWindowState.usedTokens = usedTokens;
     const maxTokens = payload.contextWindow ?? this.contextWindowState.maxTokens;
     const cumulative = this.snapshot.usage.cumulative;
