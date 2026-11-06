@@ -1155,3 +1155,12 @@ Open items (carried from the branch record, unchanged): rewind drops every
 message queued on an older branch generation; a not-delivered notice for a
 task whose own branch generation is stale is dropped by the existing
 per-taskId branch fence.
+
+## Promotion ffc79107 (2026-11-06)
+
+`--promote-gate --base 315d9ff1 --max-workers 2` took the full tier: 13,260
+vitest results, 0 new, 2 known, 4 flaky (passed on isolated rerun). `typecheck:piz`,
+lint (0 errors, 83 warnings) and architecture checks passed. Pty smoke with an
+isolated data dir on `dist` and on promoted `dist-runtime`: boot, double Ctrl-C,
+exit 0 with a resume hint. Not observed: a live model turn, signing or allowance
+behaviour, or a live core restart.
