@@ -146,3 +146,42 @@ full matched-pair acceptance or promotion was performed; frozen
 Quota failure coverage remains harness-based with synthetic promises, not
 a live-provider quota failure. No allowance or network-root-cause claim.
 The pre-existing untracked backup directory remains untouched.
+
+## Promotion attempt — 2026-11-06
+
+Operator authorized merge and promotion; merged the candidate to `main` as
+`69786e0a`. The matched development build completed (CLI graph 12/12 plus
+`build:attach` and root model-option-map). **Promotion was not performed:**
+the required pre-promotion test run failed, so `dist-runtime` and live cores
+remain unchanged. No push or model call was made.
+
+- Piz typecheck passed (CLI 36/36 plus root shared surface); root lint
+  reported 0 errors / 83 warnings and CLI lint 0 errors / 74 warnings /
+  7 accepted upstream line-count diagnostics. Architecture against
+  `315d9ff1` reported 0 violations.
+- Explicit piz engineering subset: **7 files / 101 tests passed**. The
+  initial affected-only invocation selected zero tests and is not a pass.
+- Pre-promotion `fork-tests.mjs --full --exclude-plugins` failed: 10 new
+  failures after the script's isolated reruns, 13 known failures and 115
+  flaky results that passed on those reruns. It reported 13,260 Vitest
+  results. The seven excluded plugin packages are listed in the run log.
+  CLI, tui and tui-pi package scripts passed; tui-pi **270/270**.
+- The 10 new failures were seven `bootstrap/tests/app-unbound-resume.test.ts`
+  cases, two `bootstrap/tests/session-persistence.test.ts` cases, and one
+  `dynamic-workflow/tests/convergence.test.ts` timing case. A subsequent
+  unbound-resume file rerun with stripped session environment and tmpfs
+  failed 12/13 tests with 5-second timeouts. A separate convergence rerun
+  failed its 10-second bound at approximately 15.6 seconds. These reruns
+  overlapped each other, so they do not establish behavior under idle load;
+  their cause and relationship to existing failures remain unverified.
+- This attempt did not establish live authenticated signing, allowance
+  metering or the remaining real-terminal acceptance matrix. Unit signing
+  coverage from the previous selected run is not live eligibility evidence.
+- Full run log: `/tmp/piz-promote-quota-full-tests.log`; detailed per-package
+  logs and JSON: `/tmp/piz-fork-tests-run-beeygn/`. Rerun logs:
+  `/tmp/piz-promote-unbound-rerun.log` and
+  `/tmp/piz-promote-convergence-rerun.log`.
+
+The full adapter suite recreated `apps/zcode-cli/packages/adapters/backup/`
+after the operator had asked for the old directory to be trashed. The new
+test-generated directory was also moved to Trash; no backup content was read.
