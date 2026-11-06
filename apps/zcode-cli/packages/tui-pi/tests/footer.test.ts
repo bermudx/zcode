@@ -151,6 +151,29 @@ test("activity row shows right-aligned turn elapsed only while a turn is active"
   }
 });
 
+test("quota failure badge joins the activity row right cluster until cleared", async () => {
+  const h = createHarness();
+  try {
+    // noteFailure 是 QuotaCluster 私有面；store.set 会经 onStateChanged
+    // 自动 updateFooter，这里直接驱动失败路径验证徽标落屏。
+    const quota = (h.app as unknown as {
+      quota: { noteFailure(cause: unknown): void };
+    }).quota;
+    quota.noteFailure(new Error("fetch failed"));
+    assert.match(strip(footerRows(h.app)[0] ?? ""), /quota !/);
+    // 读数与徽标并存：右簇读数在前、徽标殿后。
+    h.store.set("quotaBalance", [{ remainingPercent: 50, windowSeconds: 3600 }]);
+    h.store.set("quotaFetchedAt", Date.now());
+    const top = strip(footerRows(h.app)[0] ?? "");
+    assert.match(top, /1h: 50%.*quota !/);
+    // 成功落地清 episode（quota-cluster 写 quotaError=undefined 同路径）。
+    h.store.set("quotaError", undefined);
+    assert.doesNotMatch(strip(footerRows(h.app)[0] ?? ""), /quota !/);
+  } finally {
+    await h.stop();
+  }
+});
+
 test("effectiveContextUsage clamps the gauge to the GLM compact cap", () => {
   // GLM + 1M 投影窗口 → min(262k, 1M)；provider 前缀剥掉后按 bare id 匹配。
   const glm = effectiveContextUsage(

@@ -79,6 +79,8 @@ export class AppStore {
     /** Coding Plan 额度簇（quota-cluster 唯一写入）。 */
     quotaBalance: undefined as Balance | undefined,
     quotaFetchedAt: undefined as number | undefined,
+    /** 额度刷新失败 episode 的诊断消息；存在即 footer 挂 `quota !` 徽标。 */
+    quotaError: undefined as string | undefined,
   };
 
   /** Maps used by the shared projection; stable identity matters. */

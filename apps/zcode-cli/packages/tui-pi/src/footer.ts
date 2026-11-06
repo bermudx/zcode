@@ -27,6 +27,7 @@ const FOOTER_RIGHT_CLUSTER_GAP = "  ";
 
 export class ActivityLine extends Loader {
   private quotaText: string | undefined;
+  private quotaError: string | undefined;
   private turnStartMs: number | undefined;
   private branch: string | undefined;
   private cwdLabel = "";
@@ -45,6 +46,10 @@ export class ActivityLine extends Loader {
 
   setQuota(quotaText: string | undefined): void {
     this.quotaText = quotaText;
+  }
+
+  setQuotaError(quotaError: string | undefined): void {
+    this.quotaError = quotaError;
   }
 
   setTurnStartMs(turnStartMs: number | undefined): void {
@@ -68,7 +73,9 @@ export class ActivityLine extends Loader {
       this.turnStartMs === undefined
         ? undefined
         : formatElapsedMs(Date.now() - this.turnStartMs);
-    const right = [elapsed, this.quotaText]
+    // 徽标殿后：陈旧读数与失败标记并存时读数在前、`quota !` 收尾，
+    // 一眼可辨「显示的是旧数据」。
+    const right = [elapsed, this.quotaText, this.quotaError]
       .filter((part): part is string => Boolean(part))
       .join(FOOTER_RIGHT_CLUSTER_GAP);
     return [
@@ -139,6 +146,7 @@ export class StatusFooter extends Container {
     cwdLabel: string;
     idleHint: string;
     quotaText?: string;
+    quotaError?: string;
     state: AppStore["state"];
   }): void {
     const { state } = input;
@@ -151,6 +159,7 @@ export class StatusFooter extends Container {
     this.activity.setMessage(state.status || (active ? input.idleHint : ""));
     this.activity.setLocation({ branch: state.workspaceGitBranch, cwdLabel: input.cwdLabel });
     this.activity.setQuota(input.quotaText);
+    this.activity.setQuotaError(input.quotaError);
     this.meta.setState(state);
   }
 
