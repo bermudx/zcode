@@ -14,7 +14,7 @@
 # with source edits. npm deps (react, zod, pi-tui) still resolve at the repo
 # root node_modules, unchanged.
 #
-# Usage: run after the verification matrix passes, from a clean main —
+# Usage: run after the promotion gate passes, from a clean main —
 #   sh apps/zcode-cli/scripts/promote-piz.sh
 
 set -eu
@@ -60,6 +60,9 @@ for pair in "$TUI_PI tui-pi" "$TUI tui"; do
 	cp "$pkg_dir/package.json" "$dst/"
 	cp -R "$pkg_dir/dist" "$dst/"
 done
+
+# Records the base for the next `fork-tests.mjs --promote-gate`.
+git -C "$ROOT" rev-parse HEAD >"$TMP/PROMOTED_FROM"
 
 # Atomic-ish swap: same-fs rename; a reader sees the old or new dir, never a
 # half-written one.

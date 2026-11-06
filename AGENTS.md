@@ -53,7 +53,7 @@ It owns fork direction, branch roles, active patches and maintenance policy.
 - Root and CLI workspace typecheck/lint are separate. Run relevant checks and
   report actual failures/limits. CLI tests on patch branches:
   `mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs` (selected); `--full`
-  only for sync/pre-promote or on request. Never `.skip`/delete upstream tests
+  only for sync or on request; before promoting use `--promote-gate`. Never `.skip`/delete upstream tests
   for speed. Real terminal/model behavior and resource cost
   require observation, not claims based on compilation or fixtures.
 - Fix comments explaining bugs should follow upstream's Chinese-comment rule.

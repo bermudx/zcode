@@ -8,7 +8,7 @@
 // their whole package script. The always-run focused set (signing, socket
 // listener) runs regardless.
 //
-// --full (sync/* branches, before promote): every package's test script.
+// --full (sync/* branches, full promote tier): every package's test script.
 //
 // Both modes: zcode/herdr session env is stripped, TMPDIR points at a tmpfs
 // when one exists (SQLite-heavy tests fsync per write; 65k-row fixtures go
@@ -23,6 +23,8 @@
 //   mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs [options]
 //     --base <ref>        selection base (default: merge-base of main and HEAD)
 //     --full              run every package, no selection
+//     --promote-gate      pre-promote: pick the tier from the diff since the last
+//                         promotion (docs/fork/verification.md "Promotion gate")
 //     --exclude-plugins   with --full (pre-promote): skip plugin-package test
 //                         tasks the no-plugin core does not load; printed, and
 //                         still run by plain --full on sync branches
@@ -35,7 +37,7 @@
 // Exit: 0 = no new failures, 1 = new failures / package crash, 2 = script error.
 
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, statfsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, statfsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -83,6 +85,14 @@ export const PLUGIN_PACKAGES = [
   "@zcode/zcode-cua-plugin",
 ];
 
+// Paths a promotion can change and still take the selected tier. An allowlist on
+// purpose: anything unrecognised, including shared core code, gets the full tier.
+const SELECTED_TIER_PATH = /^(?:apps\/zcode-cli\/packages\/(?:tui|tui-pi)\/|docs\/|FORK\.md$|AGENTS\.md$)/u;
+
+export function promoteTier(changedFiles) {
+  return changedFiles.every((file) => SELECTED_TIER_PATH.test(file)) ? "selected" : "full";
+}
+
 export function filterPluginTasks(tasks, excludePlugins) {
   if (!excludePlugins) return { kept: tasks, excluded: [] };
   const excluded = tasks.filter((task) => PLUGIN_PACKAGES.includes(task.pkg));
@@ -101,7 +111,7 @@ const TMPFS_MAGIC = 0x01021994;
 const KNOWN_SEP = " :: ";
 
 export function parseArgs(argv) {
-  const opts = { packages: [], retry: true, tmpfs: true, full: false, dryRun: false, excludePlugins: false };
+  const opts = { packages: [], retry: true, tmpfs: true, full: false, dryRun: false, excludePlugins: false, promoteGate: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => {
@@ -111,6 +121,7 @@ export function parseArgs(argv) {
     };
     if (arg === "--base") opts.base = value();
     else if (arg === "--full") opts.full = true;
+    else if (arg === "--promote-gate") opts.promoteGate = true;
     else if (arg === "--package") opts.packages.push(value());
     else if (arg === "--max-workers") {
       const n = Number(value());
@@ -125,6 +136,7 @@ export function parseArgs(argv) {
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (opts.full && opts.base) throw new Error("--full and --base are exclusive");
+  if (opts.full && opts.promoteGate) throw new Error("--full and --promote-gate are exclusive");
   return opts;
 }
 
@@ -181,11 +193,24 @@ function git(root, args) {
   return execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
 }
 
-function childEnv(tmp) {
+// Tests must not see the operator's ~/.zcode: it slows them and they write to it.
+function childEnv(tmp, home) {
   const env = { ...process.env };
   for (const key of STRIPPED_ENV) delete env[key];
   if (tmp) env.TMPDIR = tmp;
+  if (home) env.HOME = home;
   return env;
+}
+
+// Without these, whole classes of tests fail for reasons unrelated to the code.
+export const REQUIRED_BUILD_ARTIFACTS = [
+  "apps/zcode-cli/packages/contracts/dist/index.js",
+  "apps/zcode-cli/packages/browser-use-plugin/scripts/browser-client.mjs",
+  "packages/shared/dist/index.js",
+];
+
+export function missingBuildArtifacts(root) {
+  return REQUIRED_BUILD_ARTIFACTS.filter((path) => !existsSync(join(root, path)));
 }
 
 function tmpfsDir() {
@@ -255,13 +280,34 @@ export async function main(argv = process.argv.slice(2)) {
     }
     const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
     const cliRoot = join(repoRoot, "apps/zcode-cli");
+    if (opts.promoteGate) {
+      const stamp = join(cliRoot, "packages/cli/dist-runtime/PROMOTED_FROM");
+      if (!opts.base && !existsSync(stamp))
+        throw new Error(`--promote-gate needs --base <last promoted sha>: ${stamp} does not exist yet`);
+      opts.base ??= readFileSync(stamp, "utf8").trim();
+      const tier = promoteTier(git(repoRoot, ["diff", "--name-only", opts.base, "HEAD"]).split("\n").filter(Boolean));
+      console.log(`[fork-tests] promote gate: ${tier} tier (changes since ${opts.base.slice(0, 10)})`);
+      if (tier === "full") {
+        opts.full = true;
+        opts.excludePlugins = true;
+        opts.base = undefined;
+      }
+    }
     const base = opts.full ? undefined : (opts.base ?? git(repoRoot, ["merge-base", "main", "HEAD"]));
     const knownPath = resolve(repoRoot, opts.known ?? "docs/fork/known-test-failures.txt");
     const known = existsSync(knownPath) ? parseKnownFailures(readFileSync(knownPath, "utf8")) : new Set();
 
     tmp = opts.tmpfs && !opts.dryRun ? tmpfsDir() : undefined;
-    const env = childEnv(tmp);
     const runDir = mkdtempSync(join(tmpdir(), "piz-fork-tests-run-"));
+    const home = join(runDir, "home");
+    mkdirSync(home);
+    const env = childEnv(tmp, home);
+    if (opts.full && !opts.dryRun) {
+      const missing = missingBuildArtifacts(repoRoot);
+      if (missing.length) {
+        throw new Error(`build first, tests would fail on missing artifacts: ${missing.join(", ")} (docs/fork/verification.md "Promotion gate")`);
+      }
+    }
 
     let tasks = turboTestTasks(cliRoot, env, base ? `...[${base}]` : undefined);
     const all = base ? turboTestTasks(cliRoot, env) : tasks;

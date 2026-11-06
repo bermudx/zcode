@@ -98,9 +98,60 @@ cover. Select tests instead:
 ```sh
 # patch/* branches — tests reachable from what the branch changed (vs merge-base with main)
 mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs            # --dry-run shows the plan
-# sync/* branches and before promote-piz.sh — every CLI-workspace package
+# sync/* branches — every CLI-workspace package
 mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full
+# before promote-piz.sh, from main — tier chosen from the diff, see "Promotion gate"
+mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --promote-gate
 ```
+
+### Promotion gate
+
+`--promote-gate` diffs HEAD against the last promoted commit, which
+`promote-piz.sh` records in `dist-runtime/PROMOTED_FROM`. Until a promotion has
+written that file, pass `--base <last promoted sha>` (FORK.md names it).
+
+- **Selected tier:** every changed path is in `packages/tui`, `packages/tui-pi`,
+  `docs/`, `FORK.md` or `AGENTS.md`. Runs the changed packages and dependents,
+  plus the always-run signing and socket tests.
+- **Full tier (`--full --exclude-plugins`):** anything else, including core,
+  bootstrap, adapters, contracts, shared, CLI, dependencies and lockfiles. The
+  list is an allowlist, so unrecognised paths land here.
+- **Build first, or results mean nothing.** Full mode refuses to start without
+  the workspace build (`turbo run build`), `browser-use-plugin` output
+  (`scripts/browser-client.mjs`; `turbo --force` if a cached build skipped it)
+  and root `tsc -b packages/shared packages/model-option-map`.
+- **Load changes results.** On 2026-11-06 bootstrap at `--max-workers 2` had no
+  new failures in about 8 minutes; the default worker count gave 31, with
+  `STACK_TRACE_ERROR` and count mismatches. Use `--max-workers 2` before calling a failure real.
+- **Runner isolation.** The runner gives tests a throwaway HOME, since seeding
+  and starting plugins from the real `~/.zcode` is the suspected cause of the
+  11-18s `app-unbound-resume` tests (about 1s isolated; not separately tested).
+- **Both tiers also need:** `typecheck:piz`, lint, architecture checks, a matched
+  client/core build, the no-plugin startup regression and a terminal smoke test
+  against those artifacts.
+- **A new failure blocks promotion.** To proceed, show the same failure on the
+  pre-merge commit and add it to the known-failures file with that evidence, or
+  get the operator's explicit waiver and record it. Passing a failing test once
+  with a longer timeout is neither.
+
+Sync branches still run plain `--full`.
+
+### Bootstrap test timeouts under plugin startup
+
+Each bootstrap test app seeds and starts the bundled plugins. Under Vitest, the
+plugin host command re-runs `process.argv[1]`, which is Vitest's own `forks.js`.
+Measured 2026-11-06, `app-unbound-resume` solo on tmpfs: 11-18s per test, about
+274s CPU for the file, failing the 5s limit. `fsync` is not the cause here. No
+fix is in place yet.
+
+- Moving `argv[1]` looks like a fix (under 3.5s per test) only because plugin
+  discovery then finds nothing. It breaks the plugin tests.
+- Making the host exit at once, by a missing script or an `--import` guard, does
+  not fix it: the tests still time out.
+- These tests rewrite manifests in the real `~/.zcode` plugin cache. A `--import`
+  or changed `argv[1]` experiment gets written there too, so don't run one
+  against the real home directory.
+- `mise` can hang under a fresh `HOME`: set one inside `mise exec`, not around it.
 
 - Selection: turbo `...[base]` gives the changed packages plus their dependents.
   Inside vitest packages, `vitest --changed <base>` narrows that to the test files
@@ -190,6 +241,13 @@ beating warm `tsc -b`; cold-cache figures are unmeasured. `--full
 --exclude-plugins` plans 14 packages against 21 for plain `--full`.
 
 ## Build and artifact checks
+
+Install from the repo root only. The root workspace and `pnpm-lock.yaml` own
+every CLI package. `apps/zcode-cli/pnpm-lock.yaml` is inherited and stale (no
+`@withfig/autocomplete`), and pnpm cannot regenerate it because the nested
+workspace lacks root packages such as `@zcode/model-option-map`. A frozen install
+inside `apps/zcode-cli` therefore always fails. Only the
+`e2e/compact-microcompact` Dockerfile copies it.
 
 Observed CLI scripts (not a complete clean-bootstrap recipe):
 

@@ -19,6 +19,7 @@ test("parseArgs: defaults, repeatable --package, exclusive --full/--base", () =>
     full: false,
     dryRun: false,
     excludePlugins: false,
+    promoteGate: false,
   });
   assert.equal(parseArgs(["--full", "--exclude-plugins"]).excludePlugins, true);
   const opts = parseArgs(["--package", "a", "--package", "b", "--no-retry", "--max-workers", "2"]);
@@ -95,4 +96,17 @@ test("classify: known vs new vs flaky vs stale", () => {
   });
   // No rerun available: a failure stays new, never silently flaky.
   assert.deepEqual(classify(new Map([["k", f]]), new Map(), new Set()).newFailures, ["k"]);
+});
+
+test("promoteTier: only frontend and docs paths take the selected tier", async () => {
+  const { promoteTier } = await import("./fork-tests.mjs");
+  assert.equal(promoteTier(["apps/zcode-cli/packages/tui-pi/src/footer.ts", "FORK.md", "docs/fork/x.md"]), "selected");
+  assert.equal(promoteTier(["apps/zcode-cli/packages/tui-pi/src/footer.ts", "apps/zcode-cli/packages/core/src/a.ts"]), "full");
+  assert.equal(promoteTier(["pnpm-lock.yaml"]), "full");
+  assert.equal(promoteTier(["apps/zcode-cli/packages/tui-picker/a.ts"]), "full");
+});
+
+test("missingBuildArtifacts: reports only absent paths", async () => {
+  const { missingBuildArtifacts, REQUIRED_BUILD_ARTIFACTS } = await import("./fork-tests.mjs");
+  assert.deepEqual(missingBuildArtifacts("/nonexistent"), REQUIRED_BUILD_ARTIFACTS);
 });
