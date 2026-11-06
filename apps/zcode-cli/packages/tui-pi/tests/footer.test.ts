@@ -151,26 +151,93 @@ test("activity row shows right-aligned turn elapsed only while a turn is active"
   }
 });
 
-test("quota failure badge joins the activity row right cluster until cleared", async () => {
-  const h = createHarness();
-  try {
-    // noteFailure 是 QuotaCluster 私有面；store.set 会经 onStateChanged
-    // 自动 updateFooter，这里直接驱动失败路径验证徽标落屏。
-    const quota = (h.app as unknown as {
-      quota: { noteFailure(cause: unknown): void };
-    }).quota;
-    quota.noteFailure(new Error("fetch failed"));
-    assert.match(strip(footerRows(h.app)[0] ?? ""), /quota !/);
-    // 读数与徽标并存：右簇读数在前、徽标殿后。
-    h.store.set("quotaBalance", [{ remainingPercent: 50, windowSeconds: 3600 }]);
-    h.store.set("quotaFetchedAt", Date.now());
-    const top = strip(footerRows(h.app)[0] ?? "");
-    assert.match(top, /1h: 50%.*quota !/);
-    // 成功落地清 episode（quota-cluster 写 quotaError=undefined 同路径）。
-    h.store.set("quotaError", undefined);
-    assert.doesNotMatch(strip(footerRows(h.app)[0] ?? ""), /quota !/);
-  } finally {
-    await h.stop();
+for (const isTTY of [true, false]) {
+  test(`quota rejection keeps a narrow badge and gates diagnostics (stderr.isTTY=${isTTY})`, async () => {
+    const diagnostics: string[] = [];
+    let fail = true;
+    const h = createHarness({
+      readUsageQuota: async () => {
+        if (fail) throw new Error("synthetic quota fetch failure");
+        return {
+          level: null,
+          limits: [{ type: "TOKENS_LIMIT", unit: 3, number: 1, percentage: 50, usageDetails: [] }],
+        };
+      },
+      stderr: {
+        isTTY,
+        write: (chunk: string) => { diagnostics.push(chunk); return true; },
+      } as NodeJS.WriteStream,
+      workspaceDirectory: "/tmp/p",
+    });
+    try {
+      // 初次请求的异步拒绝前种入陈旧读数，覆盖真实失败端口 → store → footer。
+      h.store.set("quotaBalance", [
+        { remainingPercent: 99, windowSeconds: 5 * 3600, resetAt: Date.now() / 1000 + 4 * 3600 },
+        { remainingPercent: 32, windowSeconds: 7 * 86400, resetAt: Date.now() / 1000 + 5 * 86400 },
+      ]);
+      h.store.set("quotaFetchedAt", Date.now());
+      h.store.set("status", "Ready.");
+      h.store.set("activeTurnStartedAtMs", Date.now() - 65_000);
+      h.store.set("activeTurnId", "turn-quota" as TurnId);
+      await h.flush(() => h.store.state.quotaError !== undefined);
+
+      const wide = strip(footerRows(h.app, 100)[0] ?? "");
+      assert.match(wide, /\d+m \d{2}s.*5h: 99%.*7d: 32%.*quota !$/);
+      for (const width of [30, 45]) {
+        const rows = footerRows(h.app, width);
+        const top = strip(rows[0] ?? "");
+        assert.match(top, /Ready\./);
+        assert.match(top, /quota !$/);
+        assert.doesNotMatch(top, /5h:|7d:|\d+m \d{2}s/);
+        assert.equal(rows.length, 2);
+        for (const row of rows) assert.ok(visibleWidth(row) <= width);
+      }
+      assert.equal(diagnostics.length, isTTY ? 0 : 1);
+      if (!isTTY) assert.match(diagnostics[0] ?? "", /quota refresh failed: synthetic quota fetch failure/);
+
+      // 徽标不能挤掉 status；空间连独立徽标都不够时保持原行与高度。
+      h.store.set("status", "Waiting for permission approval");
+      const crowded = footerRows(h.app, 45);
+      assert.match(strip(crowded[0] ?? ""), /Waiting for permission approval/);
+      assert.doesNotMatch(strip(crowded[0] ?? ""), /quota !/);
+      assert.equal(crowded.length, 2);
+      for (const row of crowded) assert.ok(visibleWidth(row) <= 45);
+
+      // 经公开结果入口 reset 后让真实读取成功，不手动清失败字段。
+      fail = false;
+      h.app.applyResult({ response: "", resetSessionProjection: true });
+      await h.flush(() => h.store.state.quotaBalance?.[0]?.remainingPercent === 50);
+      const recovered = strip(footerRows(h.app, 100)[0] ?? "");
+      assert.equal(h.store.state.quotaError, undefined);
+      assert.match(recovered, /1h: 50%/);
+      assert.doesNotMatch(recovered, /quota !/);
+      assert.equal(diagnostics.length, isTTY ? 0 : 1);
+    } finally {
+      await h.stop();
+    }
+  });
+}
+
+test("quota badge fallback respects the two-column gap and visible cwd width", async () => {
+  for (const cwd of ["/tmp/p", "/临时/目录"]) {
+    const h = createHarness({ workspaceDirectory: cwd });
+    try {
+      h.store.set("quotaBalance", [{ remainingPercent: 50, windowSeconds: 3600 }]);
+      h.store.set("quotaFetchedAt", Date.now());
+      const healthy = strip(footerRows(h.app, 80)[0] ?? "");
+      assert.match(healthy, /1h: 50%$/);
+      h.store.set("quotaError", "synthetic failure");
+      const minWidth = visibleWidth(cwd) + 2 + visibleWidth("quota !");
+      assert.equal(strip(footerRows(h.app, minWidth)[0] ?? ""), `${cwd}  quota !`);
+      const tooNarrow = footerRows(h.app, minWidth - 1);
+      assert.doesNotMatch(strip(tooNarrow[0] ?? ""), /quota !/);
+      assert.ok(strip(tooNarrow[0] ?? "").startsWith(cwd));
+      for (const row of tooNarrow) assert.ok(visibleWidth(row) <= minWidth - 1);
+      h.store.set("quotaError", undefined);
+      assert.equal(strip(footerRows(h.app, 80)[0] ?? ""), healthy);
+    } finally {
+      await h.stop();
+    }
   }
 });
 

@@ -68,7 +68,7 @@ export class ActivityLine extends Loader {
         : styledPwd
       : statusLine;
     // 行尾右簇：turn 级 elapsed 在前（每 spinner tick 重算，无独立定时器），
-    // 账号级额度簇殿后保持行尾锚点；余量不足整个右区一起丢（appendFooterRightZone）。
+    // 账号级额度簇殿后保持行尾锚点；无失败徽标时余量不足仍丢整个右区。
     const elapsed =
       this.turnStartMs === undefined
         ? undefined
@@ -78,10 +78,20 @@ export class ActivityLine extends Loader {
     const right = [elapsed, this.quotaText, this.quotaError]
       .filter((part): part is string => Boolean(part))
       .join(FOOTER_RIGHT_CLUSTER_GAP);
+    const fullLine = appendFooterRightZone({
+      line,
+      right: right || undefined,
+      theme: this.theme,
+      width,
+    });
+    // appendFooterRightZone 放不下时原样返回 line。TTY 下徽标是唯一失败
+    // 出口，不能被可选的陈旧读数/elapsed 连带挤掉；用同一宽度/间距规则
+    // 再尝试独立徽标，仍不截断 cwd/status，也不维护第二套适配判断。
+    if (fullLine !== line || !this.quotaError) return [fullLine];
     return [
       appendFooterRightZone({
         line,
-        right: right || undefined,
+        right: this.quotaError,
         theme: this.theme,
         width,
       }),

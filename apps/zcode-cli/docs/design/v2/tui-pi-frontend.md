@@ -170,6 +170,8 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     elapsed（`activeTurnStartedAtMs`，见 tui-turn-elapsed.md）在前，
     账号级额度簇殿后保持行尾锚点——账号级读数不占 meta 行的 session
     左区；`theme.dim`，间距 ≥2 列，余量不足丢右簇不截 status/spinner。
+    失败徽标例外：完整右簇放不下时，丢弃读数与 elapsed，单独尝试
+    `quota !`；徽标本身连同 ≥2 列间距也放不下时才退场，不挤占 cwd/status。
     pwd 与 status 两空格分隔；pwd 超宽
     行尾 "..." 截断（cwd 存活最久，status/额度先行收缩——与原 meta 行
     「cwd 在左区最前、最后丢」同优先级）。
@@ -251,6 +253,8 @@ pi 的 `TuiAltScreen` 全屏视口语义不同，不选）。
     `options.readUsageQuota` 缺席时静默）。失败可视出口（2026-11-05）：
     失败 episode 存续期间 footer 右簇在读数后挂 `quota !` 徽标
     （`store.quotaError`，成功落地或 reset 清除，不随读数 TTL 消失）；
+    窄窗下完整右簇放不下时优先保留独立徽标，不让陈旧读数/elapsed
+    迫使唯一 TTY 失败出口一起消失；cwd/status 与 ≥2 列间距仍优先。
     stderr 单行诊断只在 `options.stderr` 非 TTY（重定向到文件/管道）时
     接线——TTY 下裸写会落在输入框里且重绘清不掉，故 TTY 由徽标承接。
     诊断不刷屏（2026-10-28）：同一失败消息只诊断一次（消息变化或成功
