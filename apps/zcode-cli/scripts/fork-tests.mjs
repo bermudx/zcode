@@ -37,7 +37,7 @@
 // Exit: 0 = no new failures, 1 = new failures / package crash, 2 = script error.
 
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, statfsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, statfsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -193,11 +193,24 @@ function git(root, args) {
   return execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
 }
 
-function childEnv(tmp) {
+// Tests must not see the operator's ~/.zcode: it slows them and they write to it.
+function childEnv(tmp, home) {
   const env = { ...process.env };
   for (const key of STRIPPED_ENV) delete env[key];
   if (tmp) env.TMPDIR = tmp;
+  if (home) env.HOME = home;
   return env;
+}
+
+// Without these, whole classes of tests fail for reasons unrelated to the code.
+export const REQUIRED_BUILD_ARTIFACTS = [
+  "apps/zcode-cli/packages/contracts/dist/index.js",
+  "apps/zcode-cli/packages/browser-use-plugin/scripts/browser-client.mjs",
+  "packages/shared/dist/index.js",
+];
+
+export function missingBuildArtifacts(root) {
+  return REQUIRED_BUILD_ARTIFACTS.filter((path) => !existsSync(join(root, path)));
 }
 
 function tmpfsDir() {
@@ -285,8 +298,16 @@ export async function main(argv = process.argv.slice(2)) {
     const known = existsSync(knownPath) ? parseKnownFailures(readFileSync(knownPath, "utf8")) : new Set();
 
     tmp = opts.tmpfs && !opts.dryRun ? tmpfsDir() : undefined;
-    const env = childEnv(tmp);
     const runDir = mkdtempSync(join(tmpdir(), "piz-fork-tests-run-"));
+    const home = join(runDir, "home");
+    mkdirSync(home);
+    const env = childEnv(tmp, home);
+    if (opts.full && !opts.dryRun) {
+      const missing = missingBuildArtifacts(repoRoot);
+      if (missing.length) {
+        throw new Error(`build first, tests would fail on missing artifacts: ${missing.join(", ")} (docs/fork/verification.md "Promotion gate")`);
+      }
+    }
 
     let tasks = turboTestTasks(cliRoot, env, base ? `...[${base}]` : undefined);
     const all = base ? turboTestTasks(cliRoot, env) : tasks;

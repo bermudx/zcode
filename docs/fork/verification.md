@@ -116,6 +116,16 @@ written that file, pass `--base <last promoted sha>` (FORK.md names it).
 - **Full tier (`--full --exclude-plugins`):** anything else, including core,
   bootstrap, adapters, contracts, shared, CLI, dependencies and lockfiles. The
   list is an allowlist, so unrecognised paths land here.
+- **Build first, or results mean nothing.** Full mode refuses to start without
+  the workspace build (`turbo run build`), `browser-use-plugin` output
+  (`scripts/browser-client.mjs`; `turbo --force` if a cached build skipped it)
+  and root `tsc -b packages/shared packages/model-option-map`.
+- **Load changes results.** On 2026-11-06 bootstrap at `--max-workers 2` had no
+  new failures in about 8 minutes; the default worker count gave 31, with
+  `STACK_TRACE_ERROR` and count mismatches. Use `--max-workers 2` before calling a failure real.
+- **Runner isolation.** The runner gives tests a throwaway HOME, since seeding
+  and starting plugins from the real `~/.zcode` is the suspected cause of the
+  11-18s `app-unbound-resume` tests (about 1s isolated; not separately tested).
 - **Both tiers also need:** `typecheck:piz`, lint, architecture checks, a matched
   client/core build, the no-plugin startup regression and a terminal smoke test
   against those artifacts.

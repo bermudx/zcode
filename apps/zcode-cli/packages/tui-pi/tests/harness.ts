@@ -110,7 +110,8 @@ export const createHarness = (options: Partial<TuiOptions> = {}): Harness => {
     // env 不含 SHELL → `!` 走确定性回退链（bash -c、无 rc），隔离本机 rc
     // 与交互时序；交互分支的 rc 行为由 shell.test.ts 直接对 runShellCommand
     // 验证。
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+    // HOME 固定为 cwd：cwd 标签折叠成 `~`，长路径不会把活动行的 status 挤掉。
+    env: { PATH: process.env.PATH ?? "", HOME: process.cwd() },
     onExit: (code) => {
       exitCode = code;
     },

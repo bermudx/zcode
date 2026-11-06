@@ -4,41 +4,9 @@
 # as STALE so the entry gets removed. Add entries only with evidence that the same
 # test fails on main (baseline run), and record that evidence below.
 #
-# 2026-11-03 seed: bootstrap, run on 610d1fd3-equivalent bootstrap source (attach-v4
-# 0c6cc9f6 = main + cli-only changes), TMPDIR on tmpfs, isolated 8-file run, failing
-# identically with and without the attach-v4 FK fix. Cause NOT investigated:
-# - bundled-plugins-resilience / plugins / plugins-protocol / skills / visualize-skill-gate:
-#   bundled official-plugin cache seeding (ENOENT on browser-use seed paths, empty
-#   bundled skill lists) — plugin/skill bundle environment, all one class.
-# - v4-gateway 16MiB projection fault: STACK_TRACE_ERROR.
-# - telemetry-lifecycle MCP resources notification: empty notification list.
-# - session-persistence "initializes a direct app resume fallback…": deterministic 5s
-#   timeout, solo, at load ~5, with and without the FK fix (2026-11-03).
-# (session-persistence.test.ts:1135 failed on btrfs TMPDIR but passes on tmpfs — not listed.)
+# 2026-11-06 re-baseline: with a complete build and a throwaway HOME, these 2 fail on
+# 315d9ff1+policy and on 0c54f6a8 (three runs). Cause not investigated. The other 24 former
+# entries pass; they failed only when browser-use-plugin build output was missing.
 
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > continues when another process moves the target after the existence check
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > converges when another process completes the current seed during promotion
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > degrades a held seed lock to a usable previous version instead of failing startup
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > degrades a persistent transient seed failure when the target is absent
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > degrades an incomplete seed source to a usable previous version instead of failing startup
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > does not restore a fixed backup that may belong to an active replacement
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > falls back to a previous usable version when the new target cannot be promoted
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > keeps a stale but usable target when promotion fails
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > keeps an intact current cache discoverable when the seed lock times out
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > keeps degraded cache diagnostics through the ordinary plugin resolver
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > keeps session bootstrap alive when an incomplete seed source has no usable fallback cache
-@zcode/bootstrap :: tests/bundled-plugins-resilience.test.ts :: bundled official plugin cache resilience > shares one seed lock wait budget across all plugins
-@zcode/bootstrap :: tests/plugins-protocol.test.ts :: plugins protocol contracts > projects the host node_repl association for the official browser-use plugin
-@zcode/bootstrap :: tests/plugins.test.ts :: ZCode plugins > can disable one document plugin without disabling the other formats or search
-@zcode/bootstrap :: tests/plugins.test.ts :: ZCode plugins > default-enables skill-creator through the app-startup plugin discovery path
-@zcode/bootstrap :: tests/plugins.test.ts :: ZCode plugins > keeps every bundled plugin package, manifest, and seed version aligned
-@zcode/bootstrap :: tests/skills.test.ts :: inspectZCodeSkill > discovers bundled content skills through default-enabled official plugins
 @zcode/bootstrap :: tests/v4-gateway.test.ts :: projection 16MiB fault 与恢复 > oversize model event 原子拒绝并只终止一次，TurnError 与 cold hydrate 均保持可传输
-@zcode/bootstrap :: tests/visualize-skill-gate.test.ts :: visualize protocol-only skill discovery > list and inspect agree with includeVisualize=false
-@zcode/bootstrap :: tests/visualize-skill-gate.test.ts :: visualize protocol-only skill discovery > list and inspect agree with includeVisualize=true
-@zcode/bootstrap :: tests/visualize-skill-gate.test.ts :: visualize protocol-only skill discovery > list and inspect agree with includeVisualize=undefined
-@zcode/bootstrap :: tests/visualize-skill-gate.test.ts :: visualize protocol-only skill discovery > startup and workflow child agree with includeVisualize=false
-@zcode/bootstrap :: tests/visualize-skill-gate.test.ts :: visualize protocol-only skill discovery > startup and workflow child agree with includeVisualize=true
-@zcode/bootstrap :: tests/visualize-skill-gate.test.ts :: visualize protocol-only skill discovery > startup and workflow child agree with includeVisualize=undefined
 @zcode/bootstrap :: tests/zcode-protocol-telemetry-lifecycle.test.ts :: ZCode Protocol telemetry lifecycle > MCP 资源数组从入口发到新通知，旧 memory 内部事实不再发上协议
-@zcode/bootstrap :: tests/session-persistence.test.ts :: session persistence > initializes a direct app resume fallback before explicit hydration

@@ -105,3 +105,8 @@ test("promoteTier: only frontend and docs paths take the selected tier", async (
   assert.equal(promoteTier(["pnpm-lock.yaml"]), "full");
   assert.equal(promoteTier(["apps/zcode-cli/packages/tui-picker/a.ts"]), "full");
 });
+
+test("missingBuildArtifacts: reports only absent paths", async () => {
+  const { missingBuildArtifacts, REQUIRED_BUILD_ARTIFACTS } = await import("./fork-tests.mjs");
+  assert.deepEqual(missingBuildArtifacts("/nonexistent"), REQUIRED_BUILD_ARTIFACTS);
+});
