@@ -6108,12 +6108,20 @@ test("loads dotenv for app-server only in development runtime", async () => {
   assert.equal(ctx.stderr.output(), "");
 });
 
-test("rejects the removed acp command", async () => {
+test("routes acp to the ACP stdio adapter", async () => {
   const ctx = createContext(["acp"]);
-  const exitCode = await run(ctx);
+  let called: { argv: readonly string[]; version: string } | undefined;
+  const exitCode = await run(ctx, {
+    runAcpCommand: async (acpCtx, _options, _deps, version) => {
+      called = { argv: acpCtx.argv, version };
+      return 0;
+    },
+  });
 
-  assert.equal(exitCode, 1);
-  assert.match(ctx.stderr.output(), /Unknown command: acp/);
+  assert.equal(exitCode, 0);
+  assert.deepEqual(called?.argv, ["acp"]);
+  assert.equal(typeof called?.version, "string");
+  assert.equal(ctx.stderr.output(), "");
   assert.equal(ctx.stdout.output(), "");
 });
 

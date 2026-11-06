@@ -4,6 +4,7 @@
 // core 缺失时仍由 attach-command 经 PATH `zcode`（或 ZCODE_SERVER_BIN）拉起。
 import { runAttachCommand } from "./attach-command.js";
 import { parseAttachEntryArgs } from "./attach-entry-args.js";
+import { runAcpCommand } from "../acp/acp-command.js";
 
 declare const __CLI_VERSION__: string;
 
@@ -15,6 +16,7 @@ Usage:
   zcode-attach [--locale <en-US|zh-CN|auto>] [--no-color] [--verbose]
                [-c|--continue] [--resume <sessionId>] [--model <provider/model>]
                [--version] [-h|--help]
+  zcode-attach acp   stdio Agent Client Protocol (ACP v1) adapter
 
 Session selection (same semantics as the main CLI):
   (default)        start a NEW session
@@ -33,6 +35,21 @@ Environment:
 
 const main = async (): Promise<number> => {
   process.title = ATTACH_PROCESS_NAME;
+  // `piz acp`：同一份瘦客户端二进制里的 ACP stdio 入口。必须在 TUI argv
+  // 解析之前分流——ACL 的 cwd/会话由 ACP 客户端逐会话给出，不读 attach 旗标。
+  if (process.argv[2] === "acp") {
+    return await runAcpCommand(
+      {
+        argv: process.argv,
+        stderr: process.stderr,
+        stdin: process.stdin,
+        stdout: process.stdout,
+      },
+      { force: false, json: false, noColor: false, verbose: false },
+      { cwd: () => process.cwd(), env: process.env },
+      __CLI_VERSION__,
+    );
+  }
   const { action, initialModel, options, resume } = parseAttachEntryArgs(
     process.argv.slice(2),
   );

@@ -1007,6 +1007,7 @@ modules:
       - apps/zcode-cli/packages/cli/src/app-server-spawn.ts
       - apps/zcode-cli/packages/cli/src/protocol-lifecycle.ts
       - apps/zcode-cli/packages/cli/src/attach
+      - apps/zcode-cli/packages/cli/src/acp
     managed: true
     requires:
       - shared
@@ -1018,6 +1019,7 @@ modules:
       - apps/zcode-cli/packages/cli/src/app-server-spawn.ts
       - apps/zcode-cli/packages/cli/src/protocol-lifecycle.ts
       - apps/zcode-cli/packages/cli/src/attach/attach-command.ts
+      - apps/zcode-cli/packages/cli/src/acp/acp-command.ts
     layers:
       adapters: .
 

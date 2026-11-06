@@ -118,6 +118,13 @@ export interface RunDependencies extends PluginsCommandOverrides {
   logoutZCodeCli?: (options?: LogoutZCodeCliOptions) => ReturnType<typeof logoutZCodeCli>;
   runZCodeProtocolAgent?: (options?: RunZCodeProtocolAgentOptions) => Promise<void>;
   runTui?: typeof import("@zcode/tui").runTui;
+  /** ACP stdio 入口注入点：单测不拉起真实 core 与 stdio 连接。 */
+  runAcpCommand?: (
+    ctx: import("@zcode/shared-types").RunContext,
+    options: import("@zcode/shared-types").GlobalOptions,
+    deps: RunDependencies,
+    version: string,
+  ) => Promise<number>;
   skipUserConfig?: boolean;
   userConfigPath?: string;
   exitProcess?: (code: number) => void;
