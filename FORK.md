@@ -183,6 +183,12 @@ from patch branches — `promote-piz.sh` refuses otherwise. A branch-only
 promotion regresses the next main-based promotion (this happened once with
 the resume fix and is the reason the gate is mechanical).
 
+**Promotion gate (2026-11-06):** test scope follows the change. Frontend-only and
+docs-only promotions take the selected tier; everything else, plus sync, keeps full
+coverage. A new test failure blocks promotion unless baseline evidence or an
+explicit operator waiver is recorded. See
+[Promotion gate](docs/fork/verification.md#promotion-gate).
+
 Use pinned tools from `mise.toml`; see [build/check commands](docs/fork/verification.md).
 The full core build and `build:attach` thin client must be paired. Next install
 work must stage a versioned pair outside development worktrees, attach full Git
