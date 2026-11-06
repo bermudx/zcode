@@ -444,6 +444,13 @@ export class AttachRuntime {
     for (const listener of this.sessionBoundListeners) listener(handle);
   }
 
+  /** core 确认释放后撤销恢复资格，避免重连重新打开已关闭的会话。 */
+  unregisterSession(handle: AttachSessionHandle): void {
+    if (this.sessions.get(handle.sessionId) !== handle) return;
+    this.sessions.delete(handle.sessionId);
+    if (this.current === handle) this.current = undefined;
+  }
+
   get currentSession(): AttachSessionHandle | undefined {
     return this.current;
   }

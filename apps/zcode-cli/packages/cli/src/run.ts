@@ -33,6 +33,7 @@ import { runTuiCommand } from "./tui-command.js";
 import { resolveTuiStartupLocale } from "./tui-startup-locale.js";
 import { createWorkspacePathSuggestionProvider } from "./tui-workspace-paths.js";
 import { runAttachCommand } from "./attach/attach-command.js";
+import { runAcpCommand } from "./acp/acp-command.js";
 import {
   DEFAULT_CLI_WORKFLOW_MODE,
   normalizeWorkflowModeOption,
@@ -740,6 +741,15 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       );
     case "skills":
       return await runSkillsCommand(ctx, options, commandDeps, parsed.positionals.slice(1));
+    case "acp":
+      // ACP v1 stdio 适配器：与 `piz acp`（zcode-attach 入口）同一实现，
+      // 走 share-core，不启动 TUI。
+      return await (commandDeps.runAcpCommand ?? runAcpCommand)(
+        ctx,
+        options,
+        commandDeps,
+        version,
+      );
     case "tui":
       if (parsed.values["shared-core"] === true) {
         return await runAttachCommand(
