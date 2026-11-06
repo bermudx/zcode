@@ -558,7 +558,12 @@ export function getModelUsageContextTokens(usage?: ModelUsage): number | undefin
   const inputTokens = getModelUsageInputWindowTokens(usage);
   const outputTokens = nonNegativeInteger(usage.outputTokens) ?? 0;
   const contextTokens = (inputTokens ?? 0) + outputTokens;
-  if (contextTokens > 0) {
+  // input 缺报时不能退化成 output-only 读数：ctx 水位量的是发给 provider 的
+  // 完整上下文，output 本身只是其中一小段——直接采纳会把仪表打成 ~0% 的假
+  // 水位（output-only usage 实测 449/262k ≈ 0.2%）。input 不可知就让位给
+  // provider total（它本来就含全量），total 也缺则返回 undefined，调用方
+  // 保留上一个可信读数。
+  if (inputTokens !== undefined && contextTokens > 0) {
     return contextTokens;
   }
 

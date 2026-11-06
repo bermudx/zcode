@@ -43,6 +43,32 @@ runtime `contextUsed > 0` 时仍优先使用 runtime；只有冷恢复 fallback 
 boundary 或不完整历史继续沿用既有 assistant tokens fallback。boundary 水位不携带压缩前
 请求的 cache，与热态 `CompactCompleted` 一致。
 
+## TUI live 读数裁决（tui / tui-pi footer ctx 仪表）
+
+ctx 仪表量的是**主会话发给 provider 的最新上下文水位**，不是 session 里最近一次
+模型调用。sidecar（`session_title`、`compact`、目标校验、subagent、`tool_internal`
+嵌套调用）在**同一 sessionId** 上发 `model_complete`，session 闸门拦不住；三条
+消费链必须用同一谓词 `shouldModelCompleteUpdateContextUsed`（contracts
+`events/event-reducer.ts`）裁决：
+
+```text
+querySource 存在  -> 仅 "main_turn" 采纳
+querySource 缺失  -> 旧事件兼容：stopReason !== "tool_internal" 才采纳
+```
+
+- 采纳方：EventReducer 的 `projection.contextUsed`、V4 `ProductProjection` 的
+  `contextWindowState.usedTokens`、TUI live 通道的 `contextUsage`（`contextUsed`、
+  `contextWindow`、最近请求 usage 与「response received」状态文本同闸）。sidecar
+  多在回合间 idle 触发，漏闸后没有 main_turn 覆盖时读数会一直停在 sidecar 的小
+  请求上（实测 244/262k 渲染成 0.1%）。
+- 用量口径共用 `getModelUsageContextTokens` = input-window + output。input 缺报
+  时 output-only 读数不可作水位——让位 provider `totalTokens`，total 也缺则放弃
+  本次更新、保留上一个可信读数。
+- `compact_boundary`（及 `session_compacted` 嵌套形态）落定后 live 通道立即把
+  读数降到 `truePostCompactTokenCount ?? postCompactTokenCount`，与冷恢复同口径，
+  不等下一个 `model_complete`。当前 core 只 live 发射 `compact_boundary`；
+  `session_compacted` 分支为 reducer 回放完整性保留。
+
 ## Provider registry 热更新
 
 设置页修改当前模型的 `contextWindow` 后，provider registry 应将新容量同时应用到已有

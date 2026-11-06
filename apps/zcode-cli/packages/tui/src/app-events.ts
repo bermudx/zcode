@@ -447,12 +447,14 @@ function applyModelCompleteEvent(
         contextWindow,
       }));
     }
+    // 「response received」同样是主会话表面：sidecar 完结（标题、compact、
+    // 校验）不能盖掉当前状态行，否则 idle 中会闪一条 sidecar 的 token 读数。
+    setStatus(
+      nextUsage
+        ? copy.model.responseReceivedWithTokens(formatNumber(nextUsage.totalTokens))
+        : copy.model.responseReceived,
+    );
   }
-  setStatus(
-    nextUsage
-      ? copy.model.responseReceivedWithTokens(formatNumber(nextUsage.totalTokens))
-      : copy.model.responseReceived,
-  );
 }
 
 function applyStreamRecoveryTailDiscardedEvent(

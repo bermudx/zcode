@@ -261,6 +261,8 @@ test("sidecar model_complete on the main session never moves the ctx meter or us
 
   assert.deepEqual(h.state.contextUsage, settled);
   assert.equal(h.state.usage?.inputTokens, 216_330);
+  // sidecar 完结也不能盖状态行——idle 里闪一条 sidecar 的 token 读数是同款假水位。
+  assert.equal(h.state.statuses.length, 1);
 });
 
 test("main_turn model_complete updates ctx used with input+output and refreshes the window", () => {
@@ -275,6 +277,28 @@ test("main_turn model_complete updates ctx used with input+output and refreshes 
   );
   assert.equal(h.state.contextUsage.contextUsed, 216_779);
   assert.equal(h.state.contextUsage.contextWindow, 262_144);
+});
+
+test("an output-only main_turn usage keeps the previous reading (input 缺报不可作水位)", () => {
+  const h = harness();
+  h.apply(
+    modelComplete({
+      querySource: "main_turn",
+      stopReason: "tool-calls",
+      usage: { inputTokens: 216_330, outputTokens: 449 },
+      contextWindow: 262_144,
+    }),
+  );
+  // provider 缺报 input 时 output 只是上下文里的一小段，不能把仪表打回 ~0%。
+  h.apply(
+    modelComplete({
+      querySource: "main_turn",
+      stopReason: "stop",
+      usage: { inputTokens: 0, outputTokens: 449 },
+      contextWindow: 262_144,
+    }),
+  );
+  assert.equal(h.state.contextUsage.contextUsed, 216_779);
 });
 
 test("a legacy main-session model_complete without querySource still updates the meter", () => {

@@ -4977,7 +4977,10 @@ export class ProductProjection {
       }
     }
     if (!isMainTurn) return [...deltas, ...retryClearDeltas];
-    const usedTokens = getModelUsageContextTokens(usage) ?? 0;
+    // 读数不可得（如 output-only usage）时保留上一个可信水位，与
+    // getModelUsageContextTokens 的「放弃本次读数」语义一致——不写 0 造更低水位。
+    const usedTokens =
+      getModelUsageContextTokens(usage) ?? this.contextWindowState.usedTokens;
     this.contextWindowState.usedTokens = usedTokens;
     const maxTokens = payload.contextWindow ?? this.contextWindowState.maxTokens;
     const cumulative = this.snapshot.usage.cumulative;
