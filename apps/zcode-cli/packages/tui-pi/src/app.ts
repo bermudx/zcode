@@ -233,7 +233,11 @@ export class PiTuiApp {
     this.quota = new QuotaCluster(this.store, {
       readUsageQuota: this.options.readUsageQuota,
       requestRender: () => this.tui.requestRender(),
-      stderr: this.options.stderr,
+      // TTY stderr 与屏幕同一终端：TUI 全屏期间裸写会落在输入框里且重绘
+      // 清不掉（provider-balance「非 TTY 才 stderr」同分工）。TTY 下失败
+      // 由 footer `quota !` 徽标承接；stderr 重定向到文件/管道时仍写
+      // 单行诊断。
+      stderr: this.options.stderr.isTTY ? undefined : this.options.stderr,
     });
     this.quota.start();
     this.unsubscribeSession = this.options.subscribeSessionEvents?.((event) =>
@@ -766,6 +770,7 @@ export class PiTuiApp {
       cwdLabel: this.cwdLabel,
       idleHint: this.copy.input.activeStatusHint,
       quotaText: this.quota.renderQuotaText(Date.now()),
+      quotaError: this.quota.renderQuotaError(),
       state: this.store.state,
     });
   }

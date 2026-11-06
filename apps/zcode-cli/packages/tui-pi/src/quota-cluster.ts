@@ -4,8 +4,11 @@
 //   · turn 沿（busy 下降沿）授权一次刷新尝试——仍受 ≥30s 防抖（与空闲轮询
 //     同一闸门），快速连击 turn 不放大请求频率
 //   · 读数 30min TTL：超龄读数从 footer 消失，不悬挂假数据
-//   · 失败保留上次读数并写单行 stderr 诊断（诊断走 stderr，不占协议
-//     stdout）；同一失败消息只诊断一次，失败后空闲拍退避 60s
+//   · 失败保留上次读数；失败 episode 存续期间 footer 右簇挂 `quota !`
+//     徽标（renderQuotaError），成功落地或 reset 清除。stderr 单行诊断
+//     只在调用方确认安全（非 TTY 重定向）时接线——TTY 下裸写会砸进
+//     输入框且无法被重绘清除；同一失败消息只诊断一次，失败后空闲拍
+//     退避 60s
 //     （FAILURE_BACKOFF_MS，provider-balance 同分工：权威拍仍尝试）
 // options.readUsageQuota 缺席（旧 core / 未接线）时整个簇静默。
 
@@ -31,7 +34,7 @@ export interface QuotaClusterPorts {
   readUsageQuota?: () => Promise<UsageQuotaSnapshot>;
   /** 刷新落地后请求重绘（倒计时/百分比随帧更新）。 */
   requestRender?: () => void;
-  /** 诊断通道（TuiOptions.stderr）；缺席时失败静默。 */
+  /** 诊断通道（TuiOptions.stderr，仅非 TTY 重定向时接线）；缺席时失败只走 footer 徽标。 */
   stderr?: { write(chunk: string): void };
   /** 测试注入时钟与定时器；缺省走全局。 */
   now?: () => number;
@@ -44,7 +47,6 @@ export class QuotaCluster {
   private inflight = false;
   private lastAttemptAt = 0;
   private lastFailureAt: number | undefined;
-  private lastFailureMessage: string | undefined;
   private idleTimer: unknown = undefined;
   private readonly ports: QuotaClusterPorts;
 
@@ -96,10 +98,10 @@ export class QuotaCluster {
     void readUsageQuota()
       .then((snapshot) => {
         if (epoch !== this.generation) return;
-        // 成功即恢复：清退避窗口与诊断去重（provider-balance「成功让空闲拍
-        // 恢复」同义）——同消息的下一段失败是新事件，允许再次诊断。
+        // 成功即恢复：清退避窗口与失败 episode（provider-balance「成功让
+        // 空闲拍恢复」同义）——同消息的下一段失败是新事件，允许再次诊断。
         this.lastFailureAt = undefined;
-        this.lastFailureMessage = undefined;
+        this.store.set("quotaError", undefined);
         const balance = quotaSnapshotToBalance(snapshot);
         // 空读数与失败同态：保留上次读数，不把 footer 闪成空串。
         if (balance.length === 0) {
@@ -118,6 +120,16 @@ export class QuotaCluster {
         if (epoch !== this.generation) return;
         this.inflight = false;
       });
+  }
+
+  /**
+   * footer 失败徽标：自上次成功落地以来存在失败 episode 时返回 `quota !`。
+   * TTY 下 stderr 诊断被 app 层闸掉（裸写 stderr 会落在输入框里且重绘
+   * 清不掉），这是失败在交互界面上的唯一可视出口；episode 持续期间常驻，
+   * 不随读数 TTL 消失——陈旧读数 + 徽标比静默悬挂更诚实。
+   */
+  renderQuotaError(): string | undefined {
+    return this.store.state.quotaError === undefined ? undefined : "quota !";
   }
 
   /**
@@ -141,6 +153,7 @@ export class QuotaCluster {
     this.lastFailureAt = undefined;
     this.store.set("quotaBalance", undefined);
     this.store.set("quotaFetchedAt", undefined);
+    this.store.set("quotaError", undefined);
     this.refresh();
   }
 
@@ -174,15 +187,18 @@ export class QuotaCluster {
 
   private noteFailure(cause: unknown): void {
     this.lastFailureAt = this.now();
-    const stderr = this.ports.stderr;
-    if (!stderr) return;
     const message = cause instanceof Error ? cause.message : String(cause);
+    // store.quotaError 双职：footer `quota !` 徽标的 episode 存续标记
+    // （store.set 经 onStateChanged → updateFooter 落屏）+ stderr 诊断的
+    // 按消息去重键。无诊断通道（TTY 下 app 不接线 stderr）时徽标仍亮。
     // 同一失败只诊断一次（provider-balance reportFailure 走文件日志 +
     // 非 TTY 才 stderr 的同精神；这里没有文件面，收敛为按消息去重）：
     // 永久失败（无凭据）每 60s 一行会把终端刷成噪声墙。消息变化或成功
-    // （lastFailureMessage 在落地读数时重置）后重新允许一次诊断。
-    if (message === this.lastFailureMessage) return;
-    this.lastFailureMessage = message;
-    stderr.write(`[tui-pi] quota refresh failed: ${message}\n`);
+    // （quotaError 在落地读数时清除）后重新允许一次诊断。
+    if (message !== this.store.state.quotaError) {
+      const stderr = this.ports.stderr;
+      if (stderr) stderr.write(`[tui-pi] quota refresh failed: ${message}\n`);
+    }
+    this.store.set("quotaError", message);
   }
 }

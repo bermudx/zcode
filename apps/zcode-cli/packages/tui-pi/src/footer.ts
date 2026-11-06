@@ -27,6 +27,7 @@ const FOOTER_RIGHT_CLUSTER_GAP = "  ";
 
 export class ActivityLine extends Loader {
   private quotaText: string | undefined;
+  private quotaError: string | undefined;
   private turnStartMs: number | undefined;
   private branch: string | undefined;
   private cwdLabel = "";
@@ -47,6 +48,10 @@ export class ActivityLine extends Loader {
     this.quotaText = quotaText;
   }
 
+  setQuotaError(quotaError: string | undefined): void {
+    this.quotaError = quotaError;
+  }
+
   setTurnStartMs(turnStartMs: number | undefined): void {
     this.turnStartMs = turnStartMs;
   }
@@ -63,18 +68,30 @@ export class ActivityLine extends Loader {
         : styledPwd
       : statusLine;
     // 行尾右簇：turn 级 elapsed 在前（每 spinner tick 重算，无独立定时器），
-    // 账号级额度簇殿后保持行尾锚点；余量不足整个右区一起丢（appendFooterRightZone）。
+    // 账号级额度簇殿后保持行尾锚点；无失败徽标时余量不足仍丢整个右区。
     const elapsed =
       this.turnStartMs === undefined
         ? undefined
         : formatElapsedMs(Date.now() - this.turnStartMs);
-    const right = [elapsed, this.quotaText]
+    // 徽标殿后：陈旧读数与失败标记并存时读数在前、`quota !` 收尾，
+    // 一眼可辨「显示的是旧数据」。
+    const right = [elapsed, this.quotaText, this.quotaError]
       .filter((part): part is string => Boolean(part))
       .join(FOOTER_RIGHT_CLUSTER_GAP);
+    const fullLine = appendFooterRightZone({
+      line,
+      right: right || undefined,
+      theme: this.theme,
+      width,
+    });
+    // appendFooterRightZone 放不下时原样返回 line。TTY 下徽标是唯一失败
+    // 出口，不能被可选的陈旧读数/elapsed 连带挤掉；用同一宽度/间距规则
+    // 再尝试独立徽标，仍不截断 cwd/status，也不维护第二套适配判断。
+    if (fullLine !== line || !this.quotaError) return [fullLine];
     return [
       appendFooterRightZone({
         line,
-        right: right || undefined,
+        right: this.quotaError,
         theme: this.theme,
         width,
       }),
@@ -139,6 +156,7 @@ export class StatusFooter extends Container {
     cwdLabel: string;
     idleHint: string;
     quotaText?: string;
+    quotaError?: string;
     state: AppStore["state"];
   }): void {
     const { state } = input;
@@ -151,6 +169,7 @@ export class StatusFooter extends Container {
     this.activity.setMessage(state.status || (active ? input.idleHint : ""));
     this.activity.setLocation({ branch: state.workspaceGitBranch, cwdLabel: input.cwdLabel });
     this.activity.setQuota(input.quotaText);
+    this.activity.setQuotaError(input.quotaError);
     this.meta.setState(state);
   }
 

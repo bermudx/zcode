@@ -1,7 +1,7 @@
 // 额度簇：quota.ts 纯格式化（provider-balance 同构）+ QuotaCluster 刷新
 // 策略（空闲轮询、turn 沿授权刷新、min-interval 防抖、30min TTL、失败保留
-// 上次读数 + stderr 诊断按消息去重、失败后空闲拍退避、readUsageQuota 缺席
-// 静默）。
+// 上次读数 + footer 失败徽标、stderr 诊断按消息去重、失败后空闲拍退避、
+// readUsageQuota 缺席静默）。
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -202,13 +202,16 @@ test("cluster: failure keeps the last reading and writes a stderr diagnostic", a
   await flush();
   const firstText = h.renderQuotaText(clock.nowMs);
   assert.ok(firstText);
+  assert.equal(h.renderQuotaError(), undefined);
   stderrChunks.length = 0;
   fail = true;
   clock.advance(76_000);
   await flush();
-  // 读数保留，不闪空；诊断落 stderr。
+  // 读数保留，不闪空；诊断落 stderr，footer 挂失败徽标。
   assert.deepEqual(store.state.quotaBalance?.length, 1);
   assert.ok(stderrChunks.join("").includes("quota refresh failed: 502 bad gateway"));
+  assert.equal(store.state.quotaError, "502 bad gateway");
+  assert.equal(h.renderQuotaError(), "quota !");
   h.dispose();
 });
 
@@ -263,13 +266,15 @@ test("cluster: same failure is diagnosed once; idle ticks back off; success re-a
   assert.equal(stderrChunks.length, 2);
   assert.ok(stderrChunks[1]?.includes("502"));
 
-  // 成功重置去重与退避；随后同消息再次失败允许再诊断一次。
+  // 成功重置去重、退避与失败徽标；随后同消息再次失败允许再诊断一次。
   fail = false;
   clock.advance(31_000);
   h.onTurnSettled();
   await flush();
   assert.equal(fetches, 5);
   assert.ok(store.state.quotaBalance?.length === 1);
+  assert.equal(store.state.quotaError, undefined);
+  assert.equal(h.renderQuotaError(), undefined);
   fail = true;
   message = "no coding-plan provider with an API key in the registry";
   clock.advance(31_000);
