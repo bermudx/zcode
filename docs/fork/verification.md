@@ -242,6 +242,13 @@ beating warm `tsc -b`; cold-cache figures are unmeasured. `--full
 
 ## Build and artifact checks
 
+Install from the repo root only. The root workspace and `pnpm-lock.yaml` own
+every CLI package. `apps/zcode-cli/pnpm-lock.yaml` is inherited and stale (no
+`@withfig/autocomplete`), and pnpm cannot regenerate it because the nested
+workspace lacks root packages such as `@zcode/model-option-map`. A frozen install
+inside `apps/zcode-cli` therefore always fails. Only the
+`e2e/compact-microcompact` Dockerfile copies it.
+
 Observed CLI scripts (not a complete clean-bootstrap recipe):
 
 ```sh
