@@ -4,6 +4,17 @@ Reviewed the uncommitted ACP implementation in
 `/home/daniel/.herdr/worktrees/piz/worktree-silver-river-2147`, based on
 `c2d393f7`, on 2026-11-04.
 
+**Historical review, not the current merge recommendation.** After the operator
+reported the merge, local history confirmed the ACP frontend and subsequent
+review fixes are in `main`, including merge `0c54f6a8`. Source inspection
+confirmed `createLane()` now awaits `runtime.connect()`, uses a fresh-client
+connector, and session operations use `runtime.currentClient()`. Question
+forms now validate with `AskUserQuestionInputSchema` and use option labels.
+The three code findings below describe the earlier candidate, not those
+current implementations. Tests and end-to-end acceptance were not rerun for
+this follow-up; it does not establish the status of the remaining acceptance
+items.
+
 **Recommendation: retain and fix; do not merge as-is.** This is a different
 implementation from the previously reviewed `origin/arena/26022f30-piz`
 candidate. Reusing `AttachRuntime` and `AttachSessionHandle` is preferable to
