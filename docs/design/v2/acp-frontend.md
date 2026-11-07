@@ -32,6 +32,25 @@ session/close          ──►  v4 stop + session/close ───────�
 permission callbacks; it does not re-implement the share-core client. `session/new`
 ignores `mcpServers` and logs the count — core owns its MCP configuration.
 
+## Use with T3 Code
+
+In T3 Code, open **Settings → Providers → Add provider → Show more → Local ACP
+command** and select the environment where the installed CLI lives:
+
+- Display name: `piz`.
+- Executable: the absolute path to the installed `piz` wrapper.
+- Arguments: one row containing `acp`.
+
+Do not put `piz acp` in the executable field or use `~`/`$HOME`: T3 launches
+the executable directly and does not expand shell expressions. The wrapper
+selects the installed matched client/core pair; do not point at development
+bundles or the old `zcode` command.
+
+Select this provider for a new thread, choose a reported model, and send a
+short prompt. T3 starts the adapter; no separate TUI is needed. Authentication
+remains in the existing agent configuration, not an ACP sign-in flow.
+These are setup instructions, not evidence that real T3 acceptance passed.
+
 ## Ownership and event order
 
 Single owners, in order:
