@@ -20,3 +20,24 @@ cancel/rollback behavior and resource cost need separate evidence.
 
 No test prompts, model requests, provider changes, credential reads,
 builds, restarts, installations, or network fetches were performed.
+
+## Operator follow-up: visible response
+
+The operator then supplied a T3 screenshot showing a completed response,
+the `GLM-5.3-Flash` composer selection, and an open mention picker listing
+past threads and workspace files. The response describes the current
+repository, branch, and untracked backup directory. This is operator-supplied
+evidence of a basic working conversation, beyond the earlier catalog check.
+The operator also reports that mentions work; the screenshot alone shows
+the picker, not delivery of a selected conversation's contents to the model.
+
+This does not demonstrate MCP support. Source inspection of
+`acp-agent.ts` confirms that `session/new` logs and ignores client-provided
+`mcpServers`. `acp-project.ts` separately accepts text and resource prompt
+blocks, so receiving context is not evidence of callable T3 tools.
+
+Recommendation: treat basic ACP use as working and MCP integration as a
+separate optional feature, needed if the agent must call T3's tools. Before
+calling the whole integration accepted, retain the outstanding permission,
+cancel/resume, signing/allowance and resource checks. No MCP implementation
+or new model turn was started in response to the operator's question.
