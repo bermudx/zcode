@@ -2319,7 +2319,8 @@ test("interactionStatus 端口：三种面板 blocked/resolved，无 handler 不
       ],
     );
 
-    // 无 handler 早退：面板从未渲染，端口不得触发。
+    // 无 handler 早退：面板从未渲染，端口不得触发（userInput 与 permission
+    // 两条路由都要钉——早退守卫在端口调用之前是各自独立的）。
     const before = calls.length;
     core.sendRequest("srv-nh", "interaction/requestUserInput", {
       requestId: "req-port-nh",
@@ -2327,7 +2328,18 @@ test("interactionStatus 端口：三种面板 blocked/resolved，无 handler 不
       sessionId: "other-session",
       toolName: "AskUserQuestion",
     });
+    core.sendRequest("srv-nhp", "interaction/requestPermission", {
+      input: {},
+      options: PERMISSION_OPTIONS,
+      reason: "approval",
+      requestId: "req-port-nhp",
+      riskLevel: "low",
+      sessionId: "other-session",
+      toolCallId: "tc-9",
+      toolName: "Bash",
+    });
     await waitFor(() => core.responses.some((r) => r.id === "srv-nh"));
+    await waitFor(() => core.responses.some((r) => r.id === "srv-nhp"));
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(calls.length, before, "no port calls without a rendered panel");
 

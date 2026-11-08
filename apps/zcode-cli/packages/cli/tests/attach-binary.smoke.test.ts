@@ -183,15 +183,15 @@ test("zcode-attach.cjs 在真实 pty 中发出 OSC 7501 idle（绑定 + 干净�
 
   const OSC_IDLE = "\u001b]7501;state=idle:app=piz\u001b\\";
   const modeToken = /\b(build|yolo|plan)\b/;
-  const deadline = Date.now() + WAIT_MS;
   let logText = "";
   let exited: number | null | undefined;
   child.on("exit", (code) => {
     exited = code;
   });
   try {
-    // 首帧 + 绑定 idle 都到位后再驱动退出。
-    while (Date.now() < deadline) {
+    // 首帧 + 绑定 idle 都到位后再驱动退出（boot 与 exit 各自独享 45s 预算）。
+    const bootDeadline = Date.now() + WAIT_MS;
+    while (Date.now() < bootDeadline) {
       logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
       if (logText.includes(OSC_IDLE) && modeToken.test(logText)) break;
       await delay(POLL_MS);
@@ -202,7 +202,8 @@ test("zcode-attach.cjs 在真实 pty 中发出 OSC 7501 idle（绑定 + 干净�
     child.stdin?.write("\u0003");
     await delay(400);
     child.stdin?.write("\u0003");
-    while (Date.now() < deadline && exited === undefined) {
+    const exitDeadline = Date.now() + WAIT_MS;
+    while (Date.now() < exitDeadline && exited === undefined) {
       await delay(POLL_MS);
     }
     logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";

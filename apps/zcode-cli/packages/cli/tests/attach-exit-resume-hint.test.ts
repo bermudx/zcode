@@ -119,6 +119,8 @@ interface AttachOptions {
   submitInsideTui?: string;
   /** 假 stdout 标记为 TTY：OSC 7501 reporter 只在 piz 入口 + TTY 激活。 */
   stdoutIsTTY?: boolean;
+  /** 传入 --resume <id> 且假 core 对 session/resume 报错 → 走 catch 路径。 */
+  failResume?: string;
 }
 
 async function startHarness(): Promise<{
@@ -135,7 +137,12 @@ async function startHarness(): Promise<{
   );
   await mkdir(dirname(socketPath), { recursive: true });
   let creates = 0;
+  // failResume：session/resume 显式报错（--resume 走 catch 路径的触发器）。
+  let failResumeId: string | undefined;
   const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/resume" && failResumeId !== undefined) {
+      throw new Error(`session not found: ${failResumeId}`);
+    }
     if (request.method === "session/create") {
       creates += 1;
       return makeSnapshot(creates === 1 ? FIRST_ID : SECOND_ID);
@@ -185,13 +192,16 @@ async function startHarness(): Promise<{
         return options.runTuiResult ?? 0;
       },
     } as never;
+    failResumeId = options.failResume;
     const exitCode = await runAttachCommand(
       ctx,
       {} as never,
       deps,
       "0.0.0-test",
       "pi",
-      undefined,
+      options.failResume !== undefined
+        ? ({ continueSession: false, resumeSessionId: options.failResume } as never)
+        : undefined,
       undefined,
       options.attachHerdrAgent,
     );
@@ -292,6 +302,26 @@ test("OSC 7501 门：monolith 入口（TTY）与非 TTY（piz 入口）都零字
     assert.ok(!piped.stdout.includes("\u001b]7501;"), "non-TTY stdout must not emit OSC 7501");
     // 同一 harness 内两次 runAttach 共享 create 计数，id 不定；只钉形状。
     assert.match(piped.stdout, /^Resume this session with:\npiz --resume sess_exit_hint_\w+\n$/);
+  } finally {
+    await harness.destroy();
+  }
+});
+
+test("启动失败（--resume 未知会话）→ catch 路径发一条 OSC 7501 error 终态", async () => {
+  const harness = await startHarness();
+  try {
+    const result = await harness.runAttach({
+      attachHerdrAgent: "piz",
+      stdoutIsTTY: true,
+      failResume: "sess_missing",
+    });
+    assert.equal(result.exitCode, 1);
+    // reporter 从未绑定会话（无 idle）；catch 的 finish("error") 是唯一字节。
+    const expectedMsg = Buffer.from("session not found: sess_missing", "utf8").toString("base64");
+    assert.equal(
+      result.stdout,
+      `\u001b]7501;state=error:app=piz:msg=${expectedMsg}\u001b\\`,
+    );
   } finally {
     await harness.destroy();
   }

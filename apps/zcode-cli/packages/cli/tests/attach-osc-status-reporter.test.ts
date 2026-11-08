@@ -104,6 +104,39 @@ test("formatOsc7501：msg 超 160 字符先截断再编码", () => {
   );
 });
 
+test("formatOsc7501：msg 换行折叠为空格（协议要求单行）", () => {
+  const formatted = formatOsc7501({
+    state: "error",
+    app: "piz",
+    msg: "line1\nline2\r\nline3",
+  });
+  const msgValue = formatted
+    .slice(PREFIX.length, -ST.length)
+    .split(":")
+    .find((field) => field.startsWith("msg="))!
+    .slice(4);
+  assert.equal(
+    Buffer.from(msgValue, "base64").toString("utf8"),
+    "line1 line2 line3",
+  );
+});
+
+test("formatOsc7501：截断按 code point，不劈开代理对（无 U+FFFD）", () => {
+  const formatted = formatOsc7501({
+    state: "error",
+    app: "piz",
+    msg: "😀".repeat(200),
+  });
+  const msgValue = formatted
+    .slice(PREFIX.length, -ST.length)
+    .split(":")
+    .find((field) => field.startsWith("msg="))!
+    .slice(4);
+  const decoded = Buffer.from(msgValue, "base64").toString("utf8");
+  assert.equal(decoded, "😀".repeat(160));
+  assert.ok(!decoded.includes("\uFFFD"), "must not contain U+FFFD");
+});
+
 test("bind 上报 idle；换绑退订旧句柄 sink 并再次 idle", () => {
   const { reporter, chunks } = makeReporter();
   const first = fakeSession("sess-1");
@@ -213,6 +246,22 @@ test("晚到的 settle 不覆盖 done/error 终态", () => {
   );
   reporter.interactionResolved();
   assert.deepEqual(chunks, [`${PREFIX}state=done:app=piz${ST}`]);
+
+  // 同一守卫的 error 半边：turn_error 后的晚到 settle 同样不得覆盖。
+  chunks.length = 0;
+  session.emit(makeEvent(SessionEventType.TurnStarted, {}));
+  reporter.interactionBlocked("question", "Pick one?");
+  session.emit(
+    makeEvent(SessionEventType.TurnError, {
+      error: { message: "provider 500", type: "model" },
+    }),
+  );
+  reporter.interactionResolved();
+  assert.deepEqual(chunks, [
+    `${PREFIX}state=working:app=piz${ST}`,
+    `${PREFIX}state=blocked:kind=question:app=piz:msg=${Buffer.from("Pick one?", "utf8").toString("base64")}${ST}`,
+    `${PREFIX}state=error:app=piz:msg=${Buffer.from("provider 500", "utf8").toString("base64")}${ST}`,
+  ]);
 });
 
 test("写失败一次性禁用：单次 onError，之后静默", () => {
@@ -255,6 +304,22 @@ test("finish：绕过去重再发一次，随后退订、事件不再上报", ()
 
   session.emit(makeEvent(SessionEventType.TurnStarted, {}));
   assert.equal(chunks.length, 1, "no emissions after finish");
+});
+
+test("finish 后 interaction 端口与换绑也静默（runtime.close 窗口）", () => {
+  const { reporter, chunks } = makeReporter();
+  const session = fakeSession("sess-1");
+  reporter.bind(session);
+  session.emit(makeEvent(SessionEventType.TurnStarted, {}));
+  reporter.finish("idle");
+  chunks.length = 0;
+
+  // runtime.close() 期间迟到的面板 settle / 新面板 / 重连换绑都不得再写。
+  reporter.interactionResolved();
+  reporter.interactionBlocked("permission", "permission: Bash");
+  reporter.bind(fakeSession("sess-2"));
+  session.emit(makeEvent(SessionEventType.TurnComplete, { resultType: "success" }));
+  assert.deepEqual(chunks, [], "no emissions of any kind after finish");
 });
 
 test("finish(error) 带 msg（截断复用 format 的 160 上限）", () => {

@@ -745,8 +745,9 @@ blocked/done/error。
 
 wire 格式:`ESC ] 7501 ; state=<s>[:kind=<k>][:app=piz][:msg=<base64>]
 ESC \`。state ∈ idle|working|done|blocked|error;kind ∈ permission|
-question(auth 预留,暂无来源);msg 是单行 UTF-8 文本,base64 编码,
-超 160 字符先截断(base64 字母表不含 `:`,定界安全)。
+question(auth 预留,暂无来源);msg 是单行 UTF-8 文本,base64 编码——
+换行先折叠为空格,超 160 个 code point 截断(不劈代理对;base64 字母
+表不含 `:`,定界安全)。
 
 状态所有权与 herdr reporter 同一裁决:reporter 只翻译,不新建状态机。
 两个输入源:
@@ -785,14 +786,23 @@ TUI 渲染。OSC 字节与 TUI 帧共享同一 fd:OSC 序列不含光标操作,�
 原子解析,帧间/帧内插入都安全。
 
 激活面:仅 piz 专用入口（`attachHerdrAgent==="piz"`）且
-`ctx.stdout.isTTY`;monolith 入口与非 TTY（管道/CI/`script` 回放）一
-字节不发。与 herdr reporter 并存、互不依赖;herdr 的 execFile 通道保
-留不动（herdr 当前只认那条路）。
+`ctx.stdout.isTTY`;monolith 入口与非 TTY stdout（管道/CI 捕获）一
+字节不发。注意 util-linux `script` 下 stdout 是 pty,isTTY 为真,
+照常发射（pty 冒烟即依赖此）。与 herdr reporter 并存、互不依赖;
+herdr 的 execFile 通道保留不动（herdr 当前只认那条路）。
 
 退出语义:`runTui` 正常返回（TUI 已拆屏、终端回主屏）后先发
 `state=idle` 再打退出续接提示——进程将消失,残留 done/blocked 角标会
-误导。启动/运行失败路径(catch)若 reporter 已建,发 `state=error` 后
-随进程退出;信号退出走 reap-then-reraise,到不了这里,接受残留。
+误导。`finish` 之后 reporter 静默:runtime.close() 窗口里迟到的
+interaction settle、换绑、事件一律不再写字节（exit idle 是终态,不得
+被 stale 状态覆盖）。启动/运行失败路径(catch)若 reporter 已建,发
+`state=error` 后随进程退出;信号退出走 reap-then-reraise,到不了
+这里,接受残留。
+
+已知限制（review 记录,按需跟进）:并发 interaction 面板（core 侧
+按会话串行,理论情形）时 blocked/resolved 只反映最近一次转换;应答
+grace 期（2s）内同 requestId 的 re-announce 会先 blocked 再立即
+resolved,角标闪一次即自愈。
 
 ### 验收
 
@@ -800,12 +810,15 @@ TUI 渲染。OSC 字节与 TUI 帧共享同一 fd:OSC 序列不含光标操作,�
   `state=idle:app=piz`,退出 0 后再发一次 idle;字节为合法 OSC
   （ST 终止),屏幕无可见乱码。
 - 单测（`tests/attach-osc-status-reporter.test.ts`):字节格式
-  （base64/160 截断/定界/字段序）、事件→状态映射（含 resultType
-  分支与 turn_error msg）、interaction 端口（三种 blocked kind、
-  settle 回落、done/error 不被晚到 settle 覆盖）、去重、写失败
-  禁用 + 单次诊断、finish 后不再发、bind 换绑重发 idle。
-- 接线单测:isTTY/入口 gate（非 TTY 假流零字节）;router 端口在
-  serve 期间回调 blocked/resolved,无 handler 早退不触发。
+  （base64/160 code point 截断不劈代理对/换行折叠单行化/定界/字段
+  序）、事件→状态映射（含 resultType 分支与 turn_error msg）、
+  interaction 端口（三种 blocked kind、settle 回落、done/error 不被
+  晚到 settle 覆盖）、去重、写失败禁用 + 单次诊断、finish 后任何
+  来源（事件/端口/换绑）都不再发、bind 换绑重发 idle。
+- 接线单测:isTTY/入口 gate（非 TTY 假流零字节）;启动失败 catch
+  路径发 `state=error`（--resume 未知会话驱动）;router 端口在
+  serve 期间回调 blocked/resolved,permission 与 userInput 两条路由
+  的无 handler 早退都不触发。
 
 ### 输入提交迁移到 v4 `v4/command`（2026-11-01 实现）
 

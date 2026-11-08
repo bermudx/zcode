@@ -24,17 +24,19 @@ export interface Osc7501Record {
   msg?: string;
 }
 
-/** OSC 7501 序列化：state 必选，kind/app 明文，msg 截断后 base64
- *  （字母表不含 `:`，定界安全；协议不允许转义序列携带任意原文）。 */
+/** OSC 7501 序列化：state 必选，kind/app 明文，msg 单行化后截断再 base64
+ *  （字母表不含 `:`，定界安全；协议要求 msg 是单行人类可读文本——换行
+ *  折叠为空格；截断按 code point，避免劈开代理对产生 U+FFFD）。 */
 export function formatOsc7501(record: Osc7501Record): string {
   const fields: string[] = [`state=${record.state}`];
   if (record.kind !== undefined) fields.push(`kind=${record.kind}`);
   if (record.app !== undefined) fields.push(`app=${record.app}`);
   if (record.msg !== undefined) {
+    const singleLine = record.msg.replace(/[\r\n]+/g, " ");
     const bounded =
-      record.msg.length > MSG_MAX_CHARS
-        ? record.msg.slice(0, MSG_MAX_CHARS)
-        : record.msg;
+      singleLine.length > MSG_MAX_CHARS
+        ? Array.from(singleLine).slice(0, MSG_MAX_CHARS).join("")
+        : singleLine;
     fields.push(`msg=${Buffer.from(bounded, "utf8").toString("base64")}`);
   }
   return `${OSC_7501_PREFIX}${fields.join(":")}${OSC_7501_SUFFIX}`;
@@ -58,6 +60,7 @@ export class AttachOscStatusReporter {
   private lastState: Osc7501State | undefined;
   private lastKey: string | undefined;
   private disabled = false;
+  private finished = false;
 
   constructor(options: {
     app: string;
@@ -73,6 +76,9 @@ export class AttachOscStatusReporter {
    *  覆盖初始 attach、/new、/resume、/fork 与断线重连的换句柄。换绑是
    *  状态重置点：绕过 dedup 强制重发 idle（上一个 idle 可能已隔整个回合）。 */
   bind(session: OscBoundSession): void {
+    // finish 之后进程在退出路上：晚到的换绑/重连不再产生任何字节（否则
+    // exit idle 会被 stale working 覆盖成假角标）。
+    if (this.finished) return;
     this.unsubscribe?.();
     this.turnActive = false;
     this.unsubscribe = session.addSink(this.onEvent);
@@ -95,12 +101,15 @@ export class AttachOscStatusReporter {
     this.emit(this.turnActive ? { state: "working" } : { state: "idle" });
   }
 
-  /** 收尾：进程退出前最后一次上报（绕过去重——拆屏后上下文已变），并退订。 */
+  /** 收尾：进程退出前最后一次上报（绕过去重——拆屏后上下文已变），并退订。
+   *  之后 reporter 静默：runtime.close() 窗口里迟到的 interaction settle、
+   *  换绑、事件一律不再写字节（exit idle 是终态，不得被 stale 状态覆盖）。 */
   finish(state: Osc7501State, msg?: string): void {
     if (!this.disabled) {
       this.lastKey = undefined;
       this.emit({ state, ...(msg !== undefined ? { msg } : {}) });
     }
+    this.finished = true;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
   }
@@ -148,7 +157,7 @@ export class AttachOscStatusReporter {
 
   /** 带内字节按 (state,kind,msg) 去重：不丢不乱序，重复上报没有意义。 */
   private emit(record: Osc7501Record): void {
-    if (this.disabled) return;
+    if (this.disabled || this.finished) return;
     const key = `${record.state}|${record.kind ?? ""}|${record.msg ?? ""}`;
     if (key === this.lastKey) return;
     this.lastKey = key;

@@ -808,3 +808,14 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   审批/AskUserQuestion 的 blocked（翻译层由单测 + 路由测试覆盖，idle 字节
   由 pty 冒烟覆盖）、Ghostty 端到端角标渲染。Not promoted；待 review +
   merge 决定。
+- Review fix-pass（两个独立 subagent review，无 blocker；finding 均已
+  在分支修复）：① `finish` 后 reporter 完全静默——原实现只退订事件
+  sink，runtime.close() 窗口里迟到的 interaction settle/换绑仍可把
+  exit idle 覆盖成 stale working（`finished` 门禁在 emit 层，端口、
+  换绑、事件一律挡住）；② msg 单行化——换行折叠为空格、160 截断改按
+  code point（不劈代理对），对齐协议与 spec 的「单行」承诺。补钉：
+  catch 路径 `finish("error")` 的接线回归（--resume 未知会话驱动）、
+  permission 侧无 handler 早退不触发端口、晚到 settle 守卫的 error
+  半边、astral 截断/换行折叠字节回归、pty 冒烟 boot/exit 各自独享
+  45s 预算。已知限制记入 spec（并发面板、grace 期 re-announce 闪烁）；
+  spec 勘误：`script` 是 pty、照常发射，非「零字节」路径。
