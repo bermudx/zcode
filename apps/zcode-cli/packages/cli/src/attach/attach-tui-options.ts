@@ -54,7 +54,19 @@ export type AttachRuntimeLogger = {
   info?: (message: string, context?: Record<string, unknown>) => void;
 };
 
+/** interaction 面板状态端口（OSC 7501 reporter 等外部投影挂这里）：
+ *  面板真正渲染给用户期间 blocked，settle（应答送达/面板被撤，含 abort
+ *  与异常路径的 finally）后 resolved。无 handler 早退不触发——面板从未
+ *  出现。blocked 的真相在 interaction 路由而非 permission_requested 事件：
+ *  事件区分不了"服务端自动应答、从未渲染"。 */
+export interface AttachInteractionStatusPort {
+  interactionBlocked(kind: "permission" | "question", message?: string): void;
+  interactionResolved(): void;
+}
+
 export interface AttachRuntimeOptions {
+  /** interaction 面板状态端口（可选；piz 入口的 OSC 7501 reporter）。 */
+  interactionStatus?: AttachInteractionStatusPort;
   /** 测试注入点：默认 connectAttachClient。 */
   connect?: (socketPath: string) => Promise<AttachClient>;
   /** 测试注入点：默认 ensureServer 结果里的 socketPath 直连。 */
@@ -312,12 +324,22 @@ export class AttachRuntime {
       parsed.data,
       handle.getMode() ?? "build",
     );
-    return await handle.serveInteraction(parsed.data.requestId, async (signal) =>
-      brokerResultToPermissionResponse(
-        (await callback(request, { signal })) as PermissionBrokerResult,
-        parsed.data.options,
-      ),
+    this.options.interactionStatus?.interactionBlocked(
+      "permission",
+      `permission: ${parsed.data.toolName}`,
     );
+    try {
+      return await handle.serveInteraction(
+        parsed.data.requestId,
+        async (signal) =>
+          brokerResultToPermissionResponse(
+            (await callback(request, { signal })) as PermissionBrokerResult,
+            parsed.data.options,
+          ),
+      );
+    } finally {
+      this.options.interactionStatus?.interactionResolved();
+    }
   }
 
   /** AskUserQuestion/ExitPlanMode：elicitation 走 requestUserInput，不是 requestPermission。
@@ -340,12 +362,31 @@ export class AttachRuntime {
     if (!handle || !callback || !translated) {
       return NO_INTERACTION_HANDLER_USER_INPUT_RESPONSE;
     }
-    return await handle.serveInteraction(parsed.data.requestId, async (signal) =>
-      brokerResultToUserInputResponse(
-        (await callback(translated.request, { signal })) as PermissionBrokerResult,
-        translated,
-      ),
-    );
+    // AskUserQuestion 是提问（question wizard）；plan_approval/ExitPlanMode
+    // 走普通审批面板，语义是 permission。
+    if (translated.kind === "ask_user_question") {
+      this.options.interactionStatus?.interactionBlocked(
+        "question",
+        parsed.data.prompt,
+      );
+    } else {
+      this.options.interactionStatus?.interactionBlocked(
+        "permission",
+        "plan approval",
+      );
+    }
+    try {
+      return await handle.serveInteraction(
+        parsed.data.requestId,
+        async (signal) =>
+          brokerResultToUserInputResponse(
+            (await callback(translated.request, { signal })) as PermissionBrokerResult,
+            translated,
+          ),
+      );
+    } finally {
+      this.options.interactionStatus?.interactionResolved();
+    }
   }
 
   private onDisconnected(): void {

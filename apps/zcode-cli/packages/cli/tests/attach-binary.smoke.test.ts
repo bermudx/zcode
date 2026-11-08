@@ -15,6 +15,10 @@ import { test } from "node:test";
 // 依赖产物与 POSIX 工具，环境不满足时 t.skip：
 //   - linux only（`script -qefc` 为 util-linux 语法；macOS script(1) 参数不同 —— 残余风险已知）
 //   - 需先 `pnpm --filter @zcode/cli build`（产物不在源码仓库内）
+//
+// OSC 7501 冒烟（spec「OSC 7501 程序状态上报」）：同一打包产物在真实 pty 里
+// 必须发出绑定 idle 序列；双 Ctrl-C 干净退出后必须再发一条退出 idle（先于
+// 退出续接提示），证明字节真实落进终端流，而非仅单元层可用。
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ATTACH_BIN = join(PKG_ROOT, "dist", "zcode-attach.cjs");
@@ -130,6 +134,101 @@ test("zcode-attach.cjs boots under a pty, spawns core, renders TUI status line",
       } catch {
         /* core 已退出 */
       }
+    }
+    await delay(300);
+    await rm(base, { force: true, recursive: true });
+  }
+});
+
+test("zcode-attach.cjs 在真实 pty 中发出 OSC 7501 idle（绑定 + 干净退出）", async (t) => {
+  if (process.platform !== "linux" || !hasScript()) {
+    t.skip("needs Linux + util-linux `script` for a real pty");
+    return;
+  }
+  if (!existsSync(ATTACH_BIN) || !existsSync(CORE_BIN)) {
+    t.skip("dist/zcode-attach.cjs / dist/zcode.cjs not built");
+    return;
+  }
+
+  const base = await mkdtemp(join(tmpdir(), "zcode-attach-osc-"));
+  const workspace = join(base, "workspace");
+  const home = join(base, "home");
+  const dataDir = join(base, "data");
+  const binDir = join(base, "bin");
+  const logPath = join(base, "client.log");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(home, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+
+  const serverShim = join(binDir, "zcode-core");
+  await writeFile(serverShim, `#!/bin/sh\nexec "${process.execPath}" "${CORE_BIN}" "$@"\n`, "utf8");
+  await chmod(serverShim, 0o755);
+
+  const child = spawn(
+    "script",
+    ["-qefc", `cd '${workspace}' && '${process.execPath}' '${ATTACH_BIN}'`, logPath],
+    {
+      detached: true,
+      env: {
+        ...process.env,
+        HOME: home,
+        ZCODE_DATA_BASE_DIR: dataDir,
+        ZCODE_SERVER_BIN: serverShim,
+      },
+      // stdin 要可写：双 Ctrl-C 经 script 转发进 pty 驱动干净退出。
+      stdio: ["pipe", "ignore", "ignore"],
+    },
+  );
+  child.unref();
+
+  const OSC_IDLE = "\u001b]7501;state=idle:app=piz\u001b\\";
+  const modeToken = /\b(build|yolo|plan)\b/;
+  const deadline = Date.now() + WAIT_MS;
+  let logText = "";
+  let exited: number | null | undefined;
+  child.on("exit", (code) => {
+    exited = code;
+  });
+  try {
+    // 首帧 + 绑定 idle 都到位后再驱动退出。
+    while (Date.now() < deadline) {
+      logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
+      if (logText.includes(OSC_IDLE) && modeToken.test(logText)) break;
+      await delay(POLL_MS);
+    }
+    assert.ok(logText.includes(OSC_IDLE), "pty log should contain the bind-time OSC 7501 idle");
+
+    // 双 Ctrl-C：TUI 决策折叠后干净退出（exit 0），退出 idle 先于续接提示。
+    child.stdin?.write("\u0003");
+    await delay(400);
+    child.stdin?.write("\u0003");
+    while (Date.now() < deadline && exited === undefined) {
+      await delay(POLL_MS);
+    }
+    logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
+    assert.equal(exited, 0, "double Ctrl-C should exit the TUI cleanly");
+    const exitIdleIndex = logText.indexOf(OSC_IDLE, logText.indexOf(OSC_IDLE) + 1);
+    const hintIndex = logText.indexOf("Resume this session with:");
+    assert.ok(exitIdleIndex > 0, "pty log should contain a second (exit) OSC 7501 idle");
+    assert.ok(hintIndex > exitIdleIndex, "exit resume hint must follow the exit OSC 7501 idle");
+  } finally {
+    terminate(child.pid);
+    const socketsDir = join(dataDir, ".zcode", "v2", "sockets");
+    try {
+      for (const name of await readdir(socketsDir)) {
+        if (name.endsWith(".pid")) {
+          const pid = Number((await readFile(join(socketsDir, name), "utf8")).trim());
+          if (Number.isInteger(pid) && pid > 0) {
+            try {
+              process.kill(pid, "SIGTERM");
+            } catch {
+              /* core 已退出 */
+            }
+          }
+        }
+      }
+    } catch {
+      /* sockets dir not created */
     }
     await delay(300);
     await rm(base, { force: true, recursive: true });

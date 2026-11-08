@@ -768,3 +768,43 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   the effort option. Lesson recorded in AGENTS.md.
 - Not done: live T3 check (option visible, set works, model-switch finding 2).
   No push, no core restart.
+
+### 2026-11-08 — OSC 7501 程序状态上报（patch/osc7501-status）
+
+- Operator brief: "piz reports status through OSC 7501"
+  （[mitchellh.com/writing/program-status-osc7501](https://mitchellh.com/writing/program-status-osc7501)）。
+  piz attach 客户端把生命周期经终端带内 `ESC ] 7501 ; … ESC \` 报告：
+  idle（绑定/换绑/用户取消）、working（turn_started）、done（turn_complete
+  success）、blocked（kind=permission/question，interaction 面板渲染期）、
+  error（turn_error、`error_*` resultType、启动失败）；正常退出先发 idle 再打
+  退出续接提示。spec 先行（tui-attach-shared-core.md「OSC 7501 程序状态
+  上报」+ 根 GLOSSARY 词条）。
+- 实现与 herdr reporter 同一裁决（状态所有权在会话事件流 + interaction
+  路由，reporter 只翻译）：新 `osc-status-reporter.ts`（带内字节不丢不
+  乱序→无重试/心跳，(state,kind,msg) 去重，msg 160 字符截断后 base64，
+  写失败一次性禁用）；`AttachRuntime` 新增可选 `interactionStatus` 端口
+  （routePermission/routeUserInput 围绕 serveInteraction——blocked 的真相
+  在面板渲染，不在 permission_requested 事件，自动应答未渲染不计）；
+  attach-command 仅 piz 入口 + `ctx.stdout.isTTY` 激活，monolith/管道零
+  字节。herdr execFile 通道保留不动（herdr 当前只认那条路）。
+- Verification：cli **709/709 + attach-resume-target 11/11**（fork-tests
+  selected，全绿）；adapters signing 13/13；bootstrap socket-listener 4/4；
+  cli `tsc --noEmit` 0 错、oxlint 0/0；`architecture:check --changed --base
+  a971df4e` 0 违规。真实 pty 冒烟（util-linux `script` + 隔离
+  ZCODE_DATA_BASE_DIR + 真实 core spawn）：绑定 idle 字节落在终端流、双
+  Ctrl-C 干净退出 0 后退出 idle 先于续接提示（新回归
+  `attach-binary.smoke.test.ts` 第二用例）。
+- 新 worktree bootstrap 教训（本分支在全新 worktree 上完成）：只做 root
+  `pnpm install --frozen-lockfile`（文档已写明 nested 安装必败）；中途失败
+  的 `--dir apps/zcode-cli` 安装会**损坏包级链接**（contracts/node_modules
+  丢 zod → tui-pi tsc 出 implicit-any 假错），frozen 重装即修复，root TS
+  6.0.2 无需 5.9.3 遮蔽。SEA 资产测试还需 root `packages/shared`、
+  `packages/model-option-map` dist 与 `@zcode/node-repl-host`、
+  `@zcode/browser-use-plugin` 构建，全新 worktree 缺这些输出时 3 个 SEA
+  测试红（clean main 同红，环境性）。`architecture:check` 默认 origin/main
+  base 在本仓是分叉线，会把 attach-session.ts 813 行误报为新增——须显式
+  `--base <分支点>`。
+- Not exercised live（unverified）：真实 GLM 回合的 working/done、真实
+  审批/AskUserQuestion 的 blocked（翻译层由单测 + 路由测试覆盖，idle 字节
+  由 pty 冒烟覆盖）、Ghostty 端到端角标渲染。Not promoted；待 review +
+  merge 决定。

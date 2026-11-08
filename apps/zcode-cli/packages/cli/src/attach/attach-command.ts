@@ -36,6 +36,7 @@ import {
   resolveAttachResumeTarget,
 } from "./attach-tui-options.js";
 import { createAttachHerdrReporter } from "./herdr-reporter.js";
+import { AttachOscStatusReporter } from "./osc-status-reporter.js";
 
 /** herdr 上报诊断：常开但 ≥60s 节流一行 stderr。TUI 全屏模式下偶发
  *  一行可接受，herdr 长时间不可用时也不至刷屏。 */
@@ -97,6 +98,8 @@ export const runAttachCommand = async (
   // herdr reporter 报 --agent piz。monolith 入口进程是 zcode，不传。
   attachHerdrAgent?: "piz",
 ): Promise<number> => {
+  // catch 路径也要上报终态 error，故声明在 try 外。
+  let oscStatusReporter: AttachOscStatusReporter | undefined;
   try {
     const workspaceDirectory = (deps.cwd ?? process.cwd)();
     const env = deps.env ?? process.env;
@@ -117,11 +120,31 @@ export const runAttachCommand = async (
     const startupLocale =
       deps.resolveAttachStartupLocale?.({ deps, options, workingDirectory: workspaceDirectory }) ??
       resolveLocale(options.locale, options.detectedLocale);
+    // OSC 7501 状态上报（spec「OSC 7501 程序状态上报」）：piz 入口 + stdout
+    // 是 TTY 才激活；monolith 入口与管道/CI 零字节。与 herdr reporter 并存、
+    // 互不依赖——这是终端带内通道，任何实现了消费的终端/复用器可用，不
+    // 依赖 herdr env。写失败一次性禁用（至多一行诊断，无需节流）。
+    const oscReporter =
+      attachHerdrAgent === "piz" && ctx.stdout.isTTY
+        ? new AttachOscStatusReporter({
+            app: "piz",
+            write: (chunk) => {
+              ctx.stdout.write(chunk);
+            },
+            onError: (error) => {
+              ctx.stderr.write(
+                `osc7501 status disabled: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            },
+          })
+        : undefined;
+    oscStatusReporter = oscReporter;
     const { socketPath } = await ensureServer({ env, version, workspace });
     // 传输诊断（丢畸形行/socket 错误等）经节流 stderr logger 接进客户端连接
     // 与 runtime 自身；不传则传输层全部 optional-chain 成静默 no-op。
     const transportLogger = createAttachTransportLogger(ctx.stderr);
     const runtime = new AttachRuntime({
+      interactionStatus: oscReporter,
       socketPath,
       workspace: workspaceRef,
       // core 死亡后的重连必须重跑 ensureServer：pid/socket 已 stale，原子
@@ -146,6 +169,11 @@ export const runAttachCommand = async (
         : undefined;
     if (herdrReporter) {
       runtime.onSessionBound((handle) => herdrReporter.bind(handle));
+    }
+    // OSC reporter 与 herdr 同一绑定点：初始 attach、/new、/resume、/fork、
+    // 断线重连换句柄都经 onSessionBound，reporter 只认当前句柄的事件。
+    if (oscReporter) {
+      runtime.onSessionBound((handle) => oscReporter.bind(handle));
     }
     const client = await runtime.connect();
     try {
@@ -330,6 +358,9 @@ export const runAttachCommand = async (
         writeClipboardText:
           deps.writeClipboardText ?? createNodeClipboardTextWriter({ stdout: ctx.stdout }),
       });
+      // OSC 7501 收尾：TUI 已拆屏、终端回主屏，先把带内状态归位（进程即将
+      // 退出，不残留 done/blocked 角标），再打退出续接提示。
+      oscReporter?.finish("idle");
       // 退出续接提示（spec「退出续接提示」）：只在正常退出（exit 0）且有绑定
       // 会话时打——此时 TUI 已拆屏、终端已恢复，stdout 回到主屏缓冲。非 0 退出
       // 没有可续接的会话；信号退出走 reap-then-reraise，到不了这里。
@@ -351,6 +382,10 @@ export const runAttachCommand = async (
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // 失败退出：reporter 已建则上报终态 error 再随进程退出；协议版本不匹配
+    // 等启动失败同样成立（用户需要看到 pane 报错）。信号退出走
+    // reap-then-reraise，到不了这里，接受残留。
+    oscStatusReporter?.finish("error", message);
     ctx.stderr.write(`Error: ${message}\n`);
     if (options.verbose && error instanceof Error && error.stack) {
       ctx.stderr.write(`${error.stack}\n`);
