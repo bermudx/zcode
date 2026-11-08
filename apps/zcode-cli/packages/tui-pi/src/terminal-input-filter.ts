@@ -43,6 +43,18 @@ export class QuietProcessTerminal extends ProcessTerminal {
     onInput: (data: string) => void,
     onResize: () => void,
   ): void {
+    // terminal-startup 的启动查询有意不回拨 raw（canonical 窗口内迟到的终端
+    // 应答会回显）。但 lib 在 super.start() 里按 stdin.isRaw 记录 wasRaw，
+    // 漏写的 raw 被记成"用户原状态"，stop() 随之把真实终端"恢复"成 raw——
+    // piz 退出后终端滞留 raw 模式（交互 shell 下个 prompt 自行重设才恢复）。
+    // 先把行纪律拨回 canonical 再进 super.start()：wasRaw 记回真实状态，
+    // 退出才落回 cooked。拨动与 super.start() 的 setRawMode(true) 在同一
+    // 同步块内完成，对外无 canonical 窗口。启动前本就 raw 的嵌套场景无法
+    // 与"我们漏写的 raw"区分，一律按 canonical 记——CLI 退出恢复 cooked
+    // 是正确默认。
+    if (typeof process.stdin.setRawMode === "function" && process.stdin.isRaw) {
+      process.stdin.setRawMode(false);
+    }
     super.start(
       (data) => {
         if (!isStrayTerminalResponse(data)) onInput(data);

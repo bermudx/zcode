@@ -26,6 +26,16 @@ const CORE_BIN = join(PKG_ROOT, "dist", "zcode.cjs");
 const WAIT_MS = 45_000;
 const POLL_MS = 250;
 
+// script(1) 的 typescript 头部会写一行 COMMAND 头：原样包含 `cd '<workspace>'`
+// 与可执行文件全路径（如 …/build/… 下的 checkout）。workspace 子串与协作
+// 模式词元（build/plan/yolo）因此能在首帧渲染前误配放行——^C 会落进 TUI
+// 接管前的 canonical 窗口被行纪律转成 SIGINT，进程尚无 handler，直接 exit
+// 130（2026-11-08 promote-gate 实测）。pty 内容判定一律剥掉头行。
+const ptyBody = (text: string): string => text.slice(text.indexOf("\n") + 1);
+// terminal.start() 在 setRawMode(true) 之后才写 bracketed-paste 开启序列：
+// 它在日志里出现即证明 raw 已接管、SIGINT 守护已挂（头行不含 ESC，无法伪造）。
+const RAW_MODE_MARKER = "[?2004h";
+
 const hasScript = (): boolean => {
   try {
     execFileSync("script", ["--version"], { stdio: "ignore" });
@@ -114,7 +124,7 @@ test("zcode-attach.cjs boots under a pty, spawns core, renders TUI status line",
   const modeToken = /\b(build|yolo|plan)\b/;
   try {
     while (Date.now() < deadline) {
-      logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
+      logText = existsSync(logPath) ? ptyBody(await readFile(logPath, "utf8")) : "";
       pid = await serverPid();
       // footer pwd 行渲染 workspace 路径 + 模式词元 = TUI 首帧已挂载。
       if (logText.includes(workspace) && pid !== undefined && modeToken.test(logText)) break;
@@ -192,11 +202,17 @@ test("zcode-attach.cjs 在真实 pty 中发出 OSC 7501 idle（绑定 + 干净�
     // 首帧 + 绑定 idle 都到位后再驱动退出（boot 与 exit 各自独享 45s 预算）。
     const bootDeadline = Date.now() + WAIT_MS;
     while (Date.now() < bootDeadline) {
-      logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
-      if (logText.includes(OSC_IDLE) && modeToken.test(logText)) break;
+      logText = existsSync(logPath) ? ptyBody(await readFile(logPath, "utf8")) : "";
+      if (
+        logText.includes(OSC_IDLE) &&
+        logText.includes(RAW_MODE_MARKER) &&
+        modeToken.test(logText)
+      )
+        break;
       await delay(POLL_MS);
     }
     assert.ok(logText.includes(OSC_IDLE), "pty log should contain the bind-time OSC 7501 idle");
+    assert.ok(logText.includes(RAW_MODE_MARKER), "pty log should show terminal.start took over (raw mode)");
 
     // 双 Ctrl-C：TUI 决策折叠后干净退出（exit 0），退出 idle 先于续接提示。
     child.stdin?.write("\u0003");
@@ -206,7 +222,7 @@ test("zcode-attach.cjs 在真实 pty 中发出 OSC 7501 idle（绑定 + 干净�
     while (Date.now() < exitDeadline && exited === undefined) {
       await delay(POLL_MS);
     }
-    logText = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
+    logText = existsSync(logPath) ? ptyBody(await readFile(logPath, "utf8")) : "";
     assert.equal(exited, 0, "double Ctrl-C should exit the TUI cleanly");
     const exitIdleIndex = logText.indexOf(OSC_IDLE, logText.indexOf(OSC_IDLE) + 1);
     const hintIndex = logText.indexOf("Resume this session with:");
