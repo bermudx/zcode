@@ -42,3 +42,16 @@ or terminal input were run.
 A fix should pass available width into question layout and reserve the actual
 wrapped height of each row. It needs an isolated rendering check with long
 question text and descriptions, including narrow terminal widths.
+
+## Upstream attribution
+
+Follow-up inspection found no diff for either `app-question-panel.tsx` or
+`app-approval-panel.tsx` between local HEAD and the local `upstream/main` ref.
+That ref matches `UPSTREAM`: `a9fe401eede6e6e5e01be9048679c206fe6f02d9`.
+The fixed `height: 10` also exists in the older upstream base `aac47556`.
+The suspected layout defect is therefore inherited, not introduced by a fork
+edit to those files. This does not replace a live reproduction.
+
+No fetch was performed. A hosted web search for the upstream question-panel
+file returned no results, so whether newer remote upstream work fixes it is
+unverified.
