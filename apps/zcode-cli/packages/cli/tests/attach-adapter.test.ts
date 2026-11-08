@@ -1214,6 +1214,11 @@ test("applyStatePatch 仅思考档位变化也补发 ModelSelected（其他客�
   assert.equal(modelSelected(), 1);
   handle.applyStatePatch({ thoughtLevel: { available: [], current: "high", enabled: true } });
   assert.equal(modelSelected(), 2);
+  // TUI 从事件读档位：事件必须携带最新档位，否则终端显示被清空。
+  const last = events.at(-1) as {
+    payload: { modelSelection?: { options?: { reasoningLevel?: string } } };
+  };
+  assert.equal(last.payload.modelSelection?.options?.reasoningLevel, "high");
 });
 
 // 回归证据（2026-10-22，`piz` 实测）：/new 走 session/create + session/subscribe
