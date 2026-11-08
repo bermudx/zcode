@@ -49,7 +49,10 @@ It owns fork direction, branch roles, active patches and maintenance policy.
 - ACP rollback diagnosis: T3 starts a replacement process before retiring the
   original scope. A workspace core spawned by the original client can therefore
   be reused by the replacement and then terminated by supervisor cleanup;
-  `detached: true` is not proof of independent ownership. Check the core's
+  isolated real-binary reproduction confirmed scope inheritance and systemd
+  SIGTERM. `detached: true` is not proof of independent ownership. Zero-turn
+  draft loss after core restart is already a documented limit; distinguish that
+  from the automatic restart during an edit. Check the core's
   shutdown timeline before treating `proto.sessionNotFound` as a bad ID or
   adding resume retries. See `docs/fork/reports/2026-11-08-edit-from-here-session-loss.md`.
 - Respect architecture boundaries and public package exports. UI uses service

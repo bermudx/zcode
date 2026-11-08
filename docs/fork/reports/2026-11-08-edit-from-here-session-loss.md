@@ -2,12 +2,118 @@
 
 ## Status
 
-Diagnosis, not a fix. No installed command, running core, provider setting or
-credential was changed. No model request, build, deployment or network fetch
-was made during this investigation.
+Reproduced, not fixed. No installed command, operator-owned running core,
+provider setting or credential was changed. No model request, build,
+deployment or network fetch was made during this investigation. The reproduction
+starts and stops only its own isolated test processes.
 
 The earlier response stopped at the error code. That was insufficient:
 the local incident records expose the session replacement and core shutdown.
+
+## What was already documented
+
+The audit was correct about the underlying persistence limit:
+
+- `apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md`, "已知遗留
+  (deferred)": ephemeral/zero-turn sessions cannot resume after a core restart
+  because they have not entered the store.
+- That document also notes that a detached server remains in the spawning
+  client's process tree until the client exits.
+
+That is not the same as accepting this rollback failure:
+
+- `docs/design/v2/acp-frontend.md`, behavior table: disconnect detaches and core
+  sessions survive.
+- Its "Not verified" section explicitly leaves T3 checkpoint rollback/cancel
+  ordering unverified. `FORK.md` P006 also marks T3 rollback acceptance not run.
+
+The original diagnosis should have distinguished the documented persistence
+limit from the unverified integration boundary. It was premature to recommend
+a service before reproducing the shutdown mechanism.
+
+## Isolated reproduction
+
+Added `scripts/repro-acp-core-lifetime.mts`. It copies the installed client/core
+bundles into a private temporary directory, creates private HOME/data/workspace
+directories, passes an allowlist environment, and starts each ACP client in an
+empty Linux network namespace. No operator credentials or model endpoint are
+used. There is no fake core or fake ACP agent.
+
+Runtime snapshot: installed promotion
+`4caa31d5f1d5efee9931b5bbc9a10838b491df72`; Node 24.14.0.
+
+Observed:
+
+- **Plain EOF control:** two real ACP clients share the same core. Closing the
+  original client's stdin leaves the core alive; the replacement completes
+  `/goal` with `stopReason: "end_turn"` and no model turn.
+- **Scope retirement:** the core's `/proc/<pid>/cgroup` names the original
+  client's test scope, not the replacement client's scope. Stopping only the
+  original scope kills that shared core. The replacement reconnects to a new
+  core but cannot restore its deferred draft.
+- After the real reconnect/resubscribe failure, the replacement's actual ACP
+  `session/prompt` returns **`v4 command rejected: proto.sessionNotFound`**.
+- A signal trace from a scope-retirement attempt captured
+  `SIGTERM {si_code=SI_USER, si_pid=808, si_uid=1000}`. `/proc/808/comm` is
+  `systemd`. Tracer and tracee share the stopped scope, so signal capture is
+  racy; the final exact-error run had an empty signal trace.
+- An earlier timing probe sent during reconnect returned **`attach client is
+  not connected`**. The final test waits for the existing resubscribe-failure
+  diagnostic, rather than adding a fixed delay, to test the post-reconnect case.
+
+This uses the same `systemctl --user stop <scope>` primitive as T3's
+`AgentScope.stop`; it does **not** drive the T3 UI or invoke its complete
+rollback runtime. Combined with the original incident's T3/core logs, it
+establishes the process-lifetime failure mechanism without a provider call.
+
+Evidence:
+
+- Control and first signal capture: `/tmp/piz-acp-lifetime-wmEv78/`.
+- Early-reconnect error and another signal capture:
+  `/tmp/piz-acp-lifetime-oiOSMI/`.
+- Final exact ACP error, exit 0:
+  `/tmp/piz-acp-lifetime-4Bp9Sx/result.json`.
+- One intermediate signal-capture assertion stopped before the prompt:
+  `/tmp/piz-acp-lifetime-eExWgk/`.
+
+Harness corrections are not passing product checks: the first launch failed on
+a Node strip-only unsupported parameter property before starting processes;
+the first scope attempt later timed out on an unnecessary numeric-ID core
+probe; another stopped at the racy trace assertion. The control completed once
+and was not repeated. The final scope run completed after correcting those
+probe problems and adding the observed reconnect boundary.
+
+Cleanup initially missed the plain control's core because `process.title`
+rewrote argv. That isolated core and its tracer were stopped explicitly after
+verifying their private test cwd. The script now uses registered PIDs plus
+private cwd, tracks the tracer, and waits for exit. This cleanup-only adjustment
+was typechecked/linted, not followed by another full reproduction.
+
+Run the reproduction (Linux, user systemd, `unshare` and `strace`; roughly 10 s):
+
+```sh
+mise exec -- node scripts/repro-acp-core-lifetime.mts --runtime /home/daniel/build/piz/apps/zcode-cli/packages/cli/dist-runtime
+```
+
+It stops its own transient scopes/cores and retains its temporary evidence.
+No service is installed or enabled. `--case scope-cleanup` runs just the failure
+case; `--case plain-eof` runs just the control.
+
+### Earlier real occurrence confirmed
+
+The existing records also show the same pattern at **1:57 PM US Central** on
+November 8, before the screenshot's **3:07 PM** failure:
+
+- `19:57:10.352Z`: T3 records rollback.
+- `19:57:10.776Z`: the replacement core session becomes ready.
+- `19:57:10.821Z`: core shutdown completes.
+- `19:57:13.273Z`: a new core starts; the draft is unloaded.
+- `19:57:16.490Z`: the thread records `proto.sessionNotFound`.
+
+The user systemd journal records the original ACP scope ending at
+`19:57:10.859Z` and, for the screenshot incident, `21:07:03.928Z`.
+This confirms that the screenshot is not the only recorded occurrence; it
+does not count every historical failure.
 
 ## Observed incident
 
@@ -64,12 +170,12 @@ The relevant source paths are:
    admission returns no revision for a session without a ready runtime.
    `command-inbox.ts` then rejects the command with `proto.sessionNotFound`.
 
-The supported causal explanation is that retiring the original T3 ACP runtime
+The initially inferred, now reproduced failure mechanism is that retiring the original T3 ACP runtime
 also retires its spawned core, even though the replacement ACP runtime has
 already connected to that core. The observed ordering and T3's scope cleanup
-support this explanation. A signal audit was not captured, so the exact
-termination mechanism (agent scope versus another descendant-cleanup path)
-is not independently proven.
+support this explanation. The reproduction captures the scope inheritance and
+systemd-originated SIGTERM. No signal audit exists for the original incidents
+themselves; their original scope-finalization records are present in the journal.
 
 ```text
 original ACP process → spawns workspace core
@@ -84,9 +190,9 @@ rejection, or strengthening process detachment does not repair ownership.
 Persisting drafts merely to survive this teardown would also change the
 unsent-draft contract and would not protect other live sessions sharing the core.
 
-## Decision needed before implementation
+## Ownership options, not an approved implementation
 
-- **Preferred: a separately owned shared core.** A user service owns the core;
+- **A separately owned shared core.** A user service owns the core;
   ACP clients only attach to it. Closing one T3 process must not terminate the
   service or other clients' sessions. This preserves the shared-core product
   goal, but changes startup/service ownership and needs operator agreement.
@@ -96,7 +202,7 @@ unsent-draft contract and would not protect other live sessions sharing the core
 
 Do not bypass T3's descendant cleanup as an incidental workaround.
 
-## Checks and limits
+## Initial investigation checks and limits
 
 - Architecture baseline: initially blocked by absent worktree dependencies.
   Reused local dependency directories via ignored symlinks; no install.
@@ -116,3 +222,12 @@ jq -c 'select(.timestamp >= "2026-11-08T21:07:03" and .timestamp < "2026-11-08T2
 ```
 
 This inspects the failure; it is not a command for trying an implemented fix.
+
+## Reproduction checks
+
+- Explicit strict TypeScript check of the `.mts` script: passed.
+- Oxlint on the script: 0 errors / 0 warnings.
+- Architecture check: 0 violations / 0 new. The inherited CLI module is still
+  unmanaged; this does not verify its lifetime semantics.
+- No product source changed. No full suite, build, model call, deployment,
+  service installation, GitHub write or push.
