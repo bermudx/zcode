@@ -46,6 +46,12 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   runtime command admission, permission/parentage boundaries and stale-run guards.
   For async/state changes, diagram ownership and event order. Validate external
   input; no TS `any`, no sync network/filesystem IO in production paths.
+- ACP rollback diagnosis: T3 starts a replacement process before retiring the
+  original scope. A workspace core spawned by the original client can therefore
+  be reused by the replacement and then terminated by supervisor cleanup;
+  `detached: true` is not proof of independent ownership. Check the core's
+  shutdown timeline before treating `proto.sessionNotFound` as a bad ID or
+  adding resume retries. See `docs/fork/reports/2026-11-08-edit-from-here-session-loss.md`.
 - Respect architecture boundaries and public package exports. UI uses service
   hooks and IPlatformService, never direct Repo/runtime or window.zcode calls.
 - Keep client/core protocol schemas in sync, including root packages/shared.
