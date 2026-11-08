@@ -216,7 +216,7 @@ test("thought level config: omitted when disabled, unlevelled, or the current mo
     { available: [], current: "nope", enabled: true },
   );
   const effort = multi.find((option) => option.id === ACP_THOUGHT_LEVEL_CONFIG_ID);
-  assert.equal(effort?.type === "select" ? effort.currentValue : "missing", "");
+  assert.equal(effort?.type === "select" ? effort.currentValue : "missing", "a");
 });
 
 test("thought level config: same modelId on another provider picks the exact catalog entry", () => {

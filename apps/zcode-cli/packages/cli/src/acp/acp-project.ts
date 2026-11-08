@@ -156,8 +156,7 @@ function thoughtLevelOption(
   const supported = new Set(levels.map((level) => level.value));
   const currentValue =
     [thoughtLevel.current, thoughtLevel.defaultLevel, currentModel?.reasoning?.defaultLevel]
-      .find((value): value is string => value !== undefined && supported.has(value)) ??
-    (levels.length === 1 ? levels[0]!.value : "");
+      .find((value): value is string => value !== undefined && supported.has(value)) ?? levels[0]!.value;
   return {
     category: "thought_level",
     currentValue,
