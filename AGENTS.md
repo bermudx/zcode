@@ -20,7 +20,9 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   `apps/zcode-cli/scripts/promote-piz.sh` — run it after the verification
   matrix passes, never as part of a dev build, and only from a clean `main`
   (the script enforces branch + cleanliness; promoting anything main lacks
-  regresses the next main-based promotion). Dev builds write
+  regresses the next main-based promotion). The script does NOT build: run the
+  build (`docs/fork/verification.md`) after the merge, then grep `dist/` for
+  the change before promoting — it will happily promote a stale `dist/`. Dev builds write
   `packages/*/dist/` and cannot leak into `piz`; frontend externals resolve
   to snapshots inside `dist-runtime/node_modules` (see
   `docs/fork/verification.md`). `zcode` on PATH still points to the old
