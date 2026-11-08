@@ -52,6 +52,6 @@ The fixed `height: 10` also exists in the older upstream base `aac47556`.
 The suspected layout defect is therefore inherited, not introduced by a fork
 edit to those files. This does not replace a live reproduction.
 
-No fetch was performed. A hosted web search for the upstream question-panel
-file returned no results, so whether newer remote upstream work fixes it is
+No fetch was performed. Hosted web-search tool discovery found no available
+tool; no web search was run. Whether newer remote upstream work fixes it is
 unverified.
