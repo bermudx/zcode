@@ -5,7 +5,7 @@ import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { isStrayTerminalResponse } from "../src/terminal-input-filter.js";
+import { isStrayTerminalResponse, QuietProcessTerminal } from "../src/terminal-input-filter.js";
 import { queryTerminalColorsAtStartup } from "../src/terminal-startup.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -205,5 +205,56 @@ test("responding pty: 回复零回显、迟到回复被吞、TUI 渲染 status l
     child.kill("SIGTERM");
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
+test("QuietProcessTerminal: 排空遗留的 raw 不污染 wasRaw，stop() 落回 canonical", () => {
+  // 回归：queryTerminalColorsAtStartup 排空后不回拨 raw——lib start() 按
+  // stdin.isRaw 记录 wasRaw，漏写值被当成"用户原状态"，stop() 会把真实
+  // 终端"恢复"成 raw（piz 退出后 tty 滞留 raw）。start() 前置 canonical
+  // 拨回后，lib 记录的恢复原状必须是 cooked：termios 序列末位为 false。
+  const stdin = process.stdin as NodeJS.ReadStream & {
+    isRaw?: boolean;
+    setRawMode?: (mode: boolean) => NodeJS.ReadStream;
+  };
+  // delete 需要可选项视图（ReadStream 声明里二者非可选）。
+  const mutableStdin = stdin as unknown as {
+    isRaw?: boolean;
+    setRawMode?: (mode: boolean) => NodeJS.ReadStream;
+  };
+  const stdout = process.stdout;
+  const hadIsRaw = Object.prototype.hasOwnProperty.call(stdin, "isRaw");
+  const originalIsRaw = stdin.isRaw;
+  const hadSetRawMode = Object.prototype.hasOwnProperty.call(stdin, "setRawMode");
+  const originalSetRawMode = stdin.setRawMode;
+  const originalWrite = stdout.write;
+  const applied: boolean[] = [];
+  try {
+    stdin.isRaw = true; // 模拟启动查询排空留下的 raw
+    stdin.setRawMode = (mode: boolean) => {
+      applied.push(mode);
+      stdin.isRaw = mode;
+      return stdin;
+    };
+    stdout.write = (() => true) as typeof stdout.write; // 吞掉协商转义序列
+
+    const terminal = new QuietProcessTerminal();
+    terminal.start(() => {}, () => {});
+    terminal.stop();
+
+    // [前置拨回 cooked, lib start() 切 raw, lib stop() 恢复记录值]
+    assert.deepEqual(applied, [false, true, false]);
+  } finally {
+    stdout.write = originalWrite;
+    if (hadSetRawMode && originalSetRawMode !== undefined) {
+      stdin.setRawMode = originalSetRawMode;
+    } else {
+      delete mutableStdin.setRawMode;
+    }
+    if (hadIsRaw && originalIsRaw !== undefined) {
+      stdin.isRaw = originalIsRaw;
+    } else {
+      delete mutableStdin.isRaw;
+    }
   }
 });
