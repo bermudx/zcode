@@ -82,7 +82,8 @@ Repository-local rerere is enabled; review every replayed resolution.
   a separate core process. Preserve workspace configuration, permission and
   session boundaries while sharing the process.
 - Single-core transport/ownership (implemented on
-  `fix/edit-from-here-last-message`, pending lead review): the attach socket
+  `fix/edit-from-here-last-message`, source review and isolated live verification
+  accepted; not installed): the attach socket
   derives from the data root only (`<dataBaseDir>/.zcode/v2/sockets/core.sock`),
   never from workspace/provider/frontend. On Linux, clients auto-start the
   core as a transient `systemd --user` service

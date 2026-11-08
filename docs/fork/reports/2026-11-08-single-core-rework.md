@@ -4,6 +4,8 @@ Date: 2026-11-08
 Branch: `fix/edit-from-here-last-message` (base `cf61a95d`)
 Issue: #10 — "Editing a message can terminate the shared core and lose replacement sessions"
 Status: rework applied + re-verified; uncommitted pending lead review.
+Historical handoff status: later committed as `99d0b843`; source review and
+isolated live verification accepted in `2026-11-08-single-core-live-verification.md`.
 Base: `docs/fork/reports/2026-11-08-single-core-implementation.md` (corrected in
 place; its verification table remains the original run's record).
 Artifacts: `/tmp/piz-single-core-rework/` (all logs + retained configs below).

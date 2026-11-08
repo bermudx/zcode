@@ -10,9 +10,12 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   Electron or a heavy core per invocation/session/workspace. One shared core
   process serves all workspaces, sessions and thin clients. The single-core
   transport/ownership candidate is implemented on
-  `fix/edit-from-here-last-message` (uncommitted): data-root socket +
-  Linux `systemd --user` transient service; isolated live verification still
-  pending, nothing installed (operator clarified 2026-11-08). Standalone zcode-allowance is
+  `fix/edit-from-here-last-message` (`99d0b843`): data-root socket +
+  Linux `systemd --user` transient service. Isolated source integration verified
+  one core across two workspaces and both client transports, surviving original
+  client scope retirement; see `docs/fork/reports/2026-11-08-single-core-live-verification.md`.
+  Built-pair verification/promotion remain pending; nothing installed
+  (operator clarified 2026-11-08). Standalone zcode-allowance is
   parked; its extra-usage/signing purpose is not. Signing is mandatory: do not
   ship a candidate that drops or breaks it, or call unsigned ordinary-quota
   operation success. Do not claim

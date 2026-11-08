@@ -4,6 +4,8 @@ Date: 2026-11-08
 Branch: `fix/edit-from-here-last-message` (base `cf61a95d`)
 Issue: #10 — “Editing a message can terminate the shared core and lose replacement sessions”
 Status: implemented + hermetic-verified; uncommitted pending lead review.
+Historical handoff status: later committed as `99d0b843`; source review and
+isolated live verification accepted in `2026-11-08-single-core-live-verification.md`.
 Rework 2026-11-08 applied lead findings in place (false delay tests, stale
 `.pid` authority, `scope` semantics, dead `version` option, doc drift) —
 see `docs/fork/reports/2026-11-08-single-core-rework.md`; verification rows
