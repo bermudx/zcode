@@ -117,6 +117,8 @@ function fakeSession(sessionId: string): {
     setThoughtLevel: async (level: string) => {
       state.thoughtCalls.push(level);
       snapshot.settings.thoughtLevel.current = level;
+      // 与真实句柄一致：mergeSettings 在回包合并期间就会向 sink 补发 model_selected。
+      for (const sink of sinks) sink({ payload: { modelSelection: state.model }, type: "model_selected" });
       return { thoughtLevel: level };
     },
   } as unknown as AttachSessionHandle;
@@ -363,6 +365,49 @@ test("acp agent: model switch replaces effort choices despite the merged union c
       /Unsupported reasoning effort/,
     );
     assert.deepEqual(session.thoughtCalls, []);
+  });
+});
+
+test("acp agent: effort changed by another client is pushed once, own changes are not duplicated", async () => {
+  const core = new FakeCore();
+  const updates: SessionUpdate[] = [];
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const testClient = client({ name: "test-client" }).onNotification(
+    methods.client.session.update, ({ params }) => { updates.push(params.update); },
+  );
+  const pushedEffort = () =>
+    updates
+      .filter((update) => update.sessionUpdate === "config_option_update")
+      .map((update) =>
+        update.configOptions.find((option) => option.id === "thought_level"),
+      );
+  await testClient.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    // T3 自己改档位：只有请求回包，没有额外推送。
+    const own = await ctx.request(methods.agent.session.setConfigOption, {
+      configId: "thought_level",
+      sessionId: created.sessionId,
+      value: "low",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(pushedEffort().length, 0, "own change must not be pushed again");
+    const ownEffort = own.configOptions.find((option) => option.id === "thought_level");
+    assert.equal(ownEffort?.type === "select" && ownEffort.currentValue, "low");
+    // 其他客户端改档位：core 状态先变，句柄再补发 model_selected。
+    (session.handle.snapshot as { settings: { thoughtLevel: { current?: string } } })
+      .settings.thoughtLevel.current = "high";
+    session.emit({ payload: { modelSelection: session.model }, type: "model_selected" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const pushed = pushedEffort();
+    assert.equal(pushed.length, 1);
+    const effort = pushed[0];
+    if (effort?.type !== "select") throw new Error("expected pushed select option");
+    assert.equal(effort.currentValue, "high");
   });
 });
 

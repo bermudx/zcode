@@ -545,9 +545,17 @@ export class AttachSessionHandle {
       };
     }
     const previousModel = JSON.stringify(prev.model.current);
+    const previousThoughtLevel = prev.thoughtLevel?.current;
     this.snapshot = { ...this.snapshot, settings: { ...prev, ...patch } };
     const current = this.snapshot.settings.model.current;
-    if (JSON.stringify(current) === previousModel) return;
+    // 思考档位变化不一定体现在 model.current（selection 缺 options 时只改 thoughtLevel.current），
+    // 其他客户端改档位时订阅方（如 ACP）也要收到通知，所以档位变化同样补发。
+    if (
+      JSON.stringify(current) === previousModel &&
+      this.snapshot.settings.thoughtLevel?.current === previousThoughtLevel
+    ) {
+      return;
+    }
     const event = {
       id: `attach-local-${++this.localEventCounter}`,
       timestamp: new Date(),
