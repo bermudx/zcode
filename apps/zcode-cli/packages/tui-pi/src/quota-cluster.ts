@@ -4,8 +4,9 @@
 //   · turn 沿（busy 下降沿）授权一次刷新尝试——仍受 ≥30s 防抖（与空闲轮询
 //     同一闸门），快速连击 turn 不放大请求频率
 //   · 读数 30min TTL：超龄读数从 footer 消失，不悬挂假数据
-//   · 失败保留上次读数；失败 episode 存续期间 footer 右簇挂 `quota !`
-//     徽标（renderQuotaError），成功落地或 reset 清除。stderr 单行诊断
+//   · 失败保留上次读数；失败 episode 存续期间 footer 右簇在读数前挂
+//     `stale: ` 前缀、无读数时挂 `quota !` 徽标（footer.ts 组合，
+//     数据源 renderQuotaError），成功落地或 reset 清除。stderr 单行诊断
 //     只在调用方确认安全（非 TTY 重定向）时接线——TTY 下裸写会砸进
 //     输入框且无法被重绘清除；同一失败消息只诊断一次，失败后空闲拍
 //     退避 60s
@@ -123,10 +124,11 @@ export class QuotaCluster {
   }
 
   /**
-   * footer 失败徽标：自上次成功落地以来存在失败 episode 时返回 `quota !`。
-   * TTY 下 stderr 诊断被 app 层闸掉（裸写 stderr 会落在输入框里且重绘
-   * 清不掉），这是失败在交互界面上的唯一可视出口；episode 持续期间常驻，
-   * 不随读数 TTL 消失——陈旧读数 + 徽标比静默悬挂更诚实。
+   * footer 失败出口的数据源：自上次成功落地以来存在失败 episode 时返回
+   * `quota !`。footer.ts 组合时读数在场则改挂 `stale: ` 前缀，仅无读数
+   * （未取到/超 TTL）时以独立徽标落地。TTY 下 stderr 诊断被 app 层闸掉
+   * （裸写 stderr 会落在输入框里且重绘清不掉），徽标是无读数时交互界面
+   * 上的唯一可视出口；episode 持续期间常驻，不随读数 TTL 消失。
    */
   renderQuotaError(): string | undefined {
     return this.store.state.quotaError === undefined ? undefined : "quota !";

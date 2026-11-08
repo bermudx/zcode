@@ -73,9 +73,15 @@ export class ActivityLine extends Loader {
       this.turnStartMs === undefined
         ? undefined
         : formatElapsedMs(Date.now() - this.turnStartMs);
-    // 徽标殿后：陈旧读数与失败标记并存时读数在前、`quota !` 收尾，
-    // 一眼可辨「显示的是旧数据」。
-    const right = [elapsed, this.quotaText, this.quotaError]
+    // 失败 episode 与读数并存时给读数挂 `stale: ` 前缀（不再尾部并挂
+    // `quota !`）：前缀直接说明「显示的是旧数据」，尾部徽标易被读成
+    // 又一项读数。无读数可标（未取到/超 TTL）时保留独立徽标，失败不静默。
+    const quotaCluster = this.quotaText
+      ? this.quotaError
+        ? `stale: ${this.quotaText}`
+        : this.quotaText
+      : this.quotaError;
+    const right = [elapsed, quotaCluster]
       .filter((part): part is string => Boolean(part))
       .join(FOOTER_RIGHT_CLUSTER_GAP);
     const fullLine = appendFooterRightZone({
