@@ -291,5 +291,12 @@ to a separate service still fails this requirement. The OpenCode example is
 only an ownership-pattern reference, not an approved implementation. No
 replacement lifetime/launcher mechanism has been selected.
 
+**Both piz frontends are affected by the process-count gap.**
+`cli/src/attach/attach-command.ts` and `cli/src/acp/acp-sessions.ts` both call
+`ensureServer`. Its default socket path hashes `resolveWorkspaceKey(workspace)`
+in `cli/src/app-server-spawn.ts`, so terminal piz and `piz acp` both currently
+select cores per workspace. T3 scope retirement is the reproduced edit-failure
+trigger; it is not needed for the separate multi-workspace memory problem.
+
 No production code, installed command, T3 checkout or running core was changed
 in this follow-up. No tests/build were rerun for this documentation/issue filing.
