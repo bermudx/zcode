@@ -142,6 +142,7 @@ Count these interfaces when budgeting syncs.
 | App-server ready budget: 60s window starting at spawn completion | `6537f416` | P004 (app-server-spawn) |
 | Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
 | ACP reasoning effort: `session/set_config_option` `thought_level` (category `thought_level`) with choices from the current model's `reasoning.levels` (not the attach handle's unioned `thoughtLevel.available`), validated at the boundary, set through core `session/setThoughtLevel`; current falls back to the first level, never `""` | `99e5646d`, `366d2504` (merged `a2e129f4`; [report](docs/fork/reports/2026-11-07-acp-effort-discovery.md)) | P004 (ACP frontend) |
+| ACP local commands `/goal` + `/target` and `/dwf`: intercepted in `session/prompt` before P005 forwarding, routed through the same core ops the TUI command center uses (`session/goal` with an adapter-generated inputId, `v4/conversation/workflowRuns`, `session/cancelBackgroundTask`, v4 `resumeWorkflowRun` with the shared rejection prefix); response rendered as one `agent_message_chunk`, goal set/replace/resume keeps the ACP prompt open until the first continuation turn settles (settlement sink armed before the op is sent — a fast-failing turn cannot strand the prompt), `session/cancel` returns `cancelled`; `available_commands_update` after session/new+resume advertises exactly the routed commands; `AttachSessionHandle` gained `goalCommand` + `listDynamicWorkflowRuns`/`resumeWorkflowRun` (wire body in `attach-goal-dwf-ops.ts`), which also unblocks `/dwf` on the attach TUI lane (previously "not available in this client"); dwf engine gate unchanged (core fail-closed) | `patch/acp-goal-dwf` | P006 (ACP frontend) + P004 attach surface |
 | `--model` startup model selection (attach entry + banner); since `a68e1a1d` bare names are case-insensitive, prefer the session's current provider on ambiguity, and take a quoted `$effort` suffix validated against catalog levels (`--model glm-5.3`, `--model 'glm-5.3$high'`); other ambiguity still fails pre-TUI | `3db70344`, `7a31c5e5` (merged `a68e1a1d`, piz review `b95b575f`; [report](docs/fork/reports/2026-11-07-short-model-aliases.md)) | P004 (attach entry) |
 | Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no protocol/snapshot denominators — 2026-11-02 revision: the footer ctx gauge clamps client-side via the same predicate, `patch/footer-compact-gauge`); cap constants/predicates live in `@zcode/shared` `compact-context-window.ts` (single source for wire + display); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2`; display clamp `25bf5e32`/`9fd03361` (post-rebase SHAs) | P004 (shared protocol + attach client) + core compact |
 | Attach exit-resume hint: after normal TUI exit (exit 0 + bound session id) the attach client prints `Resume this session with:` + `piz|zcode attach --resume <id>` to stdout once the terminal is restored; id follows /new /resume /fork via `getMainSessionId`; empty sessions print too (predictability over content-gating); signal exits and non-0 exits silent; opentui-frontend lane deviation recorded in spec | `patch/exit-resume-hint` `40e25506` + review fix-pass `c47d1e63`; suite-stability rides along in `6e16e0ce`; spec [tui-attach-shared-core.md](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md); 4 regressions `tests/attach-exit-resume-hint.test.ts` | P004 (attach client) |
@@ -768,3 +769,45 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   the effort option. Lesson recorded in AGENTS.md.
 - Not done: live T3 check (option visible, set works, model-switch finding 2).
   No push, no core restart.
+
+### 2026-11-08 — /goal and /dwf over ACP (patch/acp-goal-dwf)
+
+- Operator goal: "full support of `/goal` and `/dwf` over ACP". ACP clients have no
+  command center, so these commands previously hit the model as literal text (P005)
+  and never touched the goal state machine or the dwf journal.
+- Spec first ([acp-frontend.md](docs/design/v2/acp-frontend.md) 「Local slash
+  commands」), then implementation: `session/prompt` intercepts `/goal`/`/target`/`/dwf`
+  (same word-boundary parse as the TUI) and routes through core ops; core stays the
+  single owner of goal wording/state and of dwf facts. Response text is emitted as one
+  `agent_message_chunk`; goal `set`/`replace`/`resume` keeps the prompt request open
+  until the first continuation turn settles — the settlement sink is armed BEFORE the
+  `session/goal` op is sent (a fast-failing continuation would otherwise strand the
+  prompt), and later goal-loop turns keep streaming as ordinary updates. All commands
+  share the normal in-flight guard and cancellation path.
+- `AttachSessionHandle` surface: new `goalCommand` and CommandCenterApp optional
+  `listDynamicWorkflowRuns`/`resumeWorkflowRun` (wire body extracted to
+  `attach-goal-dwf-ops.ts`); the dwf pair also unblocks `/dwf list`/`resume` on the
+  attach TUI lane, which previously reported "not available in this client". The dwf
+  engine gate is unchanged: the shared core fails closed, so default piz sessions
+  truthfully list no runs; enabling the engine is a separate operator decision.
+- `command-center/handlers/dwf.ts`: cancel-target decision extracted to pure
+  `resolveDwfCancelTarget` + formatting helpers exported (single copy shared by TUI
+  handler and ACP router; no behavior change — dwf-command tests untouched and green).
+- Baseline: `architecture:baseline:update` recorded `attach-session.ts` at 855 lines
+  (file was already 813 on main, over the 800 cap but invisible to `--changed` without
+  `origin/main`; this change adds the three delegating methods, +41 net). The script
+  wiped the pre-existing status-line.test.ts entry; it was restored by hand — check
+  the baseline diff whenever this script is used.
+- Verification (worktree, dev build only — installed `piz` pair NOT touched):
+  `@zcode/cli` typecheck + oxlint 0/0; full cli suite **719/719** (new tests:
+  acp-commands 11, acp-agent +9, attach-adapter +4; the dwf-command suite is
+  untouched and green); `architecture:check --changed` 0 new; fork-tests selected:
+  adapters signing 13/13, bootstrap socket-listener 4/4; `build:attach` 2.2 MB
+  carries the new command surface and the thin gate holds (only the inherited
+  comment mentions bootstrap/src). The first fork-tests pass reported 3 build-sea
+  failures — this fresh worktree lacked generated assets (root
+  `@zcode/shared`/`@zcode/model-option-map` dist, the browser-use-plugin bundle);
+  building them turned build-sea to 42/42. Not exercised (unverified): live T3/Zed
+  rendering of the command responses, a real goal continuation turn over ACP, and
+  `/dwf` against a core with the engine enabled. Merge + promotion are separate
+  operator decisions.

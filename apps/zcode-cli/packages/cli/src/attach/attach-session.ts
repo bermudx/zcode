@@ -9,6 +9,8 @@ import {
   zcodeSessionMessagesResultSchema,
   zcodeSessionRecallPreviousInputResultSchema,
   zcodeUsageQuotaSnapshotSchema,
+  type ZCodeSessionGoalAction,
+  type ZCodeSessionGoalResult,
   type ZCodeSessionRawEvent,
   type ZCodeSessionStateSnapshot,
   type ZCodeSessionSubagentsResult,
@@ -20,7 +22,17 @@ import type {
   TuiSubmitPromptResult,
   TuiSubagentTranscriptSnapshot,
 } from "@zcode/tui";
-import type { CollaborationMode, TurnId } from "@zcode/contracts";
+import type {
+  CollaborationMode,
+  DynamicWorkflowRunResumeResult,
+  DynamicWorkflowRunSessionSummary,
+  TurnId,
+} from "@zcode/contracts";
+import {
+  listWorkflowRuns,
+  requestGoalCommand,
+  resumeWorkflowRunCommand,
+} from "./attach-goal-dwf-ops.js";
 import { AttachProtocolError, type AttachClient } from "./attach-client.js";
 import {
   discardPendingInputs as discardPendingInputsLane,
@@ -766,6 +778,35 @@ export class AttachSessionHandle {
     })) as { snapshot?: ZCodeSessionStateSnapshot };
     this.applyMutationSnapshot(result);
     return true;
+  }
+
+  /**
+   * 通用 `session/goal` 入口（ACP /goal 本地命令路由用）：结构化 action 直传，core 仍是
+   * goal 状态/文案/replace 收敛/续跑的唯一权威；wire 细节见 attach-goal-dwf-ops.ts。
+   * 与上面的窄方法共存：TUI command-center 继续用 readTarget/setTarget 家族。
+   */
+  async goalCommand(input: {
+    action: ZCodeSessionGoalAction;
+    inputId?: string;
+    objective?: string;
+  }): Promise<ZCodeSessionGoalResult> {
+    const result = await requestGoalCommand(this.clientOf(), this.sessionId, input);
+    this.applyMutationSnapshot(result);
+    return result;
+  }
+
+  /** CommandCenterApp.listDynamicWorkflowRuns：dwf run 摘要（v4 只读 query）。 */
+  async listDynamicWorkflowRuns(
+    input: { limit?: number } = {},
+  ): Promise<DynamicWorkflowRunSessionSummary[]> {
+    return await listWorkflowRuns(this.clientOf(), this.sessionId, input);
+  }
+
+  /** CommandCenterApp.resumeWorkflowRun：v4 command（workId ≡ runId）。 */
+  async resumeWorkflowRun(input: {
+    workId: string;
+  }): Promise<DynamicWorkflowRunResumeResult> {
+    return await resumeWorkflowRunCommand(this.clientOf(), this.sessionId, input.workId);
   }
 
   async loadSessionTranscript(): Promise<

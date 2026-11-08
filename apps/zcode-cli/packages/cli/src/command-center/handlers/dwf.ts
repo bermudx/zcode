@@ -7,20 +7,38 @@ import type { CommandCenterDeps } from "../types.js";
 import { splitArgs } from "../utils.js";
 import { isWorkflowModeEnabled, WORKFLOW_DISABLED_NOTICE } from "../../workflow-mode.js";
 
-const DWF_USAGE = "Usage: /dwf [list|cancel [runId]|resume <runId>]";
+export const DWF_USAGE = "Usage: /dwf [list|cancel [runId]|resume <runId>]";
 
 /** `/dwf list` 的默认条数；服务端自己还有上限，这里只表达「一屏够看」。 */
-const DWF_LIST_LIMIT = 20;
+export const DWF_LIST_LIMIT = 20;
 
 /**
  * 非终态 run 的状态集合。`/dwf cancel` 缺 runId 时的候选就是这一集：
  * pending 是「已建未起」，running 是「在飞」，两者都还有可中止的东西；
  * completed / errored / stopped 已结算，取消无意义。
  */
-const IN_FLIGHT_STATUSES: readonly DynamicWorkflowRunSessionSummary["status"][] = [
+export const IN_FLIGHT_STATUSES: readonly DynamicWorkflowRunSessionSummary["status"][] = [
   "pending",
   "running",
 ];
+
+/**
+ * 缺 runId 时替用户选取消目标的裁定；TUI 与 ACP 两条 lane 共用同一条决策，
+ * 不许两处各写一份漂移。
+ */
+export type DwfCancelTarget =
+  | { kind: "none" }
+  | { kind: "single"; runId: string }
+  | { kind: "ambiguous"; inFlight: DynamicWorkflowRunSessionSummary[] };
+
+export function resolveDwfCancelTarget(
+  runs: DynamicWorkflowRunSessionSummary[],
+): DwfCancelTarget {
+  const inFlight = runs.filter((run) => IN_FLIGHT_STATUSES.includes(run.status));
+  if (inFlight.length === 0) return { kind: "none" };
+  if (inFlight.length === 1) return { kind: "single", runId: inFlight[0]!.runId };
+  return { kind: "ambiguous", inFlight };
+}
 
 export async function handleDwfCommand(
   args: string,
@@ -65,26 +83,26 @@ async function handleCancel(
 
   let targetRunId = runId;
   if (!targetRunId) {
-    // 缺 runId 时只在「恰好一个在飞」时替用户决定。多个候选就列出来让用户点名：
-    // 取消是花掉的钱和丢掉的进度，猜错的代价不对称。
+    // 缺 runId 的裁定在 resolveDwfCancelTarget：恰好一个在飞才替用户决定；多个候选列出来
+    // 让用户点名——取消是花掉的钱和丢掉的进度，猜错的代价不对称。
     if (!app.listDynamicWorkflowRuns) return respond(deps, DWF_USAGE);
     const runs = await app.listDynamicWorkflowRuns({ limit: DWF_LIST_LIMIT });
-    const inFlight = runs.filter((run) => IN_FLIGHT_STATUSES.includes(run.status));
-    if (inFlight.length === 0) {
+    const target = resolveDwfCancelTarget(runs);
+    if (target.kind === "none") {
       return respond(deps, "No in-flight dynamic workflow runs to cancel.");
     }
-    if (inFlight.length > 1) {
+    if (target.kind === "ambiguous") {
       return respond(
         deps,
         [
           "Multiple in-flight dynamic workflow runs; pass the run id to cancel one:",
-          ...inFlight.map((run) => `- ${formatRunLine(run)}`),
+          ...target.inFlight.map((run) => `- ${formatRunLine(run)}`),
           "",
           "Usage: /dwf cancel <runId>",
         ].join("\n"),
       );
     }
-    targetRunId = inFlight[0]!.runId;
+    targetRunId = target.runId;
   }
 
   // runId ≡ taskId：workflow run 在后台任务注册表里就是用 runId 登记的。
@@ -96,7 +114,7 @@ async function handleCancel(
   return respond(deps, `Cancelled dynamic workflow run ${targetRunId}.`);
 }
 
-function formatRunList(runs: DynamicWorkflowRunSessionSummary[]): string {
+export function formatRunList(runs: DynamicWorkflowRunSessionSummary[]): string {
   if (runs.length === 0) {
     return "No dynamic workflow runs in this session.";
   }
@@ -115,7 +133,7 @@ function formatRunList(runs: DynamicWorkflowRunSessionSummary[]): string {
  * 时间整段省略。少一列是退化，不是错误——绝不因此把整行藏起来。label 恰好等于 runId 时
  * 不重复印：服务端的兜底最后一档就是 runId，照抄会得到「dwfrun_x dwfrun_x」。
  */
-function formatRunLine(run: DynamicWorkflowRunSessionSummary): string {
+export function formatRunLine(run: DynamicWorkflowRunSessionSummary): string {
   const columns = [run.runId];
   const label = run.label ?? run.runId;
   if (label !== run.runId) columns.push(label);
@@ -145,7 +163,7 @@ function formatFailure(run: DynamicWorkflowRunSessionSummary): string {
   return run.failureMessage ? ` (${code}: ${run.failureMessage})` : ` (${code})`;
 }
 
-function describeResumeRejection(reason: DynamicWorkflowRunResumeErrorReason): string {
+export function describeResumeRejection(reason: DynamicWorkflowRunResumeErrorReason): string {
   switch (reason) {
     case "not_found":
       return "no such run in this session's journal";

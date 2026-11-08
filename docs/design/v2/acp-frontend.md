@@ -19,6 +19,7 @@ initialize             ──►  capabilities: v1, resume{}, close{},       (no
 session/new {cwd}      ──►  one lazy lane per cwd ─────────────────────► session/create
                             └─ subscribe, compact cap for GLM
 session/prompt         ──►  v4 sendText ──────────────────────────────► turn
+                            (/goal, /dwf routed locally: session/goal, dwf wire ops)
   ◄── session/update         raw SessionEvent → ACP update projection
   ◄── session/request_permission ◄──────────────────────────────────── permission
   ◄── elicitation/create     AskUserQuestion / ExitPlanMode ◄──────────── interaction/*
@@ -105,12 +106,83 @@ issues the v4 stop in `AttachSessionHandle`) and calls `stopActiveTurn()`. A can
 prompt resolves with `stopReason: "cancelled"`; cancellation never turns into an
 error response.
 
+## Local slash commands (`/goal`, `/dwf`)
+
+ACP clients have no command center: without interception, `/goal …` and
+`/dwf …` typed in the client would reach the model as literal prompt text
+(P005 forwarding) and never touch the goal state machine or the workflow
+journal. The adapter therefore routes these two commands locally, the same
+way the TUI command center does — through the same core ops, not a parallel
+implementation:
+
+| Input | Wire call | Response |
+| --- | --- | --- |
+| `/goal` / `/goal show`-less args | `session/goal` `action:"show"` | core `response` text |
+| `/goal <objective>` | `session/goal` `action:"set"` + adapter-generated `inputId` | core `response`; then the continuation turn is awaited |
+| `/goal replace <objective>` | `session/goal` `action:"replace"` | same as `set` |
+| `/goal pause` / `resume` / `clear` | `session/goal` matching action | core `response` text |
+| `/target …` | alias of `/goal` (same alias as the TUI) | — |
+| `/dwf` / `/dwf list` | `v4/conversation/workflowRuns` (limit 20) | formatted run list (shared formatter with the TUI handler) |
+| `/dwf cancel [runId]` | list + `session/cancelBackgroundTask` when exactly one run is in flight; otherwise candidate list | cancel result text |
+| `/dwf resume <runId>` | `v4/command` `resumeWorkflowRun` (workId ≡ runId) | resume result text; `fault.command.workflowRunResumeRejected.<reason>` maps back to the structured reason |
+
+Rules:
+
+- Parsing mirrors the TUI: the prompt must start with the command word
+  (case-insensitive); everything after the first whitespace is args. Only
+  these two commands are intercepted — every other slash input keeps the
+  P005 verbatim-forward behavior. `/model` over ACP is the config option,
+  not text.
+- The core is the single owner of goal state, response wording, the
+  set-over-existing → replace collapse and the plan-mode continuation note;
+  the adapter passes the parsed action through and renders the core's
+  `response` verbatim as one `agent_message_chunk` (no model turn is
+  involved).
+- `session/goal` results are schema-validated (`zcodeSessionGoalResultSchema`)
+  at the boundary; the returned snapshot merges into the handle like every
+  other mutation.
+- Goal `set`/`replace`/`resume` return `startedTurn: true` when the core
+  launched the continuation turn. The adapter generated the `inputId` it
+  passed to the op and subscribed a temporary sink **before** sending the
+  op, so `turn_started(inputId)` cannot be missed. The ACP `session/prompt`
+  request stays open until the **first** turn with that inputId settles
+  (`turn_complete` / `turn_error`, both carry `inputId`); later goal-loop
+  turns keep streaming as ordinary `session/update`s after the prompt
+  returns. This is the ACP-lane boundary of the background continuation the
+  TUI also does not block on.
+- `session/cancel` during a waited continuation goes through the existing
+  v4-stop path (stop aborts the turn and pauses an active goal), after
+  which the waiter resolves and the prompt returns `stopReason:
+  "cancelled"`.
+- A second `session/prompt` while one is running (including local commands)
+  is rejected by the existing in-flight guard — ACP clients serialize turns
+  anyway, and the core-level guards (`Cannot manage goals while a prompt is
+  running`) stay authoritative.
+- Command or op failures surface as a `RequestError` with the core's
+  message; they are never turned into a fake empty response.
+- `session/new` and `session/resume` emit one `available_commands_update`
+  advertising exactly the two locally routed commands (`goal`, `dwf`) so
+  clients offer them in their input; commands the adapter does not route
+  are deliberately not advertised.
+- The dwf engine gate is unchanged: the shared core fails closed on dynamic
+  workflows unless a host enables the policy, so `/dwf list` is a truthful
+  empty list in default piz sessions. Full command semantics over ACP does
+  not imply enabling the engine; that is a separate product decision.
+
+`AttachSessionHandle` gains the wire surface behind this routing:
+`goalCommand` (one `session/goal` call, schema-parsed result), and the
+CommandCenterApp optional methods `listDynamicWorkflowRuns` /
+`resumeWorkflowRun` (v4 query / v4 command) — the latter also unblocks
+`/dwf` for the attach TUI lane, which previously reported "not available in
+this client" because no CLI-side app implemented them.
+
 ## Mapping
 
 | Area | v1 behavior |
 | --- | --- |
 | Sessions | `session/new`, `session/resume`, `session/close` (real stop); no `session/load`, so history is never replayed |
 | Turns | `session/prompt` (text + resource blocks only; images/audio rejected with a message), `session/cancel`, `session/update` |
+| Local commands | `/goal` (+`/target`) and `/dwf` intercepted in `session/prompt`, routed through core ops, response emitted as an `agent_message_chunk`; advertised via `available_commands_update` (see the section above) |
 | Workspaces | one lazy `AttachRuntime` + socket client per `cwd`; sessions are per-cwd but share that lane |
 | Permissions | `session/request_permission`; `allow_once` / `allow_always` (only when core suggests permission updates) / `reject_once`; answer is the core option's `response` |
 | `AskUserQuestion` | form elicitation: one string property per question, single-select as `enum`, multi-select as comma-separated text; answers are keyed by question text |

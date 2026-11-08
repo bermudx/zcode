@@ -24,6 +24,13 @@ function fakeSession(sessionId: string): {
   model: FakeModel;
   text?: string;
   thoughtCalls: string[];
+  goalCalls: { action: string; inputId?: string; objective?: string }[];
+  goalResult: { response: string; startedTurn: boolean };
+  dwfRuns: { runId: string; status: string; resumable?: boolean }[];
+  resumeCalls: string[];
+  cancelTaskCalls: string[];
+  resumeResult: unknown;
+  stopCalls: number;
   emit: (event: unknown) => void;
 } {
   const sinks = new Set<(event: unknown) => void>();
@@ -33,6 +40,13 @@ function fakeSession(sessionId: string): {
     results: [] as PermissionBrokerResult[],
     text: undefined as string | undefined,
     thoughtCalls: [] as string[],
+    goalCalls: [] as { action: string; inputId?: string; objective?: string }[],
+    goalResult: { response: "", startedTurn: false },
+    dwfRuns: [] as { runId: string; status: string; resumable?: boolean }[],
+    resumeCalls: [] as string[],
+    cancelTaskCalls: [] as string[],
+    resumeResult: undefined as unknown,
+    stopCalls: 0,
   };
   const reasoningFor = (modelId: string) =>
     modelId === "glm-5"
@@ -73,10 +87,34 @@ function fakeSession(sessionId: string): {
       sinks.add(sink);
       return () => sinks.delete(sink);
     },
+    cancelBackgroundTask: async (taskId: string) => {
+      state.cancelTaskCalls.push(taskId);
+      return { cancelled: true, status: "cancelled", taskId };
+    },
     getMode: () => state.mode,
+    goalCommand: async (input: { action: string; inputId?: string; objective?: string }) => {
+      state.goalCalls.push(input);
+      return {
+        response: state.goalResult.response,
+        snapshot,
+        startedTurn: state.goalResult.startedTurn,
+      };
+    },
+    listDynamicWorkflowRuns: async () =>
+      state.dwfRuns.map((run) => ({
+        resumable: run.resumable ?? false,
+        runId: run.runId,
+        status: run.status,
+      })),
+    resumeWorkflowRun: async (input: { workId: string }) => {
+      state.resumeCalls.push(input.workId);
+      return state.resumeResult ?? { ok: true, runId: input.workId };
+    },
     sessionId,
     snapshot,
-    stopActiveTurn: async () => undefined,
+    stopActiveTurn: async () => {
+      state.stopCalls += 1;
+    },
     submitPrompt: async (
       text: string,
       _options?: {
@@ -732,4 +770,305 @@ test("acp agent: invalid live TodoWrite JSON closes the connection instead of hi
   await f.connection.closed;
   assert.match(f.failures[0]!.message, /projection failed/);
   assert.ok(f.failures[0]!.cause instanceof SyntaxError);
+});
+
+// ── /goal 与 /dwf 的本地命令路由（不进模型）────────────────────────────────
+
+function collectUpdates(onPermission: () => string): {
+  app: ReturnType<typeof clientApp>;
+  updates: SessionUpdate[];
+} {
+  const updates: SessionUpdate[] = [];
+  const app = clientApp(onPermission, () => ({ action: "decline" })).onNotification(
+    methods.client.session.update,
+    ({ params }) => { updates.push(params.update); },
+  );
+  return { app, updates };
+}
+
+const settle = (ms = 10): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+test("acp agent: /goal show routes to session/goal, never to submitPrompt", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "No goal is set. Use /goal <objective> to set one.", startedTurn: false };
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(session.goalCalls.map((call) => call.action), ["show"]);
+    assert.equal(session.text, undefined, "local command must not reach submitPrompt");
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text.includes("No goal is set"),
+    ));
+  });
+});
+
+test("acp agent: /goal set emits the core response, then awaits the continuation turn", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "Goal active\nObjective: ship it", startedTurn: true };
+    let resolved: { stopReason: string } | undefined;
+    const pending = ctx
+      .request(methods.agent.session.prompt, {
+        prompt: [{ text: "/goal ship it", type: "text" }],
+        sessionId: created.sessionId,
+      })
+      .then((value) => {
+        resolved = value;
+        return value;
+      });
+    await settle();
+    assert.equal(resolved, undefined, "prompt must stay open until the turn settles");
+    assert.deepEqual(session.goalCalls, [
+      { action: "set", inputId: session.goalCalls[0]?.inputId, objective: "ship it" },
+    ]);
+    const inputId = session.goalCalls[0]!.inputId!;
+    assert.match(inputId, /^acp-goal-/);
+    // 别的 inputId 收口不能误释放本次等待。
+    session.emit({ payload: { inputId: "unrelated" }, type: "turn_complete" });
+    await settle();
+    assert.equal(resolved, undefined);
+    session.emit({ payload: { inputId }, type: "turn_complete" });
+    assert.equal((await pending).stopReason, "end_turn");
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text.startsWith("Goal active"),
+    ));
+  });
+});
+
+test("acp agent: /goal pause keeps the empty core response silent", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "", startedTurn: false };
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal pause", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(session.goalCalls.map((call) => call.action), ["pause"]);
+    assert.equal(
+      updates.filter((update) => update.sessionUpdate === "agent_message_chunk").length,
+      0,
+    );
+  });
+});
+
+test("acp agent: /goal op failure surfaces as a request error, not a fake turn", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    (session.handle as unknown as { goalCommand: () => Promise<never> }).goalCommand =
+      async () => {
+        throw new Error("Cannot manage goals while a prompt is running");
+      };
+    await assert.rejects(
+      ctx.request(methods.agent.session.prompt, {
+        prompt: [{ text: "/goal ship it", type: "text" }],
+        sessionId: created.sessionId,
+      }),
+      (error: unknown) => {
+        assert.match((error as Error).message, /Cannot manage goals/);
+        return true;
+      },
+    );
+  });
+});
+
+test("acp agent: session/cancel during a waited goal turn returns cancelled and stops the core turn", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "Goal resumed", startedTurn: true };
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal resume", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    await settle();
+    ctx.notify(methods.agent.session.cancel, { sessionId: created.sessionId });
+    assert.equal((await pending).stopReason, "cancelled");
+    assert.equal(session.stopCalls, 1);
+  });
+});
+
+test("acp agent: /dwf list and resume route through the dwf wire surface", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.dwfRuns = [{ runId: "dwfrun_1", status: "running" }];
+    let result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/dwf list", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text.includes("dwfrun_1 · running"),
+    ));
+    assert.equal(session.text, undefined, "dwf command must not reach submitPrompt");
+
+    result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/dwf resume dwfrun_1", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(session.resumeCalls, ["dwfrun_1"]);
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text === "Resumed dynamic workflow run dwfrun_1.",
+    ));
+  });
+});
+
+test("acp agent: /dwf cancel without runId cancels the single in-flight run", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.dwfRuns = [{ runId: "dwfrun_live", status: "running" }];
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/dwf cancel", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(session.cancelTaskCalls, ["dwfrun_live"]);
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text === "Cancelled dynamic workflow run dwfrun_live.",
+    ));
+  });
+});
+
+test("acp agent: other slash input keeps the P005 verbatim forward path", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/model glm-5", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, "/model glm-5");
+    assert.deepEqual(session.goalCalls, []);
+    assert.deepEqual(session.resumeCalls, []);
+  });
+});
+
+test("acp agent: available_commands_update advertises goal and dwf after new/resume", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+    await ctx.request(methods.agent.session.resume, {
+      cwd: "/workspace",
+      sessionId: "sess_resumed",
+    });
+    await settle(20);
+    const commands = updates.flatMap((update) =>
+      update.sessionUpdate === "available_commands_update"
+        ? update.availableCommands.map((command) => command.name)
+        : [],
+    );
+    assert.deepEqual(commands.sort(), ["dwf", "dwf", "goal", "goal"]);
+  });
+});
+
+test("acp agent: a second prompt while a local command is in flight is rejected", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "Goal active", startedTurn: true };
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal ship it", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    await settle();
+    await assert.rejects(
+      ctx.request(methods.agent.session.prompt, {
+        prompt: [{ text: "/dwf list", type: "text" }],
+        sessionId: created.sessionId,
+      }),
+      (error: unknown) => {
+        assert.match((error as Error).message, /already running/);
+        return true;
+      },
+    );
+    session.emit({ payload: { inputId: session.goalCalls[0]?.inputId }, type: "turn_complete" });
+    assert.equal((await pending).stopReason, "end_turn");
+  });
 });

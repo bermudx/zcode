@@ -3352,3 +3352,156 @@ test("sessionSnapshotSeed 回退到 projection（无 runtime.contextUsage）", a
     await rm(dir, { force: true, recursive: true });
   }
 });
+
+// ── /goal 与 /dwf 的 handle wire 面（goalCommand / workflowRuns / resumeWorkflowRun）──
+
+test("goalCommand 校验回包并合并快照 settings", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const snapshot = makeSnapshot();
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/goal") {
+      return {
+        response: "Goal active\nObjective: ship it",
+        snapshot: {
+          ...snapshot,
+          settings: {
+            ...snapshot.settings,
+            model: { ...snapshot.settings.model, current: { modelId: "glm-5.3", providerId: "zai" } },
+          },
+        },
+        startedTurn: true,
+      };
+    }
+    throw new Error(`unexpected request: ${request.method}`);
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    const result = await handle.goalCommand({
+      action: "set",
+      inputId: "acp-goal-1",
+      objective: "ship it",
+    });
+    assert.equal(result.response, "Goal active\nObjective: ship it");
+    assert.equal(result.startedTurn, true);
+    const call = core.requests.find((r) => r.method === "session/goal");
+    assert.deepEqual(call?.params, {
+      action: "set",
+      inputId: "acp-goal-1",
+      objective: "ship it",
+      sessionId: SID,
+    });
+    assert.equal(handle.getModel(), "zai/glm-5.3", "回包快照必须并入 handle");
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("goalCommand 不透传空 objective，schema 外字段被拒", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/goal") {
+      return { response: "ok", snapshot: makeSnapshot() };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    await handle.goalCommand({ action: "show", inputId: "acp-goal-2" });
+    const call = core.requests.find((r) => r.method === "session/goal");
+    assert.deepEqual(call?.params, { action: "show", inputId: "acp-goal-2", sessionId: SID });
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("listDynamicWorkflowRuns 走 v4 workflowRuns query 并校验条目", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "v4/conversation/workflowRuns") {
+      return {
+        runs: [
+          { label: "deploy check", resumable: true, runId: "dwfrun_1", status: "stopped", updatedAt: 1_700_000_000_000 },
+          { resumable: false, runId: "dwfrun_2", status: "running" },
+        ],
+      };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    const runs = await handle.listDynamicWorkflowRuns({ limit: 20 });
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0]?.label, "deploy check");
+    assert.equal(runs[0]?.resumable, true);
+    const call = core.requests.find((r) => r.method === "v4/conversation/workflowRuns");
+    assert.deepEqual(call?.params, { limit: 20, sessionId: SID });
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("resumeWorkflowRun：accepted → ok；业务拒绝还原结构化 reason；其它 fault 上抛", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let ack: Record<string, unknown> = {
+    commandId: "stub",
+    revisionAtDecision: 1,
+    status: "accepted",
+  };
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "v4/command") {
+      const payload = (request.params as { payload?: { workId?: string } }).payload;
+      assert.equal((request.params as { type?: string }).type, "resumeWorkflowRun");
+      return { ...ack, commandId: (request.params as { commandId: string }).commandId, workId: payload?.workId };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    const ok = await handle.resumeWorkflowRun({ workId: "dwfrun_1" });
+    assert.deepEqual(ok, { ok: true, runId: "dwfrun_1" });
+
+    ack = {
+      commandId: "stub",
+      message: "only a stopped run can be resumed",
+      reasonCode: "fault.command.workflowRunResumeRejected.not_resumable",
+      revisionAtDecision: 1,
+      status: "rejected",
+    };
+    const rejected = await handle.resumeWorkflowRun({ workId: "dwfrun_2" });
+    assert.deepEqual(rejected, {
+      message: "only a stopped run can be resumed",
+      ok: false,
+      reason: "not_resumable",
+    });
+
+    ack = {
+      commandId: "stub",
+      reasonCode: "fault.command.capabilityUnsupported",
+      revisionAtDecision: 1,
+      status: "rejected",
+    };
+    await assert.rejects(
+      handle.resumeWorkflowRun({ workId: "dwfrun_3" }),
+      /capabilityUnsupported/,
+    );
+    const commands = core.requests.filter((r) => r.method === "v4/command");
+    assert.deepEqual(
+      commands.map((r) => (r.params as { payload?: { workId?: string } }).payload?.workId),
+      ["dwfrun_1", "dwfrun_2", "dwfrun_3"],
+    );
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});

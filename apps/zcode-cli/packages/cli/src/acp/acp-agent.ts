@@ -43,6 +43,15 @@ import {
   type AcpPermissionResult,
 } from "./acp-project.js";
 import type { AcpCorePort, AcpSession } from "./acp-sessions.js";
+import {
+  localSlashCommandsUpdate,
+  newGoalInputId,
+  parseLocalSlashCommand,
+  runDwfCommand,
+  runGoalCommand,
+  watchTurnSettlement,
+  type AcpLocalCommand,
+} from "./acp-commands.js";
 import type { SendInputOptions } from "../attach/attach-steer.js";
 
 const INVALID_PARAMS = -32602;
@@ -210,6 +219,18 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     sessionId: session.handle.sessionId,
   });
 
+  /**
+   * 会话建立后广播本地命令面。必须让 session/new|resume 的响应先落线再发这条
+   * update（客户端此刻才认识 sessionId），故推迟一个宏任务；更新队列本身的写入
+   * 是异步 drain，顺序由这里保证。
+   */
+  const advertiseLocalCommands = (client: AgentContext, session: AcpSession): void => {
+    setTimeout(() => {
+      if (connectionFailure) return;
+      notifyUpdate(client, session.handle.sessionId, localSlashCommandsUpdate());
+    }, 0);
+  };
+
   app.onRequest(methods.agent.initialize, () => {
     return {
       agentCapabilities: {
@@ -235,6 +256,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     }
     const session = await options.sessions.open(params.cwd);
     bindSession(client, session);
+    advertiseLocalCommands(client, session);
     return sharedOptions(session);
   });
 
@@ -244,6 +266,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
       sessionId: params.sessionId,
     });
     bindSession(client, session);
+    advertiseLocalCommands(client, session);
     const response: ResumeSessionResponse = {
       configOptions: configOptionsFor(session),
       modes: buildModeState(session.handle.getMode()),
@@ -345,6 +368,76 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     activeTurns.get(params.sessionId)?.cancel();
   });
 
+  /**
+   * 本地命令回合（/goal、/dwf）：与普通 prompt 共用 in-flight 守卫、取消口与
+   * 输出队列；差异只在「不进模型」——core op 的回包文案以一条 agent_message_chunk
+   * 呈现，goal 的续跑轮由 awaitTurnSettlement 对齐（见 acp-commands.ts）。
+   */
+  const runLocalCommand = async (
+    client: AgentContext,
+    session: AcpSession,
+    command: AcpLocalCommand,
+  ): Promise<PromptResponse> => {
+    const sessionId = session.handle.sessionId;
+    const controller = new AbortController();
+    const turn: ActiveTurn = {
+      cancel: () => {
+        turn.cancelled = true;
+        controller.abort();
+        void session.handle.stopActiveTurn();
+      },
+      cancelled: false,
+    };
+    activeTurns.set(sessionId, turn);
+    session.cancel = turn.cancel;
+    const emit = emitterFor(client, session);
+    try {
+      if (command.kind === "goal") {
+        // settlement 订阅先于 session/goal 发出：续跑轮可能比 op 回包更早收口。
+        const inputId = newGoalInputId();
+        const watch = watchTurnSettlement(session.handle, inputId, controller.signal);
+        try {
+          const result = await runGoalCommand(session.handle, command.args, inputId);
+          // core 对 pause 之类的静默成功回空串：不伪造空消息气泡。
+          if (result.response.length > 0) {
+            emit([
+              {
+                content: { text: result.response, type: "text" },
+                sessionUpdate: "agent_message_chunk",
+              },
+            ]);
+          }
+          if (result.startedTurn && (await watch.promise) === "aborted") {
+            return { stopReason: "cancelled" } satisfies PromptResponse;
+          }
+        } finally {
+          watch.dispose();
+        }
+      } else {
+        const response = await runDwfCommand(session.handle, command.args);
+        emit([
+          {
+            content: { text: response, type: "text" },
+            sessionUpdate: "agent_message_chunk",
+          },
+        ]);
+      }
+      await pendingDrain;
+      if (connectionFailure) throw connectionFailure;
+      return { stopReason: "end_turn" } satisfies PromptResponse;
+    } catch (error) {
+      if (turn.cancelled || isAbortError(error)) {
+        return { stopReason: "cancelled" } satisfies PromptResponse;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      log?.warn?.("acp local command failed", { command: command.kind, error: message, sessionId });
+      throw new RequestError(INTERNAL_ERROR, message);
+    } finally {
+      activeTurns.delete(sessionId);
+      if (session.cancel === turn.cancel) session.cancel = undefined;
+    }
+  };
+
   app.onRequest(methods.agent.session.prompt, async ({ client, params }) => {
     const session = requireSession(params.sessionId);
     if (activeTurns.has(params.sessionId)) {
@@ -356,6 +449,12 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     const text = promptBlocksToText(params.prompt);
     if (text.length === 0) {
       throw new RequestError(INVALID_PARAMS, "Prompt contains no usable content");
+    }
+    // /goal 与 /dwf 是前端本地命令（TUI 的 command-center 同款）：ACP 客户端没有
+    // command-center，这里代为路由；其余 slash 输入维持 P005 的原文转发。
+    const localCommand = parseLocalSlashCommand(text);
+    if (localCommand) {
+      return await runLocalCommand(client, session, localCommand);
     }
     const controller = new AbortController();
     const turn: ActiveTurn = {
