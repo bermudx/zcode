@@ -142,7 +142,6 @@ export async function runAcpStdio(options: AcpRunOptions): Promise<number> {
   const sessions = new AcpCoreSessions({
     env: options.env,
     logger: options.logger,
-    version: options.version,
   });
   const connectionFailure = Promise.withResolvers<Error>();
   let firstFailure: Error | undefined;

@@ -32,7 +32,7 @@ Model selection:
 
 Environment:
   ZCODE_SERVER_BIN   core 二进制（缺省 PATH 里的 zcode），core 不存在时
-                     由 ensureServer 用它 spawn --socket --no-plugins。
+                     由 ensureServer 经 user 服务管理器拉起（--socket --no-plugins）。
 `;
 
 const main = async (): Promise<number> => {

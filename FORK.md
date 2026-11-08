@@ -77,12 +77,22 @@ Repository-local rerere is enabled; review every replayed resolution.
   available, and label it unverified otherwise.
 - One shared core process serves all workspaces, sessions and clients.
   The operator explicitly confirmed this requirement on 2026-11-08; it is not
-  one core per workspace, provider or frontend. The current workspace-keyed
-  socket/spawn implementation does not meet that target. Workspace identity
+  one core per workspace, provider or frontend. Workspace identity
   belongs to session routing and isolation inside the core, not to selecting
   a separate core process. Preserve workspace configuration, permission and
-  session boundaries while sharing the process. No lifetime/launcher change
-  has yet been implemented or approved by this clarification.
+  session boundaries while sharing the process.
+- Single-core transport/ownership (implemented on
+  `fix/edit-from-here-last-message`, pending lead review): the attach socket
+  derives from the data root only (`<dataBaseDir>/.zcode/v2/sockets/core.sock`),
+  never from workspace/provider/frontend. On Linux, clients auto-start the
+  core as a transient `systemd --user` service
+  (`piz-core-<sha256(socketPath)[:16]>`); requires systemd >= 254
+  (`--expand-environment=no`). The user service manager owns its
+  lifetime, so retiring any client scope (e.g. T3 ACP runtime) cannot kill it.
+  Other Unix platforms reuse an already-listening socket but fail explicitly
+  (no detached-spawn fallback) when the core is absent; win32 spawn stays
+  unsupported. Session workspace refs, adoption/orphan/drain accounting and
+  the no-plugins gate are unchanged.
 - Client and shared core must be built and installed as a matched pair. No
   cross-version protocol compatibility promise exists yet.
 - Preserve schema validation, workspace identity and path distinctions, session

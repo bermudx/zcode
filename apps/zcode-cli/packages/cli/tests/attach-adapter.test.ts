@@ -760,10 +760,7 @@ test("协议版本不匹配 → 退出码 2 与可操作错误", async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-version-"));
   const workspace = join(dir, "workspace");
   const { resolveSocketPath } = await import("../src/app-server-spawn.js");
-  const socketPath = resolveSocketPath(
-    { workspacePath: workspace },
-    { env: { ZCODE_DATA_BASE_DIR: dir } },
-  );
+  const socketPath = resolveSocketPath({ env: { ZCODE_DATA_BASE_DIR: dir } });
   await (await import("node:fs/promises")).mkdir(
     (await import("node:path")).dirname(socketPath),
     { recursive: true },
@@ -812,10 +809,7 @@ test("runAttachCommand 给传输接 stderr 诊断：畸形行有日志、连接�
   const dir = await mkdtemp(join(tmpdir(), "attach-transport-log-"));
   const workspace = join(dir, "workspace");
   const { resolveSocketPath } = await import("../src/app-server-spawn.js");
-  const socketPath = resolveSocketPath(
-    { workspacePath: workspace },
-    { env: { ZCODE_DATA_BASE_DIR: dir } },
-  );
+  const socketPath = resolveSocketPath({ env: { ZCODE_DATA_BASE_DIR: dir } });
   await (await import("node:fs/promises")).mkdir(
     (await import("node:path")).dirname(socketPath),
     { recursive: true },
@@ -2461,10 +2455,7 @@ test("loadStartupOptions 的 slashCommands 含协议目录里的自定义命令"
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-startup-"));
   const workspace = join(dir, "workspace");
   const { resolveSocketPath } = await import("../src/app-server-spawn.js");
-  const socketPath = resolveSocketPath(
-    { workspacePath: workspace },
-    { env: { ZCODE_DATA_BASE_DIR: dir } },
-  );
+  const socketPath = resolveSocketPath({ env: { ZCODE_DATA_BASE_DIR: dir } });
   const { mkdir } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
   await mkdir(dirname(socketPath), { recursive: true });

@@ -131,10 +131,7 @@ async function startHarness(): Promise<{
   const dir = await mkdtemp(join(tmpdir(), "attach-exit-hint-"));
   const workspace = join(dir, "workspace");
   const { resolveSocketPath } = await import("../src/app-server-spawn.js");
-  const socketPath = resolveSocketPath(
-    { workspacePath: workspace },
-    { env: { ZCODE_DATA_BASE_DIR: dir } },
-  );
+  const socketPath = resolveSocketPath({ env: { ZCODE_DATA_BASE_DIR: dir } });
   await mkdir(dirname(socketPath), { recursive: true });
   let creates = 0;
   // failResume：session/resume 显式报错（--resume 走 catch 路径的触发器）。

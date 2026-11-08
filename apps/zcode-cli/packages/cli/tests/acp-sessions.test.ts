@@ -49,6 +49,7 @@ async function fixture(t: test.TestContext) {
   const socketPath = join(directory, "core.sock");
   const sockets = new Set<Socket>();
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const connectedRefs: Array<{ workspaceIdentity?: string; workspacePath: string }> = [];
   let connectionCount = 0;
   let rejectClose = false;
   let seq = 0;
@@ -103,7 +104,11 @@ async function fixture(t: test.TestContext) {
     server.listen(socketPath, resolve);
   });
   const sessions = new AcpCoreSessions({
-    env: {}, version: "test", ensureConnected: async () => ({ socketPath }),
+    env: {},
+    ensureConnected: async (ref) => {
+      connectedRefs.push(ref);
+      return { socketPath };
+    },
   });
   t.after(async () => {
     await sessions.closeAll();
@@ -112,7 +117,7 @@ async function fixture(t: test.TestContext) {
     await rm(directory, { recursive: true, force: true });
   });
   return {
-    sessions, requests, sockets, notify,
+    sessions, requests, sockets, notify, connectedRefs, socketPath,
     get connectionCount() { return connectionCount; },
     get promptInput() { return promptInput; },
     rejectClose: (reject: boolean) => { rejectClose = reject; },
@@ -136,6 +141,24 @@ test("ACP real lane connects for new/resume and closes its owned socket", async 
   assert.equal(f.connectionCount, 1);
   await f.sessions.closeAll();
   await until(() => f.sockets.size === 0);
+});
+
+test("ACP lanes for different cwds converge on the single core and keep per-cwd workspace refs", async (t) => {
+  const f = await fixture(t);
+  await f.sessions.open("/workspace");
+  await f.sessions.open("/other");
+  // 单一 core：per-cwd lane 只是到同一端点的多条连接；workspace 身份仍随
+  // 会话级请求按 cwd 发送，不进入传输选择。
+  assert.equal(f.connectionCount, 2);
+  const creates = f.requests.filter((r) => r.method === "session/create");
+  assert.deepEqual(
+    creates.map((r) => (r.params.workspace as { workspacePath: string }).workspacePath),
+    ["/workspace", "/other"],
+  );
+  assert.deepEqual(
+    f.connectedRefs.map((r) => r.workspacePath),
+    ["/workspace", "/other"],
+  );
 });
 
 test("ACP bound resume preserves the active prompt waiter", { timeout: 5000 }, async (t) => {
