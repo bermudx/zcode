@@ -856,9 +856,20 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
     out-of-closure entries). It legitimately dropped the status-line.test.ts
     entry — fork commit c38a2e3f had already shrunk that file to 799 lines;
     the earlier hand-restore had resurrected a stale entry.
-- Deferred (noted for the operator, not fixed here): reviewer-B's suggestion
-  to narrow test-fake method casts, and bootstrap's resume-rejection comment
-  omitting `superseded` (the word list itself is complete).
+- Deferred items fixed (operator-approved follow-up): reviewer-B's test-fake
+  casts are narrowed — `runGoalCommand`/`runDwfCommand` params now declare the
+  members they consume (`Pick<AttachSessionHandle, …>`), the stale whole-result
+  cast in `runDwfCancel` is gone (the parsed member type already carries those
+  fields), and the test fakes/overrides are typed against those `Pick`s so
+  member names and signatures are checked instead of silenced. Two documented
+  foundry casts remain per file (snapshot stub, `asEvent`) plus the two
+  SDK-boundary `as never`s (elicitation client stub, negative wire-validation
+  payload — the invalid shape is the point). Bootstrap's resume-rejection doc
+  comment now lists `superseded`; the word list itself was already complete.
+  Discovery: `packages/cli` tsconfig includes only `src/**` — test files are
+  never typechecked (tsx strips types at run time), so test-type changes were
+  verified with a throwaway tsc project over the two test files; that run
+  caught a branded-`SessionId` slip the runtime passes straight through.
 - Verification: shared dist rebuilt (`tsc -b`); cli typecheck + oxlint clean;
   affected suites re-run once each (acp-commands 14/14, acp-agent 29/29,
   attach-adapter 72/72 — first acp-agent draft self-deadlocked two new tests,

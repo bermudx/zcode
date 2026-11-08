@@ -2,7 +2,15 @@
 // 订阅时序、dwf 分发文案。core 由 fake handle 承担——这里验的是命令层，不是 core。
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SessionEvent } from "@zcode/contracts";
+import type {
+  DynamicWorkflowRunResumeResult,
+  DynamicWorkflowRunSessionSummary,
+  SessionEvent,
+} from "@zcode/contracts";
+import type {
+  ZCodeSessionCancelBackgroundTaskResult,
+  ZCodeSessionGoalResult,
+} from "@zcode/shared";
 import {
   goalActionFromArgs,
   localSlashCommandsUpdate,
@@ -54,18 +62,22 @@ test("goalActionFromArgs maps TUI semantics onto session/goal actions", () => {
   });
 });
 
+// snapshot 全树（protocol/session/runtime/messages…）本套件不消费：路由层只读
+// response/startedTurn。铸造收口到这一处，goalCommand 的成员签名仍按真实成员受检。
+const stubSnapshot = { settings: {} } as unknown as ZCodeSessionGoalResult["snapshot"];
+
 test("runGoalCommand passes the caller's inputId through and returns core truth", async () => {
   const calls: unknown[] = [];
-  const handle = {
-    goalCommand: async (input: unknown) => {
+  const handle: Pick<AttachSessionHandle, "goalCommand"> = {
+    goalCommand: async (input) => {
       calls.push(input);
       return {
         response: "Goal active\nObjective: ship it",
-        snapshot: { settings: {} },
+        snapshot: stubSnapshot,
         startedTurn: true,
       };
     },
-  } as unknown as AttachSessionHandle;
+  };
   const inputId = newGoalInputId();
   const result = await runGoalCommand(handle, "ship it", inputId);
   assert.equal(result.response, "Goal active\nObjective: ship it");
@@ -75,23 +87,23 @@ test("runGoalCommand passes the caller's inputId through and returns core truth"
 
 test("runGoalCommand synthesizes feedback for the silent pause success", async () => {
   // core 对 pause 成功回空串（协议 lane 无气泡）；ACP 客户端没有目标面板，必须补一行。
-  const handle = {
+  const handle: Pick<AttachSessionHandle, "goalCommand"> = {
     goalCommand: async () => ({
       response: "",
-      snapshot: { settings: {} },
+      snapshot: stubSnapshot,
       startedTurn: false,
     }),
-  } as unknown as AttachSessionHandle;
+  };
   const result = await runGoalCommand(handle, "pause", "acp-goal-x");
   assert.equal(result.response, "Goal paused.");
   // 非空 core 回包原样透传，不叠加文案。
-  const visible = {
+  const visible: Pick<AttachSessionHandle, "goalCommand"> = {
     goalCommand: async () => ({
       response: "Goal paused\nObjective: ship it",
-      snapshot: { settings: {} },
+      snapshot: stubSnapshot,
       startedTurn: false,
     }),
-  } as unknown as AttachSessionHandle;
+  };
   assert.equal(
     (await runGoalCommand(visible, "pause", "acp-goal-y")).response,
     "Goal paused\nObjective: ship it",
@@ -99,27 +111,37 @@ test("runGoalCommand synthesizes feedback for the silent pause success", async (
 });
 
 function dwfHandle(options: {
-  runs?: { runId: string; status: string; resumable?: boolean }[];
-  cancelResult?: unknown;
-  resumeResult?: unknown;
-}): { handle: AttachSessionHandle; resumeCalls: string[] } {
+  runs?: { runId: string; status: DynamicWorkflowRunSessionSummary["status"]; resumable?: boolean }[];
+  cancelResult?: ZCodeSessionCancelBackgroundTaskResult;
+  resumeResult?: DynamicWorkflowRunResumeResult;
+}): {
+  handle: Pick<
+    AttachSessionHandle,
+    "cancelBackgroundTask" | "listDynamicWorkflowRuns" | "resumeWorkflowRun"
+  >;
+  resumeCalls: string[];
+} {
   const resumeCalls: string[] = [];
-  const handle = {
-    cancelBackgroundTask: async (taskId: string) =>
+  const handle: Pick<
+    AttachSessionHandle,
+    "cancelBackgroundTask" | "listDynamicWorkflowRuns" | "resumeWorkflowRun"
+  > = {
+    cancelBackgroundTask: async (taskId) =>
       options.cancelResult ?? { cancelled: true, status: "cancelled", taskId },
-    listDynamicWorkflowRuns: async (input?: { limit?: number }) => {
+    listDynamicWorkflowRuns: async (input) => {
       assert.equal(input?.limit, 20);
+      // 与真实 core 对齐：摘要里 resumable 由服务端算好，缺省即 false。
       return (options.runs ?? []).map((run) => ({
         resumable: run.resumable ?? false,
         runId: run.runId,
         status: run.status,
       }));
     },
-    resumeWorkflowRun: async (input: { workId: string }) => {
+    resumeWorkflowRun: async (input) => {
       resumeCalls.push(input.workId);
       return options.resumeResult ?? { ok: true, runId: input.workId };
     },
-  } as unknown as AttachSessionHandle;
+  };
   return { handle, resumeCalls };
 }
 
@@ -197,28 +219,29 @@ test("localSlashCommandsUpdate advertises exactly the two routed commands", () =
 });
 
 function turnEvent(
-  type: "turn_complete" | "turn_error" | "turn_started",
+  type: "turn_started" | "turn_complete" | "turn_error",
   inputId?: string,
 ): SessionEvent {
   return {
-    id: "evt",
+    // branded wire 字段（id/traceId）与断言无关，仅在铸造点收口；type/payload 仍受真实成员约束。
+    id: "evt" as SessionEvent["id"],
     payload: { inputId },
-    sessionId: "sess_1",
+    sessionId: "sess_1" as SessionEvent["sessionId"],
     sequenceNumber: 1,
     timestamp: new Date(),
-    traceId: "trace",
+    traceId: "trace" as SessionEvent["traceId"],
     type,
-  } as unknown as SessionEvent;
+  };
 }
 
 test("watchTurnSettlement resolves on the first matching turn end and filters by inputId", async () => {
   const sinks = new Set<(event: SessionEvent) => void>();
-  const handle = {
-    addSink: (sink: (event: SessionEvent) => void) => {
+  const handle: Pick<AttachSessionHandle, "addSink"> = {
+    addSink: (sink) => {
       sinks.add(sink);
       return () => sinks.delete(sink);
     },
-  } as unknown as Pick<AttachSessionHandle, "addSink">;
+  };
   const watch = watchTurnSettlement(handle, "goal-input-1");
   const other = watchTurnSettlement(handle, "goal-input-2");
   for (const sink of sinks) sink(turnEvent("turn_started", "goal-input-1"));
@@ -239,12 +262,12 @@ function sinkHandle(): {
   sinks: Set<(event: SessionEvent) => void>;
 } {
   const sinks = new Set<(event: SessionEvent) => void>();
-  const handle = {
-    addSink: (sink: (event: SessionEvent) => void) => {
+  const handle: Pick<AttachSessionHandle, "addSink"> = {
+    addSink: (sink) => {
       sinks.add(sink);
       return () => sinks.delete(sink);
     },
-  } as unknown as Pick<AttachSessionHandle, "addSink">;
+  };
   return { handle, sinks };
 }
 
@@ -279,15 +302,15 @@ test("watchTurnSettlement: our turn_started disarms the backstop", async () => {
 test("watchTurnSettlement: abort and dispose release the sink", async () => {
   const removed: number[] = [];
   const sinks = new Set<(event: SessionEvent) => void>();
-  const handle = {
-    addSink: (sink: (event: SessionEvent) => void) => {
+  const handle: Pick<AttachSessionHandle, "addSink"> = {
+    addSink: (sink) => {
       sinks.add(sink);
       return () => {
         sinks.delete(sink);
         removed.push(sinks.size);
       };
     },
-  } as unknown as Pick<AttachSessionHandle, "addSink">;
+  };
 
   const controller = new AbortController();
   const aborted = watchTurnSettlement(handle, "goal-input-1", controller.signal);

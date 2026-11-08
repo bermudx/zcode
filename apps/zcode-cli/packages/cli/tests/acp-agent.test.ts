@@ -10,42 +10,88 @@ import {
   type SessionUpdate,
   type Stream,
 } from "@agentclientprotocol/sdk";
-import type { PermissionBrokerRequest, PermissionBrokerResult } from "@zcode/contracts";
+import type {
+  CollaborationMode,
+  DynamicWorkflowRunResumeResult,
+  DynamicWorkflowRunSessionSummary,
+  PermissionBrokerRequest,
+  PermissionBrokerResult,
+  SessionEvent,
+} from "@zcode/contracts";
 import { createAcpAgentApp } from "../src/acp/acp-agent.js";
 import type { AcpCorePort, AcpSession } from "../src/acp/acp-sessions.js";
 import type { AttachSessionHandle } from "../src/attach/attach-session.js";
 
 type FakeModel = { modelId: string; providerId: string };
 
+// PermissionBrokerRequest 的身份/风控字段（branded id、枚举、requestedAt）按最小真实
+// 形状固定铸造；toolName/input 是适配层的分流依据，逐测试给定。
+let permissionRequestSeq = 0;
+function permissionRequest(
+  toolName: string,
+  input: unknown,
+  sessionId: string,
+): PermissionBrokerRequest {
+  return {
+    requestId: `req_${++permissionRequestSeq}`,
+    sessionId: sessionId as PermissionBrokerRequest["sessionId"],
+    traceId: "trace_acp" as PermissionBrokerRequest["traceId"],
+    toolCallId: "t1" as PermissionBrokerRequest["toolCallId"],
+    toolName,
+    input,
+    mode: "build",
+    ruleId: "acp-test",
+    reason: "acp test",
+    riskLevel: "low",
+    requestedAt: new Date(),
+  };
+}
+
+/** requestPermission 的回包对 fake 是 unknown（SendInputOptions 契约）；取断言需要的 answers。 */
+function modifiedAnswers(result: unknown): Record<string, unknown> {
+  const modified = (result as PermissionBrokerResult | undefined)?.modifiedInput;
+  return typeof modified === "object" && modified !== null && "answers" in modified
+    ? ((modified.answers as Record<string, unknown> | undefined) ?? {})
+    : {};
+}
+
+// core 事件流按字面量喂给 sink：wire 字段（branded id/timestamp/seq）与断言无关，
+// 铸造收口这一个点；type/payload 成员名仍受 SessionEvent 约束（拼错编译失败）。
+const asEvent = (event: unknown): SessionEvent => event as SessionEvent;
+
 function fakeSession(sessionId: string): {
   handle: AttachSessionHandle;
   results: PermissionBrokerResult[];
-  mode: string;
+  mode: CollaborationMode;
   model: FakeModel;
   text?: string;
   thoughtCalls: string[];
   goalCalls: { action: string; inputId?: string; objective?: string }[];
   goalResult: { response: string; startedTurn: boolean };
-  dwfRuns: { runId: string; status: string; resumable?: boolean }[];
+  dwfRuns: { runId: string; status: DynamicWorkflowRunSessionSummary["status"]; resumable?: boolean }[];
   resumeCalls: string[];
   cancelTaskCalls: string[];
-  resumeResult: unknown;
+  resumeResult: DynamicWorkflowRunResumeResult | undefined;
   stopCalls: number;
   emit: (event: unknown) => void;
 } {
-  const sinks = new Set<(event: unknown) => void>();
+  const sinks = new Set<(event: SessionEvent) => void>();
   const state = {
-    mode: "build",
+    mode: "build" as CollaborationMode,
     model: { modelId: "glm-5", providerId: "zhipu" },
     results: [] as PermissionBrokerResult[],
     text: undefined as string | undefined,
     thoughtCalls: [] as string[],
     goalCalls: [] as { action: string; inputId?: string; objective?: string }[],
     goalResult: { response: "", startedTurn: false },
-    dwfRuns: [] as { runId: string; status: string; resumable?: boolean }[],
+    dwfRuns: [] as {
+      runId: string;
+      status: DynamicWorkflowRunSessionSummary["status"];
+      resumable?: boolean;
+    }[],
     resumeCalls: [] as string[],
     cancelTaskCalls: [] as string[],
-    resumeResult: undefined as unknown,
+    resumeResult: undefined as DynamicWorkflowRunResumeResult | undefined,
     stopCalls: 0,
   };
   const reasoningFor = (modelId: string) =>
@@ -82,8 +128,26 @@ function fakeSession(sessionId: string): {
     },
     todos: [],
   };
-  const handle = {
-    addSink: (sink: (event: unknown) => void) => {
+  // snapshot 全树按 schema 是完整对象（protocol/session/runtime/messages…），本套件只经
+  // handle 消费局部形状；铸造收口这一处，handle 成员签名仍逐字受检。
+  const snapshotForHandle = snapshot as unknown as AttachSessionHandle["snapshot"];
+  const handle: Pick<
+    AttachSessionHandle,
+    | "addSink"
+    | "cancelBackgroundTask"
+    | "getMode"
+    | "goalCommand"
+    | "listDynamicWorkflowRuns"
+    | "resumeWorkflowRun"
+    | "sessionId"
+    | "snapshot"
+    | "setMode"
+    | "setModel"
+    | "setThoughtLevel"
+    | "stopActiveTurn"
+    | "submitPrompt"
+  > = {
+    addSink: (sink) => {
       sinks.add(sink);
       return () => sinks.delete(sink);
     },
@@ -92,11 +156,11 @@ function fakeSession(sessionId: string): {
       return { cancelled: true, status: "cancelled", taskId };
     },
     getMode: () => state.mode,
-    goalCommand: async (input: { action: string; inputId?: string; objective?: string }) => {
+    goalCommand: async (input) => {
       state.goalCalls.push(input);
       return {
         response: state.goalResult.response,
-        snapshot,
+        snapshot: snapshotForHandle,
         startedTurn: state.goalResult.startedTurn,
       };
     },
@@ -111,34 +175,26 @@ function fakeSession(sessionId: string): {
       return state.resumeResult ?? { ok: true, runId: input.workId };
     },
     sessionId,
-    snapshot,
+    snapshot: snapshotForHandle,
     stopActiveTurn: async () => {
       state.stopCalls += 1;
     },
-    submitPrompt: async (
-      text: string,
-      _options?: {
-        requestPermission?: (
-          request: PermissionBrokerRequest,
-          extra?: { signal?: AbortSignal },
-        ) => Promise<PermissionBrokerResult>;
-      },
-    ) => {
+    submitPrompt: async (prompt) => {
+      const text = typeof prompt === "string" ? prompt : prompt.text;
       state.text = text;
       for (const sink of sinks) {
-        sink({
-          payload: { delta: "hello", kind: "text_delta" },
-          type: "model_streaming",
-        });
+        sink(asEvent({ payload: { delta: "hello", kind: "text_delta" }, type: "model_streaming" }));
       }
       return { response: text };
     },
-    setMode: async (mode: string) => {
-      state.mode = mode;
+    setMode: async (mode) => {
+      // 适配层先按广告的 modes 校验 modeId 才会调进来；state 存的是校验后的词表值。
+      state.mode = mode as CollaborationMode;
       return { mode };
     },
-    setModel: async (value: string) => {
-      state.model = { modelId: value.split("/")[1] ?? value, providerId: value.split("/")[0] ?? "zhipu" };
+    setModel: async (value) => {
+      const spec = typeof value === "string" ? value : value.modelId;
+      state.model = { modelId: spec.split("/")[1] ?? spec, providerId: spec.split("/")[0] ?? "zhipu" };
       snapshot.settings.model.current = state.model;
       snapshot.settings.thoughtLevel = {
         ...snapshot.settings.thoughtLevel,
@@ -150,19 +206,22 @@ function fakeSession(sessionId: string): {
         ),
         current: undefined,
       };
-      return { model: value };
+      return { model: spec };
     },
-    setThoughtLevel: async (level: string) => {
+    setThoughtLevel: async (level) => {
       state.thoughtCalls.push(level);
       snapshot.settings.thoughtLevel.current = level;
       // 与真实句柄一致：mergeSettings 在回包合并期间就会向 sink 补发 model_selected。
-      for (const sink of sinks) sink({ payload: { modelSelection: state.model }, type: "model_selected" });
+      for (const sink of sinks) {
+        sink(asEvent({ payload: { modelSelection: state.model }, type: "model_selected" }));
+      }
       return { thoughtLevel: level };
     },
-  } as unknown as AttachSessionHandle;
+  };
+  // 测试只兑现上面声明的成员：Cast 收口到这一个消费边界（Pick → 完整 handle）。
   return Object.assign(state, {
-    emit: (event: unknown) => { for (const sink of sinks) sink(event); },
-    handle,
+    emit: (event: unknown) => { for (const sink of sinks) sink(asEvent(event)); },
+    handle: handle as AttachSessionHandle,
   });
 }
 
@@ -534,36 +593,30 @@ test("acp agent: AskUserQuestion uses form elicitation and returns answers", asy
       mcpServers: [],
     });
     const session = core.sessions.get(created.sessionId)!;
-    const handle = session.handle as unknown as {
-      submitPrompt: (
-        text: string,
-        options: {
-          requestPermission: (
-            request: PermissionBrokerRequest,
-          ) => Promise<PermissionBrokerResult>;
-        },
-      ) => Promise<unknown>;
-    };
-    handle.submitPrompt = async (_text, options) => {
-      const result = await options.requestPermission({
-        input: {
-          questions: [
-            {
-              header: "Scope",
-              options: [
-                { label: "Single", description: "One file" },
-                { label: "Repo", description: "Whole repository" },
-              ],
-              question: "Which scope?",
-            },
-          ],
-        },
-        requestId: "r1",
-        sessionId: created.sessionId,
-        toolCallId: "t1",
-        toolName: "AskUserQuestion",
-      } as unknown as PermissionBrokerRequest);
-      answers.push((result as { modifiedInput?: { answers?: Record<string, unknown> } }).modifiedInput?.answers ?? {});
+    const handle = session.handle;
+    handle.submitPrompt = async (_prompt, options) => {
+      answers.push(
+        modifiedAnswers(
+          await options?.requestPermission?.(
+            permissionRequest(
+              "AskUserQuestion",
+              {
+                questions: [
+                  {
+                    header: "Scope",
+                    options: [
+                      { label: "Single", description: "One file" },
+                      { label: "Repo", description: "Whole repository" },
+                    ],
+                    question: "Which scope?",
+                  },
+                ],
+              },
+              created.sessionId,
+            ),
+          ),
+        ),
+      );
       return { response: "" };
     };
     await ctx.request(methods.agent.session.prompt, {
@@ -589,22 +642,13 @@ test("acp agent: ExitPlanMode cannot be auto-approved without an explicit answer
       cwd: "/workspace",
       mcpServers: [],
     });
-    const handle = core.sessions.get(created.sessionId)!.handle as unknown as {
-      submitPrompt: (
-        text: string,
-        options: {
-          requestPermission: (request: PermissionBrokerRequest) => Promise<PermissionBrokerResult>;
-        },
-      ) => Promise<unknown>;
-    };
-    handle.submitPrompt = async (_text, options) => {
+    const handle = core.sessions.get(created.sessionId)!.handle;
+    handle.submitPrompt = async (_prompt, options) => {
+      // SendInputOptions 契约里回包是 unknown；适配层恒回 PermissionBrokerResult，单跳收窄。
       results.push(
-        await options.requestPermission({
-          requestId: "r1",
-          sessionId: created.sessionId,
-          toolCallId: "t1",
-          toolName: "ExitPlanMode",
-        } as unknown as PermissionBrokerRequest),
+        (await options?.requestPermission?.(
+          permissionRequest("ExitPlanMode", undefined, created.sessionId),
+        )) as PermissionBrokerResult,
       );
       return { response: "" };
     };
@@ -899,10 +943,9 @@ test("acp agent: /goal op failure surfaces as a request error, not a fake turn",
       mcpServers: [],
     });
     const session = core.sessions.get(created.sessionId)!;
-    (session.handle as unknown as { goalCommand: () => Promise<never> }).goalCommand =
-      async () => {
-        throw new Error("Cannot manage goals while a prompt is running");
-      };
+    session.handle.goalCommand = async () => {
+      throw new Error("Cannot manage goals while a prompt is running");
+    };
     await assert.rejects(
       ctx.request(methods.agent.session.prompt, {
         prompt: [{ text: "/goal ship it", type: "text" }],
@@ -980,9 +1023,7 @@ test("acp agent: cancelling a dwf command never stops the core turn", async () =
     const session = core.sessions.get(created.sessionId)!;
     // dwf 只是 op 往返：core 里没有「我们的」turn，取消不得 v4 stop 误伤其它客户端。
     let releaseList: (() => void) | undefined;
-    (session.handle as unknown as {
-      listDynamicWorkflowRuns: () => Promise<unknown[]>;
-    }).listDynamicWorkflowRuns = () =>
+    session.handle.listDynamicWorkflowRuns = () =>
       new Promise((resolve) => {
         releaseList = () => resolve([]);
       });

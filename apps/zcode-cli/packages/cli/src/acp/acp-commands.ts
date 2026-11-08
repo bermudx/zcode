@@ -20,6 +20,12 @@ export type AcpLocalCommand =
   | { args: string; kind: "dwf" }
   | { args: string; kind: "goal" };
 
+/** /dwf 消费的 handle 读面：命令层只依赖这三个成员，不持有整个 AttachSessionHandle。 */
+type DwfHandle = Pick<
+  AttachSessionHandle,
+  "cancelBackgroundTask" | "listDynamicWorkflowRuns" | "resumeWorkflowRun"
+>;
+
 /** TUI parseSlashCommand 同款词边界：命令词（含 /target 别名）+ 空格 + args；只认本地路由的名字。 */
 export function parseLocalSlashCommand(text: string): AcpLocalCommand | null {
   if (!text.startsWith("/")) return null;
@@ -65,7 +71,7 @@ export function newGoalInputId(): string {
 }
 
 export async function runGoalCommand(
-  handle: AttachSessionHandle,
+  handle: Pick<AttachSessionHandle, "goalCommand">,
   args: string,
   inputId: string,
 ): Promise<AcpGoalCommandResult> {
@@ -90,7 +96,7 @@ function goalResponseText(action: ZCodeSessionGoalAction, response: string): str
 }
 
 export async function runDwfCommand(
-  handle: AttachSessionHandle,
+  handle: DwfHandle,
   args: string,
 ): Promise<string> {
   const [action = "list", runId] = splitArgs(args);
@@ -114,7 +120,7 @@ export async function runDwfCommand(
 }
 
 async function runDwfCancel(
-  handle: AttachSessionHandle,
+  handle: DwfHandle,
   runId: string | undefined,
 ): Promise<string> {
   let targetRunId = runId;
@@ -133,14 +139,10 @@ async function runDwfCancel(
     targetRunId = target.runId;
   }
   // runId ≡ taskId：与 TUI lane 同一条 session/cancelBackgroundTask 路径。
-  const result = (await handle.cancelBackgroundTask(targetRunId)) as {
-    cancelled: boolean;
-    reason?: string;
-    status?: string;
-  };
-  if (!result?.cancelled) {
-    const reason = result?.reason ? `: ${result.reason}` : ".";
-    return `Could not cancel ${targetRunId} (${result?.status ?? "unknown"})${reason}`;
+  const result = await handle.cancelBackgroundTask(targetRunId);
+  if (!result.cancelled) {
+    const reason = result.reason ? `: ${result.reason}` : ".";
+    return `Could not cancel ${targetRunId} (${result.status})${reason}`;
   }
   return `Cancelled dynamic workflow run ${targetRunId}.`;
 }
