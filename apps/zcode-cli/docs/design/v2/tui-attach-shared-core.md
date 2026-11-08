@@ -737,6 +737,97 @@ resume 命令指向 `zcode --resume`。
 - 上报可靠性单测：单条失败重试后成功且重试复用同一 argv/seq、重试
   耗尽只回调一次 onError、心跳仅在绑定后重申最近状态。
 
+## OSC 7501 程序状态上报（客户端带内，2026-11-07）
+
+### 问题
+
+herdr 上报走 `execFile` 专用通道,只对装了 herdr 的环境生效。OSC 7501
+（<https://mitchellh.com/writing/program-status-osc7501>）是终端带内的
+程序状态协议:程序在自己的输出流上发 `ESC ] 7501 ; … ESC \`,良好终端
+忽略未知 OSC,实现了消费的终端/复用器（Ghostty 等）把状态渲染成通知/
+角标;SSH、容器、tmux 内同样有效。piz 作为终端程序应在此协议上报告
+状态,让任何终端(不只 herdr)都能看到 pane 里 piz 的 idle/working/
+blocked/done/error。
+
+### 设计
+
+wire 格式:`ESC ] 7501 ; state=<s>[:kind=<k>][:app=piz][:msg=<base64>]
+ESC \`。state ∈ idle|working|done|blocked|error;kind ∈ permission|
+question(auth 预留,暂无来源);msg 是单行 UTF-8 文本,base64 编码——
+换行先折叠为空格,超 160 个 code point 截断(不劈代理对;base64 字母
+表不含 `:`,定界安全)。
+
+状态所有权与 herdr reporter 同一裁决:reporter 只翻译,不新建状态机。
+两个输入源:
+
+1. **会话事件流**（`AttachSessionHandle.addSink`,经
+   `AttachRuntime.onSessionBound` 绑定,与 herdr reporter 同一模式）:
+
+   | 事件 | OSC 状态 |
+   | --- | --- |
+   | 绑定（新/恢复/换绑句柄） | idle |
+   | `turn_started` | working |
+   | `turn_complete` `resultType=success` | done（结果就绪、未被用户消费——pane 角标的典型用例） |
+   | `turn_complete` `resultType=cancelled` | idle（用户主动中断,正常结束,无待看结果） |
+   | `turn_complete` `resultType=error_*` | error（msg=resultType） |
+   | `turn_error` | error（msg=error.message） |
+
+2. **interaction 路由**（`AttachRuntime.routePermissionInteraction`/
+   `routeUserInputInteraction` 围绕 `serveInteraction` 的可选端口）:
+   blocked 只在面板真正渲染给用户时上报——`permission_requested`
+   事件区分不了"服务端自动应答、从未渲染"。
+
+   - `requestPermission` → `blocked:kind=permission`,msg=
+     `permission: <toolName>`
+   - `requestUserInput`（AskUserQuestion）→ `blocked:kind=question`,
+     msg=prompt
+   - `requestUserInput`（plan_approval/ExitPlanMode）→
+     `blocked:kind=permission`,msg=plan approval
+   - settle（应答送达或面板被撤,`finally`）→ 回到回合态:
+     有未结回合 working,否则 idle;但最近已发 done/error（回合先
+     结束、面板拆除晚到的竞态）时不覆盖。
+
+交付语义:与 execFile 不同,写 stdout 是带内顺序字节,不丢不乱序——
+**无重试、无心跳**;连续相同 (state,kind,msg) 去重不重发。写失败
+（流销毁/EPIPE）一次性禁用 reporter,诊断一次走 stderr,绝不影响
+TUI 渲染。OSC 字节与 TUI 帧共享同一 fd:OSC 序列不含光标操作,终端
+原子解析,帧间/帧内插入都安全。
+
+激活面:仅 piz 专用入口（`attachHerdrAgent==="piz"`）且
+`ctx.stdout.isTTY`;monolith 入口与非 TTY stdout（管道/CI 捕获）一
+字节不发。注意 util-linux `script` 下 stdout 是 pty,isTTY 为真,
+照常发射（pty 冒烟即依赖此）。与 herdr reporter 并存、互不依赖;
+herdr 的 execFile 通道保留不动（herdr 当前只认那条路）。
+
+退出语义:`runTui` 正常返回（TUI 已拆屏、终端回主屏）后先发
+`state=idle` 再打退出续接提示——进程将消失,残留 done/blocked 角标会
+误导。`finish` 之后 reporter 静默:runtime.close() 窗口里迟到的
+interaction settle、换绑、事件一律不再写字节（exit idle 是终态,不得
+被 stale 状态覆盖）。启动/运行失败路径(catch)若 reporter 已建,发
+`state=error` 后随进程退出;信号退出走 reap-then-reraise,到不了
+这里,接受残留。
+
+已知限制（review 记录,按需跟进）:并发 interaction 面板（core 侧
+按会话串行,理论情形）时 blocked/resolved 只反映最近一次转换;应答
+grace 期（2s）内同 requestId 的 re-announce 会先 blocked 再立即
+resolved,角标闪一次即自愈。
+
+### 验收
+
+- pty 实测（dev 构建 + 隔离数据目录）:启动 bind 发
+  `state=idle:app=piz`,退出 0 后再发一次 idle;字节为合法 OSC
+  （ST 终止),屏幕无可见乱码。
+- 单测（`tests/attach-osc-status-reporter.test.ts`):字节格式
+  （base64/160 code point 截断不劈代理对/换行折叠单行化/定界/字段
+  序）、事件→状态映射（含 resultType 分支与 turn_error msg）、
+  interaction 端口（三种 blocked kind、settle 回落、done/error 不被
+  晚到 settle 覆盖）、去重、写失败禁用 + 单次诊断、finish 后任何
+  来源（事件/端口/换绑）都不再发、bind 换绑重发 idle。
+- 接线单测:isTTY/入口 gate（非 TTY 假流零字节）;启动失败 catch
+  路径发 `state=error`（--resume 未知会话驱动）;router 端口在
+  serve 期间回调 blocked/resolved,permission 与 userInput 两条路由
+  的无 handler 早退都不触发。
+
 ### 输入提交迁移到 v4 `v4/command`（2026-11-01 实现）
 
 背景：`session/send` 在共享协议里已标 `@deprecated（部分）`，Electron 主路径是

@@ -12,6 +12,7 @@ import { uploadAttachment } from "../src/attach/attach-v4-attachments.js";
 import {
   AttachRuntime,
   createAttachPromptHandler,
+  type AttachInteractionStatusPort,
 } from "../src/attach/attach-tui-options.js";
 
 const SID = "sess-1";
@@ -1866,14 +1867,20 @@ function interactionCoreResponder(request: Captured, notify: (params: unknown) =
   return {};
 }
 
-async function startInteractionFixture(dir: string): Promise<{
+async function startInteractionFixture(
+  dir: string,
+  interactionStatus?: AttachInteractionStatusPort,
+): Promise<{
   core: FakeCore;
   handle: AttachSessionHandle;
   runtime: AttachRuntime;
 }> {
   const socketPath = join(dir, "core.sock");
   const core = await startFakeCore(socketPath, interactionCoreResponder);
-  const runtime = new AttachRuntime({ socketPath });
+  const runtime = new AttachRuntime({
+    socketPath,
+    ...(interactionStatus ? { interactionStatus } : {}),
+  });
   await runtime.connect();
   const handle = new AttachSessionHandle({
     client: () => runtime.currentClient(),
@@ -2224,6 +2231,122 @@ test("无 handler（无在途回合）时 permission → deny / userInput → de
       "decline",
     );
   } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+// ── interaction 面板状态端口（OSC 7501 reporter 的 blocked 真相源）──
+// 契约（spec「OSC 7501 程序状态上报」）：面板真正渲染给用户期间
+// interactionBlocked（permission 审批 / question wizard 各带 kind 与 msg），
+// settle 后 interactionResolved；无 handler 早退（面板从未出现）不触发。
+
+test("interactionStatus 端口：三种面板 blocked/resolved，无 handler 不触发", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-interaction-"));
+  type PortCall = { kind: "blocked" | "resolved"; blockedKind?: string; message?: string };
+  const calls: PortCall[] = [];
+  const port: AttachInteractionStatusPort = {
+    interactionBlocked: (kind, message) => {
+      calls.push({ kind: "blocked", blockedKind: kind, message });
+    },
+    interactionResolved: () => {
+      calls.push({ kind: "resolved" });
+    },
+  };
+  const { core, handle, runtime } = await startInteractionFixture(dir, port);
+  let release: (() => void) | undefined;
+  try {
+    const turn = handle.submitPrompt("hi", {
+      requestPermission: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { decision: "allow", reason: "ok", resolvedAt: new Date() };
+      },
+    });
+    await waitFor(() => core.requests.some((r) => r.method === "v4/command"));
+    calls.length = 0;
+
+    // AskUserQuestion → question wizard。
+    core.sendRequest("srv-q", "interaction/requestUserInput", {
+      prompt: "need clarification",
+      requestId: "req-port-q",
+      schema: { toolName: "AskUserQuestion" },
+      sessionId: SID,
+      toolName: "AskUserQuestion",
+    });
+    await waitFor(() => calls.some((c) => c.kind === "blocked"));
+    release?.();
+    await waitFor(() => core.responses.some((r) => r.id === "srv-q"));
+    await waitFor(() => calls.some((c) => c.kind === "resolved"));
+
+    // ExitPlanMode → plan_approval 走普通审批面板（kind=permission）。
+    core.sendRequest("srv-p1", "interaction/requestUserInput", {
+      requestId: "req-port-p1",
+      schema: { interaction: "plan_approval", toolName: "ExitPlanMode" },
+      sessionId: SID,
+      toolName: "ExitPlanMode",
+    });
+    await waitFor(() => calls.filter((c) => c.kind === "blocked").length === 2);
+    release?.();
+    await waitFor(() => core.responses.some((r) => r.id === "srv-p1"));
+    await waitFor(() => calls.filter((c) => c.kind === "resolved").length === 2);
+
+    // 普通审批 → permission + "permission: <toolName>"。
+    core.sendRequest("srv-p2", "interaction/requestPermission", {
+      input: { command: "rm x" },
+      options: PERMISSION_OPTIONS,
+      reason: "Bash requires approval",
+      requestId: "req-port-p2",
+      riskLevel: "high",
+      sessionId: SID,
+      toolCallId: "tc-1",
+      toolName: "Bash",
+    });
+    await waitFor(() => calls.filter((c) => c.kind === "blocked").length === 3);
+    release?.();
+    await waitFor(() => core.responses.some((r) => r.id === "srv-p2"));
+    await waitFor(() => calls.filter((c) => c.kind === "resolved").length === 3);
+
+    const blocked = calls.filter((c) => c.kind === "blocked");
+    assert.deepEqual(
+      blocked.map((c) => [c.blockedKind, c.message]),
+      [
+        ["question", "need clarification"],
+        ["permission", "plan approval"],
+        ["permission", "permission: Bash"],
+      ],
+    );
+
+    // 无 handler 早退：面板从未渲染，端口不得触发（userInput 与 permission
+    // 两条路由都要钉——早退守卫在端口调用之前是各自独立的）。
+    const before = calls.length;
+    core.sendRequest("srv-nh", "interaction/requestUserInput", {
+      requestId: "req-port-nh",
+      schema: { toolName: "AskUserQuestion" },
+      sessionId: "other-session",
+      toolName: "AskUserQuestion",
+    });
+    core.sendRequest("srv-nhp", "interaction/requestPermission", {
+      input: {},
+      options: PERMISSION_OPTIONS,
+      reason: "approval",
+      requestId: "req-port-nhp",
+      riskLevel: "low",
+      sessionId: "other-session",
+      toolCallId: "tc-9",
+      toolName: "Bash",
+    });
+    await waitFor(() => core.responses.some((r) => r.id === "srv-nh"));
+    await waitFor(() => core.responses.some((r) => r.id === "srv-nhp"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(calls.length, before, "no port calls without a rendered panel");
+
+    finishTurn(core);
+    await turn;
+  } finally {
+    release?.();
     await runtime.close();
     await core.close();
     await rm(dir, { force: true, recursive: true });

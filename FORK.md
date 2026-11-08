@@ -879,3 +879,54 @@ mapped), fork-behavior preservation (10 must-keeps). Consensus:
   architecture violation from `c7cf871e` lives on main.
 
 Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents.
+
+### 2026-11-08 — OSC 7501 程序状态上报（patch/osc7501-status）
+
+- Operator brief: "piz reports status through OSC 7501"
+  （[mitchellh.com/writing/program-status-osc7501](https://mitchellh.com/writing/program-status-osc7501)）。
+  piz attach 客户端把生命周期经终端带内 `ESC ] 7501 ; … ESC \` 报告：
+  idle（绑定/换绑/用户取消）、working（turn_started）、done（turn_complete
+  success）、blocked（kind=permission/question，interaction 面板渲染期）、
+  error（turn_error、`error_*` resultType、启动失败）；正常退出先发 idle 再打
+  退出续接提示。spec 先行（tui-attach-shared-core.md「OSC 7501 程序状态
+  上报」+ 根 GLOSSARY 词条）。
+- 实现与 herdr reporter 同一裁决（状态所有权在会话事件流 + interaction
+  路由，reporter 只翻译）：新 `osc-status-reporter.ts`（带内字节不丢不
+  乱序→无重试/心跳，(state,kind,msg) 去重，msg 160 字符截断后 base64，
+  写失败一次性禁用）；`AttachRuntime` 新增可选 `interactionStatus` 端口
+  （routePermission/routeUserInput 围绕 serveInteraction——blocked 的真相
+  在面板渲染，不在 permission_requested 事件，自动应答未渲染不计）；
+  attach-command 仅 piz 入口 + `ctx.stdout.isTTY` 激活，monolith/管道零
+  字节。herdr execFile 通道保留不动（herdr 当前只认那条路）。
+- Verification：cli **709/709 + attach-resume-target 11/11**（fork-tests
+  selected，全绿）；adapters signing 13/13；bootstrap socket-listener 4/4；
+  cli `tsc --noEmit` 0 错、oxlint 0/0；`architecture:check --changed --base
+  a971df4e` 0 违规。真实 pty 冒烟（util-linux `script` + 隔离
+  ZCODE_DATA_BASE_DIR + 真实 core spawn）：绑定 idle 字节落在终端流、双
+  Ctrl-C 干净退出 0 后退出 idle 先于续接提示（新回归
+  `attach-binary.smoke.test.ts` 第二用例）。
+- 新 worktree bootstrap 教训（本分支在全新 worktree 上完成）：只做 root
+  `pnpm install --frozen-lockfile`（文档已写明 nested 安装必败）；中途失败
+  的 `--dir apps/zcode-cli` 安装会**损坏包级链接**（contracts/node_modules
+  丢 zod → tui-pi tsc 出 implicit-any 假错），frozen 重装即修复，root TS
+  6.0.2 无需 5.9.3 遮蔽。SEA 资产测试还需 root `packages/shared`、
+  `packages/model-option-map` dist 与 `@zcode/node-repl-host`、
+  `@zcode/browser-use-plugin` 构建，全新 worktree 缺这些输出时 3 个 SEA
+  测试红（clean main 同红，环境性）。`architecture:check` 默认 origin/main
+  base 在本仓是分叉线，会把 attach-session.ts 813 行误报为新增——须显式
+  `--base <分支点>`。
+- Not exercised live（unverified）：真实 GLM 回合的 working/done、真实
+  审批/AskUserQuestion 的 blocked（翻译层由单测 + 路由测试覆盖，idle 字节
+  由 pty 冒烟覆盖）、Ghostty 端到端角标渲染。Not promoted；待 review +
+  merge 决定。
+- Review fix-pass（两个独立 subagent review，无 blocker；finding 均已
+  在分支修复）：① `finish` 后 reporter 完全静默——原实现只退订事件
+  sink，runtime.close() 窗口里迟到的 interaction settle/换绑仍可把
+  exit idle 覆盖成 stale working（`finished` 门禁在 emit 层，端口、
+  换绑、事件一律挡住）；② msg 单行化——换行折叠为空格、160 截断改按
+  code point（不劈代理对），对齐协议与 spec 的「单行」承诺。补钉：
+  catch 路径 `finish("error")` 的接线回归（--resume 未知会话驱动）、
+  permission 侧无 handler 早退不触发端口、晚到 settle 守卫的 error
+  半边、astral 截断/换行折叠字节回归、pty 冒烟 boot/exit 各自独享
+  45s 预算。已知限制记入 spec（并发面板、grace 期 re-announce 闪烁）；
+  spec 勘误：`script` 是 pty、照常发射，非「零字节」路径。
