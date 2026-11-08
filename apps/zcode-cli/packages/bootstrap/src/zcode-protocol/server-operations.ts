@@ -1515,6 +1515,10 @@ export async function activateSessionForResume(
   // 丢弃（applyResumeCompactContextWindow 原本只在 activateSessionRuntime 内生效）。
   const existing = context.sessions.get(params.sessionId);
   if (existing) {
+    // 3.17.2 起上游在恢复路径以 validateSessionActivationWorkspace 校验会话血缘
+    // （显式 workspace 连 ready 实例也不豁免）；本快路径先于 initialize 返回，
+    // 不校验就会成为该校验的旁路，且不匹配的请求不能先写 cap。
+    await validateSessionActivationWorkspace(context, params.sessionId, params.workspace);
     applyResumeCompactContextWindow(existing, params);
     return { record: existing };
   }
