@@ -3,7 +3,13 @@
 // core 由 fake port 承担——这里验的是 ACP 边界，不是 core 行为。
 import assert from "node:assert/strict";
 import test from "node:test";
-import { client, methods, type Stream } from "@agentclientprotocol/sdk";
+import {
+  client,
+  methods,
+  type SessionConfigOption,
+  type SessionUpdate,
+  type Stream,
+} from "@agentclientprotocol/sdk";
 import type { PermissionBrokerRequest, PermissionBrokerResult } from "@zcode/contracts";
 import { createAcpAgentApp } from "../src/acp/acp-agent.js";
 import type { AcpCorePort, AcpSession } from "../src/acp/acp-sessions.js";
@@ -17,6 +23,7 @@ function fakeSession(sessionId: string): {
   mode: string;
   model: FakeModel;
   text?: string;
+  thoughtCalls: string[];
   emit: (event: unknown) => void;
 } {
   const sinks = new Set<(event: unknown) => void>();
@@ -25,15 +32,38 @@ function fakeSession(sessionId: string): {
     model: { modelId: "glm-5", providerId: "zhipu" },
     results: [] as PermissionBrokerResult[],
     text: undefined as string | undefined,
+    thoughtCalls: [] as string[],
   };
+  const reasoningFor = (modelId: string) =>
+    modelId === "glm-5"
+      ? { defaultLevel: "high", levels: [
+          { label: "Low", value: "low" },
+          { label: "High", value: "high" },
+        ] }
+      : { defaultLevel: "max", levels: [
+          { label: "Max", value: "max" },
+        ] };
+  const modelEntry = (ref: FakeModel, label: string) => ({
+    label,
+    reasoning: reasoningFor(ref.modelId),
+    ref,
+  });
   const snapshot = {
     settings: {
       model: {
         available: [
-          { label: "GLM-5", ref: state.model },
-          { label: "GLM-4", ref: { modelId: "glm-4", providerId: "zhipu" } },
+          modelEntry(state.model, "GLM-5"),
+          modelEntry({ modelId: "glm-4", providerId: "zhipu" }, "GLM-4"),
         ],
         current: state.model,
+      },
+      thoughtLevel: {
+        available: [
+          { label: "Low", value: "low" },
+          { label: "High", value: "high" },
+        ],
+        current: undefined as string | undefined,
+        enabled: true,
       },
     },
     todos: [],
@@ -72,7 +102,22 @@ function fakeSession(sessionId: string): {
     setModel: async (value: string) => {
       state.model = { modelId: value.split("/")[1] ?? value, providerId: value.split("/")[0] ?? "zhipu" };
       snapshot.settings.model.current = state.model;
+      snapshot.settings.thoughtLevel = {
+        ...snapshot.settings.thoughtLevel,
+        available: [
+          ...snapshot.settings.thoughtLevel.available,
+          ...reasoningFor(state.model.modelId).levels,
+        ].filter((entry, index, all) =>
+          all.findIndex((other) => other.value === entry.value) === index,
+        ),
+        current: undefined,
+      };
       return { model: value };
+    },
+    setThoughtLevel: async (level: string) => {
+      state.thoughtCalls.push(level);
+      snapshot.settings.thoughtLevel.current = level;
+      return { thoughtLevel: level };
     },
   } as unknown as AttachSessionHandle;
   return Object.assign(state, {
@@ -166,6 +211,189 @@ test("acp agent: session/new exposes plan/build and a model config option", asyn
       value: "zhipu/glm-4",
     });
     assert.equal(core.sessions.get("sess_1")?.model.modelId, "glm-4");
+  });
+});
+
+test("acp agent: new and resume advertise the thought_level config option", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  await clientApp(() => "", () => ({ action: "decline" })).connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const effortOf = (
+      configOptions: readonly SessionConfigOption[] | null | undefined,
+    ) => configOptions?.find((option) => option.id === "thought_level");
+    const advertised = effortOf(created.configOptions);
+    assert.equal(advertised?.type, "select");
+    if (advertised?.type === "select") {
+      assert.deepEqual(
+        advertised.options.map((entry) => "value" in entry && entry.value),
+        ["low", "high"],
+      );
+      assert.equal(advertised.currentValue, "high");
+    }
+    const resumed = await ctx.request(methods.agent.session.resume, {
+      cwd: "/workspace",
+      sessionId: "sess_resumed",
+    });
+    assert.equal(effortOf(resumed.configOptions)?.type, "select");
+  });
+});
+
+test("acp agent: setting thought_level calls core once and returns confirmed options", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  await clientApp(() => "", () => ({ action: "decline" })).connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const response = await ctx.request(methods.agent.session.setConfigOption, {
+      configId: "thought_level",
+      sessionId: created.sessionId,
+      value: "low",
+    });
+    assert.deepEqual(core.sessions.get(created.sessionId)?.thoughtCalls, ["low"]);
+    const effort = response.configOptions.find((option) => option.id === "thought_level");
+    if (effort?.type !== "select") throw new Error("expected a select option");
+    assert.equal(effort.currentValue, "low");
+  });
+});
+
+test("acp agent: invalid or unknown effort values never reach the core setter", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  await clientApp(() => "", () => ({ action: "decline" })).connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    for (const params of [
+      { configId: "thought_level", sessionId: created.sessionId, value: "" },
+      { configId: "thought_level", sessionId: created.sessionId, value: "max" },
+      { configId: "nonsense", sessionId: created.sessionId, value: "low" },
+    ]) {
+      await assert.rejects(
+        ctx.request(methods.agent.session.setConfigOption, params),
+        (error: unknown) => {
+          assert.equal((error as { code?: number }).code, -32602);
+          return true;
+        },
+      );
+    }
+    await assert.rejects(
+      ctx.request(methods.agent.session.setConfigOption, {
+        configId: "thought_level",
+        sessionId: created.sessionId,
+        value: 3,
+      } as never),
+    );
+    (session.handle.snapshot as { settings: { thoughtLevel: { enabled: boolean } } })
+      .settings.thoughtLevel.enabled = false;
+    await assert.rejects(
+      ctx.request(methods.agent.session.setConfigOption, {
+        configId: "thought_level",
+        sessionId: created.sessionId,
+        value: "low",
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: number }).code, -32602);
+        return true;
+      },
+    );
+    assert.deepEqual(session.thoughtCalls, []);
+  });
+});
+
+test("acp agent: model switch replaces effort choices despite the merged union catalog", async () => {
+  const core = new FakeCore();
+  const updates: SessionUpdate[] = [];
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const testClient = client({ name: "test-client" }).onNotification(
+    methods.client.session.update, ({ params }) => { updates.push(params.update); },
+  );
+  await testClient.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    const switched = await ctx.request(methods.agent.session.setConfigOption, {
+      configId: "model",
+      sessionId: created.sessionId,
+      value: "zhipu/glm-4",
+    });
+    const effort = switched.configOptions.find((option) => option.id === "thought_level");
+    if (effort?.type !== "select") throw new Error("expected a select option");
+    assert.deepEqual(
+      effort.options.map((entry) => "value" in entry && entry.value),
+      ["max"],
+      "union thoughtLevel.available must not leak other-model levels",
+    );
+    assert.equal(effort.currentValue, "max");
+    session.emit({
+      payload: { modelSelection: session.model },
+      type: "model_selected",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const pushed = updates.find(
+      (update) => update.sessionUpdate === "config_option_update",
+    );
+    const pushedEffort = pushed?.configOptions.find(
+      (option) => option.id === "thought_level",
+    );
+    if (pushedEffort?.type !== "select") throw new Error("expected pushed select option");
+    assert.deepEqual(
+      pushedEffort.options.map((entry) => "value" in entry && entry.value),
+      ["max"],
+    );
+    await assert.rejects(
+      ctx.request(methods.agent.session.setConfigOption, {
+        configId: "thought_level",
+        sessionId: created.sessionId,
+        value: "low",
+      }),
+      /Unsupported reasoning effort/,
+    );
+    assert.deepEqual(session.thoughtCalls, []);
+  });
+});
+
+test("acp agent: a rejected core effort change surfaces without claiming success", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  await clientApp(() => "", () => ({ action: "decline" })).connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.handle.setThoughtLevel = async () => {
+      throw new Error("injected effort failure");
+    };
+    await assert.rejects(
+      ctx.request(methods.agent.session.setConfigOption, {
+        configId: "thought_level",
+        sessionId: created.sessionId,
+        value: "low",
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: number }).code, -32603);
+        return true;
+      },
+    );
+    const snapshot = session.handle.snapshot as {
+      settings: { thoughtLevel: { current?: string } };
+    };
+    assert.equal(snapshot.settings.thoughtLevel.current, undefined);
   });
 });
 

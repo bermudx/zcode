@@ -28,10 +28,17 @@ import {
 export const ACP_PLAN_MODE = "plan";
 export const ACP_BUILD_MODE = "build";
 export const ACP_MODEL_CONFIG_ID = "model";
+export const ACP_THOUGHT_LEVEL_CONFIG_ID = "thought_level";
 
 export interface CoreModelRef {
   modelId: string;
   providerId: string;
+}
+
+export interface CoreThoughtLevelOption {
+  value: string;
+  label: string;
+  description?: string;
 }
 
 export interface CoreModelOption {
@@ -39,6 +46,17 @@ export interface CoreModelOption {
   label: string;
   description?: string;
   disabledReason?: string;
+  reasoning?: {
+    levels: readonly CoreThoughtLevelOption[];
+    defaultLevel?: string;
+  };
+}
+
+export interface CoreThoughtLevelSettings {
+  enabled: boolean;
+  current?: string;
+  defaultLevel?: string;
+  available: readonly CoreThoughtLevelOption[];
 }
 
 export interface CoreModelSettings {
@@ -94,12 +112,15 @@ function enabledModels(settings: CoreModelSettings): CoreModelOption[] {
 }
 
 /** ACP 的模型选择走通用 config option（category=model），T3 的模型选择器就吃这一项。 */
-export function buildConfigOptions(settings: CoreModelSettings): SessionConfigOption[] {
+export function buildConfigOptions(
+  settings: CoreModelSettings,
+  thoughtLevel?: CoreThoughtLevelSettings,
+): SessionConfigOption[] {
   const available = enabledModels(settings);
   const currentValue =
     modelValue(settings.current) ?? modelValue(available[0]?.ref) ?? "";
   if (available.length === 0) return [];
-  return [
+  const options: SessionConfigOption[] = [
     {
       category: "model",
       currentValue,
@@ -114,6 +135,41 @@ export function buildConfigOptions(settings: CoreModelSettings): SessionConfigOp
       type: "select",
     },
   ];
+  const effort = thoughtLevelOption(settings, available, thoughtLevel);
+  if (effort) options.push(effort);
+  return options;
+}
+
+function thoughtLevelOption(
+  settings: CoreModelSettings,
+  available: readonly CoreModelOption[],
+  thoughtLevel: CoreThoughtLevelSettings | undefined,
+): SessionConfigOption | undefined {
+  if (!thoughtLevel?.enabled || !settings.current) return undefined;
+  const currentModel = available.find(
+    (option) =>
+      option.ref.providerId === settings.current?.providerId &&
+      option.ref.modelId === settings.current?.modelId,
+  );
+  const levels = currentModel?.reasoning?.levels ?? [];
+  if (levels.length === 0) return undefined;
+  const supported = new Set(levels.map((level) => level.value));
+  const currentValue =
+    [thoughtLevel.current, thoughtLevel.defaultLevel, currentModel?.reasoning?.defaultLevel]
+      .find((value): value is string => value !== undefined && supported.has(value)) ?? levels[0]!.value;
+  return {
+    category: "thought_level",
+    currentValue,
+    description: "Reasoning effort used for this session's turns",
+    id: ACP_THOUGHT_LEVEL_CONFIG_ID,
+    name: "Reasoning effort",
+    options: levels.map((level) => ({
+      description: level.description,
+      name: level.label,
+      value: level.value,
+    })),
+    type: "select",
+  };
 }
 
 const PERMISSION_KIND_TO_ACP: Record<string, PermissionOption["kind"]> = {

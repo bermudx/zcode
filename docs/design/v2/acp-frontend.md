@@ -63,6 +63,7 @@ Single owners, in order:
 | Permission / elicitation | core reverse request | one request per `requestId`; answer is the selected core option's `response` (attach mapping), or `answers` from the elicitation content |
 | Mode | core `session/setMode` | `session_mode_changed` event drives `current_mode_update`, not local optimism |
 | Model + compact cap | core `session/setModel` + `session/setCompactContextWindow` | `setModel` resolves the ref, then the GLM cap is re-synced from the new model id |
+| Reasoning effort | core `session/setThoughtLevel` (single owner; the handle snapshot is its projection) | ACP request → boundary validation against the current model's advertised `reasoning.levels` → await `handle.setThoughtLevel` (merges the confirmed snapshot) → full `configOptions` in the response |
 | Projection state | ACP connection | per-session projector (tool inputs, last plan); dies with the session |
 
 ### Lifecycle and failure invariants
@@ -116,6 +117,7 @@ error response.
 | `ExitPlanMode` | form elicitation with an explicit `approve` / `reject` enum; Auto/Full cannot silently approve a plan because the client must return a decision |
 | Modes | `plan` and `build`; any other core mode projects as `build` |
 | Models | `session/set_config_option` with `configId: "model"`, values `provider/model`; `config_option_update` on model change |
+| Reasoning effort | `session/set_config_option` with `configId: "thought_level"`, category `thought_level`; select choices come from the **current model's** `reasoning.levels` in `settings.model.available` (never the unioned `thoughtLevel.available`); `currentValue` falls back `thoughtLevel.current` → `thoughtLevel.defaultLevel` → model `reasoning.defaultLevel` → first level. The option is omitted when effort is disabled or the current model advertises no levels. The setter response returns the full `configOptions`; a model switch reprojects effort choices through the existing `config_option_update` lane. Effort-only changes from other clients are not newly subscribed by this fix |
 | Compact cap | applied on create/resume/model change via `syncCompactContextWindow` (GLM → 262K) |
 | MCP from the ACP client | ignored and logged; core keeps its own MCP configuration |
 | Files/terminals | core executes them; `fs/*` and `terminal/*` are neither advertised nor used |
