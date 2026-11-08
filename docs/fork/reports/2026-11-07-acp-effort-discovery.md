@@ -65,3 +65,11 @@ unverified; neither the screenshot nor static code establishes them.
 
 The pre-existing untracked adapters backup directory was left untouched.
 There is no configured fork issue tracker, as recorded in `FORK.md`.
+
+## Implementation follow-up
+
+The operator authorized the repair using Fusion with piz and GLM Flash.
+The lead session has no inherited Herdr connection or explicit operator-supplied
+socket/session. The local Herdr skill requires an explicit connection outside
+Herdr, so worker launch is blocked pending that choice. No worker was started
+and no runtime code was changed during this setup attempt.
