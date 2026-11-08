@@ -1195,6 +1195,32 @@ test("applyStatePatch 合并 state/updated settings 并补发 ModelSelected", as
   }
 });
 
+test("applyStatePatch 仅思考档位变化也补发 ModelSelected（其他客户端改档位）", () => {
+  const handle = new AttachSessionHandle({
+    client: () => {
+      throw new Error("no client needed");
+    },
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  const events: unknown[] = [];
+  handle.addSink((event) => events.push(event));
+  const modelSelected = () =>
+    events.filter((e) => (e as { type?: string }).type === "model_selected").length;
+  handle.applyStatePatch({ thoughtLevel: { available: [], current: "low", enabled: true } });
+  assert.equal(modelSelected(), 1);
+  // 同档位再来一次：幂等。
+  handle.applyStatePatch({ thoughtLevel: { available: [], current: "low", enabled: true } });
+  assert.equal(modelSelected(), 1);
+  handle.applyStatePatch({ thoughtLevel: { available: [], current: "high", enabled: true } });
+  assert.equal(modelSelected(), 2);
+  // TUI 从事件读档位：事件必须携带最新档位，否则终端显示被清空。
+  const last = events.at(-1) as {
+    payload: { modelSelection?: { options?: { reasoningLevel?: string } } };
+  };
+  assert.equal(last.payload.modelSelection?.options?.reasoningLevel, "high");
+});
+
 // 回归证据（2026-10-22，`piz` 实测）：/new 走 session/create + session/subscribe
 // (includeSnapshot)。create 回的是完整 catalog，subscribe 回的 available 是
 // `modelAvailability:"current"` 投影——只剩当前模型。整包替换句柄快照后，

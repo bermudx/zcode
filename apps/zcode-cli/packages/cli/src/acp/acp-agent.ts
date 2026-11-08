@@ -77,6 +77,8 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   const projectors = new Map<string, AcpEventProjector>();
   const unsubscribers = new Map<string, () => void>();
   const activeTurns = new Map<string, ActiveTurn>();
+  // 本连接自己发起的 set_config_option 在途计数：其结果由请求回包携带，不再重复推送。
+  const ownConfigChanges = new Map<string, number>();
   const log = options.logger;
   const updates: Array<{ client: AgentContext; sessionId: string; update: SessionUpdate; bytes: number }> = [];
   let queuedBytes = 0;
@@ -171,7 +173,8 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     const unsubscribe = session.handle.addSink((event) => {
       try {
         emit(projector.project(event));
-        if (event.type === "model_selected") {
+        if (event.type === "model_selected" && !ownConfigChanges.get(sessionId)) {
+          // 来自 core 的模型/档位变化（含其他客户端）；此刻重新读快照，不带过期值。
           emit([
             {
               configOptions: configOptionsFor(session),
@@ -259,6 +262,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
       throw new RequestError(INTERNAL_ERROR, `Could not close ACP session: ${message}`);
     }
     releaseSession(params.sessionId);
+    ownConfigChanges.delete(params.sessionId);
     activeTurns.delete(params.sessionId);
     return {};
   });
@@ -272,13 +276,28 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     return {};
   });
 
+  const trackOwnConfigChange = async <T>(
+    sessionId: string,
+    change: () => Promise<T>,
+  ): Promise<T> => {
+    ownConfigChanges.set(sessionId, (ownConfigChanges.get(sessionId) ?? 0) + 1);
+    try {
+      return await change();
+    } finally {
+      const left = (ownConfigChanges.get(sessionId) ?? 1) - 1;
+      if (left > 0) ownConfigChanges.set(sessionId, left);
+      else ownConfigChanges.delete(sessionId);
+    }
+  };
+
   app.onRequest(methods.agent.session.setConfigOption, async ({ params }) => {
     const session = requireSession(params.sessionId);
     if (params.configId === ACP_MODEL_CONFIG_ID) {
       if (typeof params.value !== "string") {
         throw new RequestError(INVALID_PARAMS, "Model config option requires a string value");
       }
-      await session.handle.setModel(params.value);
+      const model = params.value;
+      await trackOwnConfigChange(params.sessionId, () => session.handle.setModel(model));
       return { configOptions: configOptionsFor(session) };
     }
     if (params.configId === ACP_THOUGHT_LEVEL_CONFIG_ID) {
@@ -308,7 +327,8 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
           "Unsupported reasoning effort for the current model",
         );
       }
-      await session.handle.setThoughtLevel(params.value);
+      const level = params.value;
+      await trackOwnConfigChange(params.sessionId, () => session.handle.setThoughtLevel(level));
       log?.debug?.("acp reasoning effort changed", {
         sessionId: params.sessionId,
         value: params.value,
