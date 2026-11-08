@@ -859,7 +859,7 @@ test("acp agent: /goal set emits the core response, then awaits the continuation
   });
 });
 
-test("acp agent: /goal pause keeps the empty core response silent", async () => {
+test("acp agent: /goal pause synthesizes visible feedback for the silent core success", async () => {
   const core = new FakeCore();
   const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
   const { app: client, updates } = collectUpdates(() => "");
@@ -870,6 +870,8 @@ test("acp agent: /goal pause keeps the empty core response silent", async () => 
       mcpServers: [],
     });
     const session = core.sessions.get(created.sessionId)!;
+    // core 对 pause 成功刻意回空串（协议 lane 无气泡）；ACP 客户端没有目标面板，
+    // 必须补一行，否则命令看起来被吞。
     session.goalResult = { response: "", startedTurn: false };
     const result = await ctx.request(methods.agent.session.prompt, {
       prompt: [{ text: "/goal pause", type: "text" }],
@@ -877,9 +879,11 @@ test("acp agent: /goal pause keeps the empty core response silent", async () => 
     });
     assert.equal(result.stopReason, "end_turn");
     assert.deepEqual(session.goalCalls.map((call) => call.action), ["pause"]);
-    assert.equal(
-      updates.filter((update) => update.sessionUpdate === "agent_message_chunk").length,
-      0,
+    assert.deepEqual(
+      updates
+        .filter((update) => update.sessionUpdate === "agent_message_chunk")
+        .map((update) => update.content.type === "text" ? update.content.text : ""),
+      ["Goal paused."],
     );
   });
 });
@@ -932,6 +936,66 @@ test("acp agent: session/cancel during a waited goal turn returns cancelled and 
     ctx.notify(methods.agent.session.cancel, { sessionId: created.sessionId });
     assert.equal((await pending).stopReason, "cancelled");
     assert.equal(session.stopCalls, 1);
+  });
+});
+
+test("acp agent: session/cancel after the first goal turn still reaches the core stop", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    // prompt 只等第一轮：回合表已空，但 goal 续跑循环的后续轮（2..N）还在 core 侧
+    // 跑——此后的 cancel 必须仍走 v4 stop（暂停目标 + 中止当前轮）。
+    session.goalResult = { response: "Goal active", startedTurn: true };
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal ship it", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    await settle();
+    const inputId = session.goalCalls[0]!.inputId!;
+    session.emit({ payload: { inputId }, type: "turn_complete" });
+    assert.equal((await pending).stopReason, "end_turn");
+    ctx.notify(methods.agent.session.cancel, { sessionId: created.sessionId });
+    await settle();
+    assert.equal(session.stopCalls, 1);
+  });
+});
+
+test("acp agent: cancelling a dwf command never stops the core turn", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    // dwf 只是 op 往返：core 里没有「我们的」turn，取消不得 v4 stop 误伤其它客户端。
+    let releaseList: (() => void) | undefined;
+    (session.handle as unknown as {
+      listDynamicWorkflowRuns: () => Promise<unknown[]>;
+    }).listDynamicWorkflowRuns = () =>
+      new Promise((resolve) => {
+        releaseList = () => resolve([]);
+      });
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/dwf list", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    await settle();
+    ctx.notify(methods.agent.session.cancel, { sessionId: created.sessionId });
+    // 取消只置标志/abort 信号，不会 reject 挂起的 op 调用——手动放行后再等回包。
+    releaseList?.();
+    assert.equal((await pending).stopReason, "cancelled");
+    assert.equal(session.stopCalls, 0);
   });
 });
 

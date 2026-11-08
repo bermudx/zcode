@@ -73,6 +73,31 @@ test("runGoalCommand passes the caller's inputId through and returns core truth"
   assert.deepEqual(calls, [{ action: "set", inputId, objective: "ship it" }]);
 });
 
+test("runGoalCommand synthesizes feedback for the silent pause success", async () => {
+  // core 对 pause 成功回空串（协议 lane 无气泡）；ACP 客户端没有目标面板，必须补一行。
+  const handle = {
+    goalCommand: async () => ({
+      response: "",
+      snapshot: { settings: {} },
+      startedTurn: false,
+    }),
+  } as unknown as AttachSessionHandle;
+  const result = await runGoalCommand(handle, "pause", "acp-goal-x");
+  assert.equal(result.response, "Goal paused.");
+  // 非空 core 回包原样透传，不叠加文案。
+  const visible = {
+    goalCommand: async () => ({
+      response: "Goal paused\nObjective: ship it",
+      snapshot: { settings: {} },
+      startedTurn: false,
+    }),
+  } as unknown as AttachSessionHandle;
+  assert.equal(
+    (await runGoalCommand(visible, "pause", "acp-goal-y")).response,
+    "Goal paused\nObjective: ship it",
+  );
+});
+
 function dwfHandle(options: {
   runs?: { runId: string; status: string; resumable?: boolean }[];
   cancelResult?: unknown;
@@ -206,6 +231,48 @@ test("watchTurnSettlement resolves on the first matching turn end and filters by
   assert.equal(settled, false);
   assert.equal(await other.promise, "completed");
   for (const sink of sinks) sink(turnEvent("turn_complete", "goal-input-1"));
+  assert.equal(await watch.promise, "completed");
+});
+
+function sinkHandle(): {
+  handle: Pick<AttachSessionHandle, "addSink">;
+  sinks: Set<(event: SessionEvent) => void>;
+} {
+  const sinks = new Set<(event: SessionEvent) => void>();
+  const handle = {
+    addSink: (sink: (event: SessionEvent) => void) => {
+      sinks.add(sink);
+      return () => sinks.delete(sink);
+    },
+  } as unknown as Pick<AttachSessionHandle, "addSink">;
+  return { handle, sinks };
+}
+
+test("watchTurnSettlement: no-turn-start backstop resolves instead of hanging", async () => {
+  // startedTurn 只是 core 的前置检查，续跑可能空手而归且不发任何 turn 事件——
+  // 没有兜底，ACP prompt 会永久挂起。
+  const { handle, sinks } = sinkHandle();
+  const watch = watchTurnSettlement(handle, "goal-input-1", undefined, {
+    noTurnStartTimeoutMs: 20,
+  });
+  assert.equal(await watch.promise, "completed");
+  assert.equal(sinks.size, 0, "backstop must release the sink");
+});
+
+test("watchTurnSettlement: our turn_started disarms the backstop", async () => {
+  const { handle, sinks } = sinkHandle();
+  const watch = watchTurnSettlement(handle, "goal-input-1", undefined, {
+    noTurnStartTimeoutMs: 20,
+  });
+  for (const sink of sinks) sink(turnEvent("turn_started", "goal-input-1"));
+  // 兜底窗口过后仍未收口：真实 turn 的收口由 turn_end 保证，不受计时器约束。
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  let settled = false;
+  void watch.promise.then(() => {
+    settled = true;
+  });
+  assert.equal(settled, false);
+  for (const sink of sinks) sink(turnEvent("turn_error", "goal-input-1"));
   assert.equal(await watch.promise, "completed");
 });
 

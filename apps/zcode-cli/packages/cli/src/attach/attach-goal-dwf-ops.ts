@@ -14,25 +14,20 @@ import {
 import {
   V4_METHODS,
   v4ConversationWorkflowRunsResultSchema,
+  workflowRunResumeRejectionReasonSchema,
   WORKFLOW_RUN_RESUME_REJECTED_FAULT_PREFIX,
 } from "@zcode/shared/zcode-protocol-v4";
 import type { AttachClient } from "./attach-client.js";
 import { AttachV4CommandError, newCommandId, sendV4Command } from "./attach-v4-command.js";
 
 /**
- * resume 拒绝词表（core 只发 contracts `DynamicWorkflowRunResumeErrorReason` 里的值，
- * 见 bootstrap V4WorkflowRunResumeRejectedError）：这里做边界校验，未知后缀不伪装成
- * 业务分支，整体抛错。
+ * resume 拒绝词表：从共享 schema 的 options 派生（词表唯一权威在 contracts
+ * `DynamicWorkflowRunResumeErrorReason`，schema 是其镜像）。这里做边界校验，
+ * 未知后缀不伪装成业务分支，整体抛错。
  */
-const RESUME_REJECTION_REASONS: ReadonlySet<string> = new Set([
-  "not_found",
-  "not_resumable",
-  "superseded",
-  "already_running",
-  "script_missing",
-  "script_mismatch",
-  "compile_failed",
-]);
+const RESUME_REJECTION_REASONS: ReadonlySet<string> = new Set(
+  workflowRunResumeRejectionReasonSchema.options,
+);
 
 /**
  * 通用 `session/goal` 调用：结构化 action 直传，core 是 goal 状态/文案/replace 收敛/

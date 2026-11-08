@@ -8,7 +8,9 @@ import {
   zcodeSessionEventsResultSchema,
   zcodeSessionMessagesResultSchema,
   zcodeSessionRecallPreviousInputResultSchema,
+  zcodeSessionCancelBackgroundTaskResultSchema,
   zcodeUsageQuotaSnapshotSchema,
+  type ZCodeSessionCancelBackgroundTaskResult,
   type ZCodeSessionGoalAction,
   type ZCodeSessionGoalResult,
   type ZCodeSessionRawEvent,
@@ -733,11 +735,17 @@ export class AttachSessionHandle {
     };
   }
 
-  async cancelBackgroundTask(taskId: string): Promise<unknown> {
-    return await this.clientOf().request(zcodeProtocolMethods.sessionCancelBackgroundTask, {
-      backgroundTaskId: taskId,
-      sessionId: this.sessionId,
-    });
+  async cancelBackgroundTask(
+    taskId: string,
+  ): Promise<ZCodeSessionCancelBackgroundTaskResult> {
+    // wire 键是 taskId（strict schema）；早年误发 backgroundTaskId 会让 core 直接
+    // -32602 拒掉每一次 /dwf cancel——回包按共享 schema 校验后再交给上层。
+    return zcodeSessionCancelBackgroundTaskResultSchema.parse(
+      await this.clientOf().request(zcodeProtocolMethods.sessionCancelBackgroundTask, {
+        sessionId: this.sessionId,
+        taskId,
+      }),
+    );
   }
 
   async readTarget(): Promise<{ objective?: string; status?: string } | null> {

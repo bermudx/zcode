@@ -1,23 +1,14 @@
 {
- "version": 1,
- "violations": [
-  {
-   "rule": "max-file-lines",
-   "file": "apps/zcode-cli/packages/cli/src/attach/attach-session.ts",
-   "module": "app-server-attach",
-   "detail": "855",
-   "message": "文件 855 行，超过上限 800 行",
-   "fingerprint": "4519397bd0ec6fce",
-   "global": false
-  },
-  {
-   "rule": "max-file-lines",
-   "file": "apps/zcode-cli/packages/tui-pi/tests/status-line.test.ts",
-   "module": "tui-pi",
-   "detail": "812",
-   "message": "文件 812 行，超过上限 800 行",
-   "fingerprint": "8b5436e5812647f3",
-   "global": false
-  }
- ]
+  "version": 1,
+  "violations": [
+    {
+      "rule": "max-file-lines",
+      "file": "apps/zcode-cli/packages/cli/src/attach/attach-session.ts",
+      "module": "app-server-attach",
+      "detail": "863",
+      "message": "文件 863 行，超过上限 800 行",
+      "fingerprint": "aeedcd0d9f60570d",
+      "global": false
+    }
+  ]
 }

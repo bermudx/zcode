@@ -76,9 +76,17 @@ export async function runGoalCommand(
     inputId,
   });
   return {
-    response: result.response,
+    response: goalResponseText(action, result.response),
     startedTurn: result.startedTurn === true,
   };
+}
+
+/**
+ * core 对 pause 的成功刻意回空串（协议 lane 不想要无意义气泡），但 ACP 客户端没有
+ * 目标面板——不补一行，用户会看到命令被吞。与 TUI lane 的本地 handler 文案同款。
+ */
+function goalResponseText(action: ZCodeSessionGoalAction, response: string): string {
+  return action === "pause" && response.length === 0 ? "Goal paused." : response;
 }
 
 export async function runDwfCommand(
@@ -155,10 +163,21 @@ export function localSlashCommandsUpdate(): SessionUpdate {
 }
 
 export interface TurnSettlementWatch {
-  /** "completed" = 第一轮 turn_complete/turn_error 已到；"aborted" = signal 触发或 dispose。 */
+  /** "completed" = 第一轮收口（turn_end 或 no-turn 兜底）；"aborted" = signal 触发或 dispose。 */
   promise: Promise<"aborted" | "completed">;
-  /** 未 settle 就放弃等待时调用，注销 sink 防泄漏。 */
+  /** 未 settle 就放弃等待时调用，注销 sink 与计时器防泄漏。 */
   dispose(): void;
+}
+
+export interface TurnSettlementOptions {
+  /**
+   * no-turn 兜底：core 的 `startedTurn` 只是启动前置检查，续跑命令入队后仍可能
+   * 直接空手而归（让位 pending 命令、目标已变、prepare boundary 抛错——这些路径
+   * 不发任何 turn 事件）。超过此时长仍未见到 turn_started(ours) 就按已完成收口，
+   * 不让 ACP prompt 永久挂起；真实 turn 启动只需亚秒到秒级，30s 极少误伤，
+   * 误伤后果也只是提前返回 end_turn（该轮照常作为后台更新流给客户端）。
+   */
+  noTurnStartTimeoutMs?: number;
 }
 
 /**
@@ -167,12 +186,14 @@ export interface TurnSettlementWatch {
  * 整个 goal 循环，后续轮作为普通 session/update 继续流给客户端。
  *
  * 必须在 session/goal 发出**之前**订阅：续跑轮可能在 op 回包之前就快速失败收口，
- * 事后订阅会把 ACP prompt 卡成永不返回。
+ * 事后订阅会把 ACP prompt 卡成永不返回。一旦见到 turn_started(ours)，其收口必然
+ * 有 turn_complete/turn_error（cancelled 也是 complete），此后不再受兜底计时约束。
  */
 export function watchTurnSettlement(
   handle: Pick<AttachSessionHandle, "addSink">,
   inputId: string,
   signal?: AbortSignal,
+  options?: TurnSettlementOptions,
 ): TurnSettlementWatch {
   let resolve!: (outcome: "aborted" | "completed") => void;
   const promise = new Promise<"aborted" | "completed">((res) => {
@@ -181,15 +202,24 @@ export function watchTurnSettlement(
   const finish = (outcome: "aborted" | "completed"): void => {
     unsubscribe();
     signal?.removeEventListener("abort", onAbort);
+    clearTimeout(noTurnTimer);
     resolve(outcome);
   };
   const onAbort = (): void => finish("aborted");
   const unsubscribe = handle.addSink((event) => {
+    if (event.type === "turn_started") {
+      const payload = event.payload as { inputId?: string } | undefined;
+      if (payload?.inputId === inputId) clearTimeout(noTurnTimer);
+      return;
+    }
     if (event.type !== "turn_complete" && event.type !== "turn_error") return;
     const payload = event.payload as { inputId?: string } | undefined;
     if (payload?.inputId !== inputId) return;
     finish("completed");
   });
+  const noTurnTimer = setTimeout(() => finish("completed"), options?.noTurnStartTimeoutMs ?? 30_000);
+  // node 计时器不阻塞退出。
+  (noTurnTimer as { unref?: () => void }).unref?.();
   if (signal) {
     if (signal.aborted) {
       finish("aborted");

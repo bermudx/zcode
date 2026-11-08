@@ -137,7 +137,11 @@ Rules:
   set-over-existing → replace collapse and the plan-mode continuation note;
   the adapter passes the parsed action through and renders the core's
   `response` verbatim as one `agent_message_chunk` (no model turn is
-  involved).
+  involved). One ACP-lane exception: a successful `pause` returns an empty
+  `response` by design (the protocol lane wants no bubble), but ACP clients
+  have no goal panel — the adapter synthesizes `Goal paused.` so the
+  command is not swallowed. A genuinely empty core response still emits no
+  chunk.
 - `session/goal` results are schema-validated (`zcodeSessionGoalResultSchema`)
   at the boundary; the returned snapshot merges into the handle like every
   other mutation.
@@ -149,11 +153,26 @@ Rules:
   (`turn_complete` / `turn_error`, both carry `inputId`); later goal-loop
   turns keep streaming as ordinary `session/update`s after the prompt
   returns. This is the ACP-lane boundary of the background continuation the
-  TUI also does not block on.
-- `session/cancel` during a waited continuation goes through the existing
-  v4-stop path (stop aborts the turn and pauses an active goal), after
-  which the waiter resolves and the prompt returns `stopReason:
-  "cancelled"`.
+  TUI also does not block on. `startedTurn` is a pre-check, not a promise:
+  the queued continuation can still come back empty-handed (deferred to a
+  pending command, goal changed, prepare-boundary throw) **without emitting
+  any turn event**, so the watch carries a no-turn-start backstop (default
+  30 s, injectable for tests) that resolves the prompt as `end_turn` once
+  no `turn_started(inputId)` has arrived; a started turn disarms the
+  backstop (its `turn_complete`/`turn_error` is guaranteed, cancellation
+  included). The deterministic alternative — routing the core's
+  `state.updated` goal-continuation notifications through the attach client
+  — stays a future option; the backstop deliberately avoids widening the
+  attach sync surface for it.
+- `session/cancel` goes through the existing v4-stop path (stop aborts the
+  turn and pauses an active goal), after which the waiter resolves and the
+  prompt returns `stopReason: "cancelled"`. It also covers goal-loop turns
+  2..N: once the prompt has returned, the session is no longer in the
+  in-flight table, so a cancel with no active turn falls back to a direct
+  `stopActiveTurn()` (a core-side no-op when idle). This stop scoping is
+  goal-lane only: cancelling a `/dwf` command (a pure op round-trip, no
+  turn of ours in the core) never issues a v4 stop that could kill another
+  client's turn.
 - A second `session/prompt` while one is running (including local commands)
   is rejected by the existing in-flight guard — ACP clients serialize turns
   anyway, and the core-level guards (`Cannot manage goals while a prompt is
@@ -168,13 +187,37 @@ Rules:
   workflows unless a host enables the policy, so `/dwf list` is a truthful
   empty list in default piz sessions. Full command semantics over ACP does
   not imply enabling the engine; that is a separate product decision.
+- Resource blocks ride along as text: `promptBlocksToText` flattens a
+  prompt into one text string, so resource blocks typed around a local
+  command end up **baked into its args** (a `/goal <objective>` objective
+  or ignored as part of args), not attached as separate context. No local
+  command reads ACP resource blocks; clients that need true attachments
+  send a normal prompt.
+- The response chunk for a local command is enqueued after whatever the
+  core already streamed into the update queue (a goal continuation may have
+  started streaming before the op response is emitted), so the banner can
+  land after the first streamed chunks of the very turn it describes. This
+  ordering is accepted: reordering the queue per command would be a second
+  sequencing owner. Also, a settled `turn_error` for the awaited goal turn
+  does **not** surface as an ACP `notice` or an error stop reason — the
+  prompt returns `end_turn` and the error text reaches the client only
+  through the ordinary projected `agent_message_chunk`s the core emits;
+  ACP v1 has no per-prompt error channel short of failing the whole
+  request, which would misreport a settled turn as a protocol failure.
 
 `AttachSessionHandle` gains the wire surface behind this routing:
 `goalCommand` (one `session/goal` call, schema-parsed result), and the
 CommandCenterApp optional methods `listDynamicWorkflowRuns` /
 `resumeWorkflowRun` (v4 query / v4 command) — the latter also unblocks
 `/dwf` for the attach TUI lane, which previously reported "not available in
-this client" because no CLI-side app implemented them.
+this client" because no CLI-side app implemented them. Boundary validation
+shares the protocol's own schemas: `session/cancelBackgroundTask` sends the
+strict `{sessionId, taskId}` params (taskId, never a `backgroundTaskId`
+key) and parses the result with
+`zcodeSessionCancelBackgroundTaskResultSchema`; the resume-rejection word
+list is derived from the shared `workflowRunResumeRejectionReasonSchema`
+enum (a mirror of the contracts `DynamicWorkflowRunResumeErrorReason`),
+not hand-copied per call site.
 
 ## Mapping
 

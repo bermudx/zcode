@@ -95,6 +95,9 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   let pendingDrain: Promise<void> = Promise.resolve();
   let connectionFailure: Error | undefined;
   let closeConnection: ((error: Error) => void) | undefined;
+  // abort 只清状态不置 connectionFailure（close ≠ 输出失败）；推迟的广告等
+  // 宏任务级回调要另看它，否则会对已死连接再发 session/update。
+  let connectionClosed = false;
 
   const failConnection = (error: Error): void => {
     if (connectionFailure) return;
@@ -109,6 +112,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   app.onConnect((connection) => {
     closeConnection = (error) => connection.close(error);
     connection.signal.addEventListener("abort", () => {
+      connectionClosed = true;
       updates.length = 0;
       queuedBytes = 0;
       for (const cancel of unsubscribers.values()) cancel();
@@ -226,7 +230,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
    */
   const advertiseLocalCommands = (client: AgentContext, session: AcpSession): void => {
     setTimeout(() => {
-      if (connectionFailure) return;
+      if (connectionFailure || connectionClosed) return;
       notifyUpdate(client, session.handle.sessionId, localSlashCommandsUpdate());
     }, 0);
   };
@@ -365,7 +369,16 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   });
 
   app.onNotification(methods.agent.session.cancel, ({ params }) => {
-    activeTurns.get(params.sessionId)?.cancel();
+    const turn = activeTurns.get(params.sessionId);
+    if (turn) {
+      turn.cancel();
+      return;
+    }
+    // goal 续跑的后续轮（2..N）不占 in-flight 表——prompt 只等第一轮就返回了，
+    // 此刻的 cancel 仍应到达 core 的 v4 stop（暂停目标 + 中止当前轮）。空闲时
+    // stopActiveTurn 是 core 侧 no-op，ACK 即返，不误伤。
+    const session = options.sessions.get(params.sessionId);
+    if (session) void session.handle.stopActiveTurn();
   });
 
   /**
@@ -380,11 +393,14 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   ): Promise<PromptResponse> => {
     const sessionId = session.handle.sessionId;
     const controller = new AbortController();
+    // goal 续跑轮是 core 侧在跑的 turn，v4 stop 连带暂停/中止；dwf 只是 op 往返，
+    // core 里没有「我们的」turn——stop 会误伤其它客户端正在跑的回合。
+    const ownsCoreTurn = command.kind === "goal";
     const turn: ActiveTurn = {
       cancel: () => {
         turn.cancelled = true;
         controller.abort();
-        void session.handle.stopActiveTurn();
+        if (ownsCoreTurn) void session.handle.stopActiveTurn();
       },
       cancelled: false,
     };
@@ -398,7 +414,8 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
         const watch = watchTurnSettlement(session.handle, inputId, controller.signal);
         try {
           const result = await runGoalCommand(session.handle, command.args, inputId);
-          // core 对 pause 之类的静默成功回空串：不伪造空消息气泡。
+          // pause 之类静默成功已在 runGoalCommand 补成用户可见文案；真正的空回包
+          // 不伪造空消息气泡。
           if (result.response.length > 0) {
             emit([
               {
@@ -424,6 +441,11 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
       }
       await pendingDrain;
       if (connectionFailure) throw connectionFailure;
+      // 取消可能落在 op 已回包之后（dwf 无 watch 可依赖）：以回合标志收口，
+      // 不把被取消的回合报告成完整结束。
+      if (turn.cancelled) {
+        return { stopReason: "cancelled" } satisfies PromptResponse;
+      }
       return { stopReason: "end_turn" } satisfies PromptResponse;
     } catch (error) {
       if (turn.cancelled || isAbortError(error)) {

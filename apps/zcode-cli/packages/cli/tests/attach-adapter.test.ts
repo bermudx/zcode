@@ -3505,3 +3505,28 @@ test("resumeWorkflowRun：accepted → ok；业务拒绝还原结构化 reason�
     await rm(dir, { force: true, recursive: true });
   }
 });
+
+test("cancelBackgroundTask 发严格 schema 的 taskId 键并校验回包", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  const core = await startFakeCore(socketPath, (request) => {
+    if (request.method === "session/cancelBackgroundTask") {
+      // 回包按共享 strict schema 校验：缺 taskId/status 会被拒。
+      return { cancelled: true, status: "cancelled", taskId: "dwfrun_live" };
+    }
+    return {};
+  });
+  const { client, handle } = await makeHandle(socketPath);
+  try {
+    const result = await handle.cancelBackgroundTask("dwfrun_live");
+    assert.deepEqual(result, { cancelled: true, status: "cancelled", taskId: "dwfrun_live" });
+    const call = core.requests.find((r) => r.method === "session/cancelBackgroundTask");
+    // wire 键是 taskId（strict params schema）；早年误发 backgroundTaskId 会被 core
+    // -32602 拒掉每一次 /dwf cancel——deepEqual 保证没有多余键。
+    assert.deepEqual(call?.params, { sessionId: SID, taskId: "dwfrun_live" });
+  } finally {
+    client.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
