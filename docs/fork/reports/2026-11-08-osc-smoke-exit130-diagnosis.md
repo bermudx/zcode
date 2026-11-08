@@ -63,23 +63,25 @@ involved.
   design. Architecture: 0 new / 1 baselined.
 - Test file run once post-fix per single-run policy.
 
-## Secondary findings (not fixed — decisions for the operator)
+## Secondary findings
 
-1. **Fork-side raw-mode leak.** `tui-pi/src/terminal-startup.ts`
-   (fork commit `ad6882b5`, absent from `upstream/main`) sets
-   `stdin.setRawMode(true)` for the startup color query and never
-   restores it. `ProcessTerminal.start()` then captures `wasRaw = true`,
-   so `tui.stop()` "restores" raw mode — leaving the real tty in raw
-   mode after `piz` exits. Interactive shells self-heal at the next
-   prompt (readline re-sets termios); non-shell consumers see a raw
-   tty. Code-read evidence, not live-verified.
-2. **Pre-TUI canonical window.** All of attach boot (`ensureServer`,
+1. **Fork-side raw-mode leak — FIXED in `6f3a7767`.**
+   `tui-pi/src/terminal-startup.ts` (fork commit `ad6882b5`, absent from
+   `upstream/main`) sets `stdin.setRawMode(true)` for the startup color
+   query and never restores it. `ProcessTerminal.start()` then captured
+   `wasRaw = true`, so `tui.stop()` "restored" raw mode — leaving the
+   real tty in raw mode after `piz` exits. Fix: `QuietProcessTerminal`
+   snaps the line discipline back to canonical in the same synchronous
+   block before `super.start()` samples `isRaw`, so the recorded
+   restore target is the true pre-app state. Regression test in
+   `terminal-drain.test.ts` asserts the termios sequence ends cooked.
+2. **Pre-TUI canonical window — accepted as-is by operator.** All of
+   attach boot (`ensureServer`,
    handshake, `sessionCreate`, `registerSession`) runs with a cooked pty
    and no SIGINT handler; a real Ctrl-C there kills the client (exit
    130, core unaffected). This matches ordinary CLI semantics — herdr
    panes that deliver Ctrl-C as SIGINT would see a kill rather than the
-   double-press guard. Worth deciding whether the guard should be
-   installed earlier; out of scope for the gate fix.
+   double-press guard.
 
 ## Effect on the blocked promotion
 
