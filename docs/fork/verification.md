@@ -133,6 +133,12 @@ written that file, pass `--base <last promoted sha>` (FORK.md names it).
   pre-merge commit and add it to the known-failures file with that evidence, or
   get the operator's explicit waiver and record it. Passing a failing test once
   with a longer timeout is neither.
+- **Delegate watchdog:** on 2026-11-08 a full gate exceeded the native delegate's
+  900-second inactivity limit inside one foreground shell call; its 1800-second
+  shell timeout did not prevent the worker and unfinished tests being stopped.
+  Run long full gates from the parent rather than one delegated foreground call.
+  Preserve completed package reports after interruption; never call a partial
+  run a pass or repeat completed suites just to recover a missing summary.
 
 Sync branches still run plain `--full`.
 

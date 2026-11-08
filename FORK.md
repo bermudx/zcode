@@ -1056,3 +1056,22 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
   `build:attach` 2.2 MB carries the fix surface (`acp-goal-`, `Goal paused.`,
   cancelBackgroundTask) and the thin gate holds — only the inherited comment
   mentions bootstrap/src.
+
+### 2026-11-08 — ACP merged; combined promotion blocked
+
+- Operator authorized merge and promotion. Merged reviewed ACP tip `ce6850cd`
+  into main as `17dbfcce`, preserving the existing sync/OSC merges and unrelated
+  docs checkpoint `106c5998`. Kept both maintenance histories and both added
+  test entries in the two merge conflicts; no source conflict resolution.
+- Rebuilt root shared dependencies, CLI graph 26/26, and attach bundle. Checked
+  feature markers, staged a matched pair outside the checkout, and preserved
+  the prior installed pair. Typecheck 36/36 plus root shared and explicit ACP
+  test-file typecheck passed; lint had no errors; architecture had 0 new
+  violations (the ACP branch carries its reviewed attach-session baseline).
+- **Not promoted:** the full promotion run's CLI package had 744/745 pass;
+  the real PTY OSC smoke exited 130 rather than the required clean exit 0
+  after double Ctrl-C. This is not a known-failure waiver. The verifier then
+  hit its 900-second inactivity watchdog during core tests, leaving the
+  remaining gate incomplete. No whole-suite retry, skip or baseline widening.
+- [Evidence, retained artifacts, and remaining work](docs/fork/reports/2026-11-08-acp-promotion-blocked.md).
+  Installed artifacts and existing cores are unchanged. No push or model call.
