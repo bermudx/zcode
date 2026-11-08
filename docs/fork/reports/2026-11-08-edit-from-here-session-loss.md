@@ -231,3 +231,51 @@ This inspects the failure; it is not a command for trying an implemented fix.
   unmanaged; this does not verify its lifetime semantics.
 - No product source changed. No full suite, build, model call, deployment,
   service installation, GitHub write or push.
+
+## Follow-up: issue filing and fix recommendation
+
+The operator subsequently authorized filing the audit's other gaps.
+Checked all existing issue titles for duplicates, rechecked the relevant source,
+and created these issues in `bermudi/piz`:
+
+| Issue | Problem | Type / priority / area |
+| --- | --- | --- |
+| #6 | Screenshots cannot be submitted through ACP | enhancement / P2 / attach |
+| #7 | Additional input is rejected while an ACP turn is running | enhancement / P2 / attach |
+| #8 | Background work and compaction are not visible through ACP | enhancement / P2 / attach |
+| #9 | Manual skill invocation is not expanded through ACP | enhancement / P3 / attach |
+| #10 | Editing a message can terminate the shared core and lose replacement sessions | bug / P1 / attach |
+
+Reused existing labels; none were created. Issue bodies distinguish source
+inspection from live verification and contain no private incident logs,
+credentials or machine paths. #8 separates projection from workflow enablement,
+already tracked by #5. #7 explicitly acknowledges that rejecting a concurrent
+prompt is the currently documented behavior, not a regression.
+
+**Audit correction:** did not file the proposed attach goal-continuation bug.
+`AttachSessionHandle.setTarget` and `updateTargetStatus` already call
+`session/goal`. The core's `goalSession` routes set/resume to
+`continueGoalAfterChange`, which starts `runGoalContinuationInBackground` when
+mode/admission permit. The missing optional client method therefore does not
+establish that continuation fails to start. Whether every TUI progress/waiter
+detail is correct remains unverified; do not replace the false claim with
+another untested one.
+
+No fork/rewind, locale, overload or doc-drift issue was added in this filing.
+
+**Recommended direction, not implementation approval:** make the shared core a
+workspace/provider-level resource owned independently of a per-session ACP
+process. Keep each ACP process's cleanup intact; retiring it releases its
+connection, not a core another client is using. Keep the current core's
+connection/orphan idle accounting rather than inventing a second session owner.
+
+T3 already uses a separately owned shared-server pattern for OpenCode
+(`packages/provider-opencode/src/server/OpenCodeRuntime.ts`), while ACP runtime
+startup/finalization owns one scope per runtime. Investigate reuse of that
+shared-resource lifecycle before introducing another permanent service.
+Setting `shared: true` alone is not a fix: the ACP scope still has a stop
+finalizer. This direction needs coordinated T3/piz ownership work, not an
+unannounced escape from T3's process containment.
+
+No production code, installed command, T3 checkout or running core was changed
+in this follow-up. No tests/build were rerun for this documentation/issue filing.
