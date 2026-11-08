@@ -174,7 +174,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `a2e129f4` pair (ACP per-model reasoning effort, on top of the `a68e1a1d` short `--model` names pair), promoted 2026-11-07 from clean main after the recorded verification — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `a971df4e` pair (ACP effort sync on top of `a2e129f4` ACP per-model reasoning effort), promoted 2026-11-07 from clean main after the recorded verification — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -768,3 +768,17 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   the effort option. Lesson recorded in AGENTS.md.
 - Not done: live T3 check (option visible, set works, model-switch finding 2).
   No push, no core restart.
+
+### 2026-11-07 — merge + promotion of a971df4e (ACP effort sync)
+
+- Operator: fix review findings 2–3 with Sonnet. Builder: Claude Sonnet 5.5
+  (`259cafd6`); lead review fix `c7cf871e`.
+- Finding 2: not a bug (code trace, not live): `setModel` resolves the target
+  model's default level (`command-center/handlers/model.ts`), core stores it,
+  and `session-mapper.ts` drops unsupported `thoughtLevel.current`.
+- Finding 3 fixed: attach `mergeSettings` emits `ModelSelected` on effort-only
+  changes; ACP pushes `config_option_update` except during its own
+  `set_config_option`. Lead review caught a TUI regression (event lacked
+  `options.reasoningLevel` → terminal effort display reset); fixed with test.
+- cli tsc + oxlint clean; promote gate exit 0 (2 known failures); built
+  before promoting, dist-runtime grep-verified. No live T3 check yet.
