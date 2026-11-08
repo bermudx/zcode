@@ -32,7 +32,11 @@ No hosted fork issue was opened: FORK.md says this fork has no public tracker.
 ## Evidence
 
 - A Piz/GLM-5.3 research subagent traced the catalog and resolver. A separate
-  Piz review is pending.
+  Piz/GLM-5.3 reviewer examined implementation commit `7a31c5e5` and reported
+  no actionable findings. The review traced canonical spelling, provider
+  ambiguity, disabled options, literal dollar signs, effort validation,
+  full-ref compatibility and create/resume wiring. It made no edits and ran
+  no tests.
 - Dependencies were initially absent. The first architecture command could not
   load TypeScript; this was not a pass. Existing local dependency directories
   and dependency dist outputs were then copied with filesystem copy-on-write
