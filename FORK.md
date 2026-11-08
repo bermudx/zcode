@@ -75,9 +75,14 @@ Repository-local rerere is enabled; review every replayed resolution.
   that runtime fallback behavior has already been changed. Verify
   actual eligibility/metering with observable service/account evidence when
   available, and label it unverified otherwise.
-- Reuse shared cores across CLI invocations/sessions rather than creating a
-  heavy runtime for each client. Sharing does not remove session/workspace
-  isolation requirements or imply one global core across all workspaces.
+- One shared core process serves all workspaces, sessions and clients.
+  The operator explicitly confirmed this requirement on 2026-11-08; it is not
+  one core per workspace, provider or frontend. The current workspace-keyed
+  socket/spawn implementation does not meet that target. Workspace identity
+  belongs to session routing and isolation inside the core, not to selecting
+  a separate core process. Preserve workspace configuration, permission and
+  session boundaries while sharing the process. No lifetime/launcher change
+  has yet been implemented or approved by this clarification.
 - Client and shared core must be built and installed as a matched pair. No
   cross-version protocol compatibility promise exists yet.
 - Preserve schema validation, workspace identity and path distinctions, session

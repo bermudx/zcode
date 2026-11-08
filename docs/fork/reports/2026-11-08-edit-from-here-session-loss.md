@@ -190,15 +190,14 @@ rejection, or strengthening process detachment does not repair ownership.
 Persisting drafts merely to survive this teardown would also change the
 unsent-draft contract and would not protect other live sessions sharing the core.
 
-## Ownership options, not an approved implementation
+## Ownership options considered, not an approved implementation
 
 - **A separately owned shared core.** A user service owns the core;
   ACP clients only attach to it. Closing one T3 process must not terminate the
   service or other clients' sessions. This preserves the shared-core product
   goal, but changes startup/service ownership and needs operator agreement.
-- **Alternative: one core per ACP runtime.** Do not share a core between T3
-  scopes. This fits T3's cleanup ownership, but gives up the intended resource
-  sharing for ACP and can multiply core memory use.
+- **Rejected: one core per ACP runtime.** This would fit T3's cleanup ownership,
+  but violates the product's single-core requirement and multiplies core memory.
 
 Do not bypass T3's descendant cleanup as an incidental workaround.
 
@@ -263,11 +262,11 @@ another untested one.
 
 No fork/rewind, locale, overload or doc-drift issue was added in this filing.
 
-**Recommended direction, not implementation approval:** keep the existing shared
-core a workspace-level resource owned independently of a per-session ACP
-process. Keep each ACP process's cleanup intact; retiring it releases its
-connection, not a core another client is using. Keep the current core's
-connection/orphan idle accounting rather than inventing a second session owner.
+**Earlier recommendation, superseded by the operator clarification below:**
+make the shared core a workspace-level resource. This was an incorrect
+interpretation of the product goal, not an approved architecture. The independent
+lifetime requirement remains: keep each ACP process's cleanup intact; retiring
+it releases its connection, not a core another client is using.
 
 T3 already uses a separately owned shared-server pattern for OpenCode
 (`packages/provider-opencode/src/server/OpenCodeRuntime.ts`), while ACP runtime
@@ -277,15 +276,20 @@ Setting `shared: true` alone is not a fix: the ACP scope still has a stop
 finalizer. This direction needs coordinated T3/piz ownership work, not an
 unannounced escape from T3's process containment.
 
-**Operator clarification:** avoiding duplicate core memory is the point of this
-design. Preserve one core per existing workspace identity/socket, shared by
-terminal clients and ACP clients alike. Do not add a T3-specific or
-provider-specific core alongside that workspace core. The OpenCode example is
-only an ownership-pattern reference, not approval to copy its server launcher
-or partition sharing by frontend. A proposed T3 integration that starts a
-second core for an already-served workspace is not an acceptable fix. The
-remaining decision concerns who owns the existing core's lifetime, not how many
-copies to run.
+**Operator clarification: one core, period.** A single shared core process must
+serve every workspace, session and client. My earlier "one core per workspace"
+answer was wrong. I had treated the existing workspace-keyed launcher as a
+product requirement; the operator explicitly rejected that interpretation.
+The operator cites Electron's single-core approach as the intended model.
+This report does not independently audit Electron's process architecture.
+
+Do not add a T3-specific, provider-specific or workspace-specific core.
+Workspace identity still scopes session/configuration/permission routing inside
+the one core. Global process discovery and ownership must not erase those
+boundaries. An ownership fix that merely moves each existing workspace core
+to a separate service still fails this requirement. The OpenCode example is
+only an ownership-pattern reference, not an approved implementation. No
+replacement lifetime/launcher mechanism has been selected.
 
 No production code, installed command, T3 checkout or running core was changed
 in this follow-up. No tests/build were rerun for this documentation/issue filing.
