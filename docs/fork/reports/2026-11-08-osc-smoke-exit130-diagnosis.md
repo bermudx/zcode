@@ -65,14 +65,14 @@ involved.
 
 ## Secondary findings (not fixed — decisions for the operator)
 
-1. **Upstream raw-mode leak.** `tui-pi/src/terminal-startup.ts`
-   (upstream `ad6882b5`) sets `stdin.setRawMode(true)` for the startup
-   color query and never restores it. `ProcessTerminal.start()` then
-   captures `wasRaw = true`, so `tui.stop()` "restores" raw mode —
-   leaving the real tty in raw mode after `piz` exits. Interactive
-   shells self-heal at the next prompt (readline re-sets termios);
-   non-shell consumers see a raw tty. Code-read evidence, not
-   live-verified.
+1. **Fork-side raw-mode leak.** `tui-pi/src/terminal-startup.ts`
+   (fork commit `ad6882b5`, absent from `upstream/main`) sets
+   `stdin.setRawMode(true)` for the startup color query and never
+   restores it. `ProcessTerminal.start()` then captures `wasRaw = true`,
+   so `tui.stop()` "restores" raw mode — leaving the real tty in raw
+   mode after `piz` exits. Interactive shells self-heal at the next
+   prompt (readline re-sets termios); non-shell consumers see a raw
+   tty. Code-read evidence, not live-verified.
 2. **Pre-TUI canonical window.** All of attach boot (`ensureServer`,
    handshake, `sessionCreate`, `registerSession`) runs with a cooked pty
    and no SIGINT handler; a real Ctrl-C there kills the client (exit
