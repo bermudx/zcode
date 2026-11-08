@@ -1164,3 +1164,45 @@ lint (0 errors, 83 warnings) and architecture checks passed. Pty smoke with an
 isolated data dir on `dist` and on promoted `dist-runtime`: boot, double Ctrl-C,
 exit 0 with a resume hint. Not observed: a live model turn, signing or allowance
 behaviour, or a live core restart.
+
+## Promotion a68e1a1d (2026-11-07)
+
+`main` merged `--no-ff` `patch/short-model-aliases` (short `--model` names;
+feature `7a31c5e5`, piz review `b95b575f`).
+
+- `--promote-gate --max-workers 2` (base `ffc79107` from `PROMOTED_FROM`)
+  took the full tier: 13,260 vitest results, 0 new, 2 known, 3 flaky (all
+  green on the isolated rerun); cli/tui/tui-pi package scripts pass.
+  `typecheck:piz` passed; root lint 0 errors / 83 warnings and CLI lint
+  0 / 74 / 7 (both exact baselines); `architecture:check --changed` 0
+  violations.
+- **Shared-checkout contention:** an ACP worker committed `99e5646d`
+  (`patch/acp-reasoning-effort`, cli `src/acp/*` only) into the same checkout
+  mid-battery and left HEAD on its branch. Every gate package except
+  `@zcode/cli` has identical sources on both trees, so those results stand.
+  After the worker's session ended, the checkout went back to clean `main`,
+  the cli graph + `build:attach` were rebuilt from the exact `a68e1a1d` tree,
+  and the `@zcode/cli` suite re-ran green against that rebuild
+  (682/682 + attach-resume-target 11/11). Promotion used that rebuild.
+- Freshness greps, identical on `dist` and the frozen `dist-runtime`:
+  `Select a supported reasoning effort for` ×1 and
+  `prefer the session's current provider` ×1 in `zcode-attach.cjs`; ACP
+  branch tokens (`acp reasoning effort changed`, `thoughtLevelOption`) ×0 in
+  both bundles — main-only content promoted, per the promote-from-main
+  policy. `PROMOTED_FROM` = `a68e1a1d` verified.
+- Installed-pair smoke (real `piz`, scratch git ws, default data dir for the
+  real catalog, session env stripped): `--model 'glm-5.3$bogus'` exits 1
+  pre-TUI with `Select a supported reasoning effort for
+  account:zai-individual-coding-plan/GLM-5.3: low, high, max`; pty boot of
+  `piz --model glm-5.3` renders banner `models: GLM-5.3, GLM-5.3-Flash`
+  (lowercase resolved to catalog spelling), footer `?/200k (auto)`, status
+  `GLM-5.3 • …`, double Ctrl-C → exit 0 with the resume hint
+  (`sess_e03779f9…`). Scratch core killed after `/proc/<pid>/cwd` +
+  `.sock.info` workspaceIdentity checks; socket files removed; one deferred
+  scratch session record remains in the operator's store (same class as the
+  2026-10-24 model-flag smoke). Logs: `/tmp/piz-smoke-shortmodel.{a,b}.log`.
+
+NOT exercised live (unverified): a real model turn on the resolved model
+against the provider. Full acceptance gate (signing, allowance evidence,
+Ctrl-C signal path, memory matrix) unchanged. `99e5646d` (ACP reasoning
+effort) is merged nowhere and not promoted.

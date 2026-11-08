@@ -141,7 +141,7 @@ Count these interfaces when budgeting syncs.
 | Steer/queue parity (busy Enter steers, Ctrl+Q queues, Alt+Up restores) + drained inputs rendered as transcript user rows (2026-10-27 merge replaced the tui reducer with the transcript-polish variant: stable ids, redaction, resume-aligned visibility — see P002) | `fbe7dbee`, `a40b6960` (merges `4855b2b4`, `086f08c7`), superseded reducer from `c0527374`+`f4780a2b` | spans shared protocol schema, bootstrap server-ops, attach client, tui, tui-pi |
 | App-server ready budget: 60s window starting at spawn completion | `6537f416` | P004 (app-server-spawn) |
 | Attach resume: unique id-prefix expansion + surfaced resume failures | `9b46915f` | P004 (attach entry) |
-| `--model` startup model selection (attach entry + banner) | `3db70344` | P004 (attach entry) |
+| `--model` startup model selection (attach entry + banner); since `a68e1a1d` bare names are case-insensitive, prefer the session's current provider on ambiguity, and take a quoted `$effort` suffix validated against catalog levels (`--model glm-5.3`, `--model 'glm-5.3$high'`); other ambiguity still fails pre-TUI | `3db70344`, `7a31c5e5` (merged `a68e1a1d`, piz review `b95b575f`; [report](docs/fork/reports/2026-11-07-short-model-aliases.md)) | P004 (attach entry) |
 | Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no protocol/snapshot denominators — 2026-11-02 revision: the footer ctx gauge clamps client-side via the same predicate, `patch/footer-compact-gauge`); cap constants/predicates live in `@zcode/shared` `compact-context-window.ts` (single source for wire + display); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2`; display clamp `25bf5e32`/`9fd03361` (post-rebase SHAs) | P004 (shared protocol + attach client) + core compact |
 | Attach exit-resume hint: after normal TUI exit (exit 0 + bound session id) the attach client prints `Resume this session with:` + `piz|zcode attach --resume <id>` to stdout once the terminal is restored; id follows /new /resume /fork via `getMainSessionId`; empty sessions print too (predictability over content-gating); signal exits and non-0 exits silent; opentui-frontend lane deviation recorded in spec | `patch/exit-resume-hint` `40e25506` + review fix-pass `c47d1e63`; suite-stability rides along in `6e16e0ce`; spec [tui-attach-shared-core.md](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md); 4 regressions `tests/attach-exit-resume-hint.test.ts` | P004 (attach client) |
 | Provider auth-failure log payload: 401/403 model failures log `providerErrorType/Message/Code` + cause-chain-extracted (TerminalStreamChunkError), credential-shape-redacted, 1500-char-capped `providerResponseBody`, plus the previously dropped `errorCode/errorPhase/exceptionType/providerRequestId`; log-only — status events, session events, classification, retry policy unchanged | `patch/auth-failure-diagnostics` `3cf8e1ff` (builder: second agent, operator-authorized; 4 regressions `runner-status-fanout.test.ts`); spec [stream-error-retry.md](apps/zcode-cli/docs/design/v2/model/stream-error-retry.md) | P001 (adapters model runner diagnostics) |
@@ -173,7 +173,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `e37ed9d9` pair (session-health merge `9abdd086` + lean test-gates merge `a8254e2a` + no-plugin regression config-scope fix), promoted 2026-11-03 from clean main after the recorded verification — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `a68e1a1d` pair (short `--model` names; two pairs after the table last named `e37ed9d9` — the unlogged-here `ffc79107` promotion of 2026-11-06, then this), promoted 2026-11-07 from clean main after the recorded verification — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -732,3 +732,24 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   No force delete was used (`git branch -d` refuses unmerged refs), nothing was
   pushed, and no wrapper, live core or installed pair was touched. Branch names
   in this log and in `docs/fork/*` are now historical labels, not live refs.
+
+### 2026-11-07 — merge + promotion of a68e1a1d (short --model names)
+
+- Operator: "merge and promote". `patch/short-model-aliases` merged `--no-ff`
+  as `a68e1a1d`: bare `--model` names are case-insensitive (`glm-5.3` → the
+  catalog's `GLM-5.3`), prefer the session's current provider on ambiguity,
+  and accept a quoted `$effort` suffix validated against catalog levels;
+  full refs pass through, other ambiguity still fails before TUI startup.
+  Builder + piz subagent review on the branch (`7a31c5e5`, `b95b575f`, no
+  actionable findings); report
+  [2026-11-07-short-model-aliases.md](docs/fork/reports/2026-11-07-short-model-aliases.md).
+- Gate, installed-pair smoke and a shared-checkout contention note (an ACP
+  worker landed `patch/acp-reasoning-effort` `99e5646d` in the same checkout
+  mid-battery; promotion was rebuilt from clean `main` and grep-verified free
+  of that branch's code) are recorded in
+  [verification](docs/fork/verification.md) 「Promotion a68e1a1d」. That ACP
+  branch is merged nowhere and not promoted — its merge is a separate
+  operator decision.
+- Environment lesson: T3 Code AppImage mounts (`/tmp/.mount_t3code*`) on PATH
+  break `mise` 2026.11.0 (`t3code.AppImage is not a valid shim`); run
+  build/test commands from T3 with those PATH entries stripped.
