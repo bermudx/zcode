@@ -716,7 +716,7 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   ~2 GB) because worktree checkouts share extents.
 - Kept `~/.herdr/worktrees/piz/worktree-lucky-harbor-d8a4`: a live agent
   session (`claude` plus running test processes) on the unmerged
-  `patch/lead-sidekick`. Its branch tip also moved during this cleanup
+  `lead-sidekick`. Its branch tip also moved during this cleanup
   (`39c2e2b2`→`44f8c013`) — another reason not to touch it.
 - Deleted the 18 branches already merged into `main`. Their tips stay
   reachable from `main` and can be restored with `git branch <name> <sha>`:
@@ -733,7 +733,7 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   `8e044b18`, `worktree/lucky-harbor-d8a4` `9bce3ae5`,
   `worktree/lucky-valley-dbbc` `610d1fd3`.
 - Retained because unmerged: `feat/allowance-herdr` (parked standalone
-  allowance reference) and `patch/lead-sidekick` / `patch/lead-sidekick-spec`.
+  allowance reference) and `lead-sidekick` / `patch/lead-sidekick-spec`.
   No force delete was used (`git branch -d` refuses unmerged refs), nothing was
   pushed, and no wrapper, live core or installed pair was touched. Branch names
   in this log and in `docs/fork/*` are now historical labels, not live refs.

@@ -1004,7 +1004,7 @@ Checks actually run and observed:
     and comes from load or timing.
   - `mcp-tool-bridge` (oversized image): 1 test, passes on rerun.
   - `tool-search-local-runtime` (`stream=off`): 1 test, passes on rerun.
-- `git merge-tree` against `patch/lead-sidekick`: the merge is clean after
+- `git merge-tree` against `lead-sidekick`: the merge is clean after
   moving the `undeliveredMessages` option below the session callbacks.
   The merged tree was not typechecked. Sidekick queued messages carry no
   redelivery context, so terminal drain only logs them, which leaves
