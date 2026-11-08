@@ -8,12 +8,12 @@ Electron or a heavy core per invocation/session—not merely keeping a TUI alive
 ## Recorded baseline
 
 - Integrated upstream: [`UPSTREAM`](../../UPSTREAM).
-- Last public check: 2026-11-02; main/HEAD was
-  `a60ba6a7e5a06742270ca605f5d2cc2766afa7e1` ("chore: sync ZCode source",
-  2026-10-30; desktop 3.17.1 / CLI 0.17.1) and is integrated on
-  `sync/2026-10-30-a60ba6a7`.
-- Incoming mainline commits at that check: **zero** (a60ba6a7's single
-  parent is the previous integrated base `3c5b2276`).
+- Last public check: 2026-11-07; main/HEAD was
+  `a9fe401eede6e6e5e01be9048679c206fe6f02d9` ("chore: sync ZCode source
+  v3.17.2", 2026-11-03; desktop 3.17.2 / CLI 0.17.2) and is integrated on
+  `sync/2026-11-07-a9fe401e`.
+- Incoming mainline commits at that check: **one** (a9fe401e's single parent
+  is the previous integrated base `a60ba6a7`; 203 files, +9,635/−1,472).
 - Verify against public source, not upstream's README/app version numbers:
 
 ```sh

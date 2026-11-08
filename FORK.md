@@ -40,7 +40,7 @@ It starts at `1473554cf6fcbce50f3cff5aa562a6089898959c` from the old
 | `feat/allowance-herdr` | Preserved standalone allowance branch; parked |
 | `sync/<date>-<short-sha>` | Future upstream integration candidates |
 | `patch/<topic>` | Future isolated product changes |
-| `origin` | Not configured: no fork hosting destination has been selected |
+| `origin` | Configured 2026-11 (observed 2026-11-07, by or before the `c2d393f7` push): `git@github.com:bermudi/piz.git`, fetch and push both enabled — supersedes the earlier "not configured" state; push policy below still applies |
 
 `archive-source` points at the old local clone, not a hosted backup. Its refs
 include old `main`, allowance, lucky-field and rapid-cloud tips. They are not
@@ -51,8 +51,11 @@ boundary is unavailable. Deepen this writable repository when needed, never the
 reference-library clone. Existing refs are preserved here; this is not yet an
 off-machine backup.
 
-Pushes are guarded locally: `push.default=nothing`, and both current remotes have
-`pushurl=DISABLED`. Choose a hosted fork explicitly before changing that setup.
+Pushes are guarded locally: `push.default=nothing`, and `upstream`/`archive-source`
+have `pushurl=DISABLED`. As of 2026-11-07 `origin` (bermudi/piz.git) has push
+**enabled** and `origin/main` sits behind local `main` at `c2d393f7` — this
+differs from the guard state this file recorded before; pushes still require the
+operator's explicit go-ahead.
 Do not push to upstream, force-push, rename old branches, or delete old worktrees
 as part of documentation maintenance. New carried-change commit subjects use
 `fork:`. Merge upstream into candidate branches; do not rewrite existing history.
@@ -782,3 +785,69 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   `options.reasoningLevel` → terminal effort display reset); fixed with test.
 - cli tsc + oxlint clean; promote gate exit 0 (2 known failures); built
   before promoting, dist-runtime grep-verified. No live T3 check yet.
+
+### 2026-11-07 — upstream sync 3.17.2 (sync/2026-11-07-a9fe401e)
+
+- Base `a60ba6a7` → `a9fe401e` ("chore: sync ZCode source v3.17.2",
+  2026-11-03; desktop 3.17.2 / CLI 0.17.2; 203 files, +9,635/−1,472 — an
+  order of magnitude smaller than the 3.17.1 dump). `upstream/main` was
+  already fetched locally; zero network was used for the sync itself.
+- Merge `0f56f297`: exactly one content conflict,
+  `bootstrap/tests/protocol-slash-commands.test.ts` (import block) — fork's
+  no-plugin discovery regression imports (`vi`, `plugins`,
+  `listZCodeCustomCommands`) kept, upstream's dropped
+  `ExecutionPort/ExecutionResult` import adopted (its only uses were the old
+  shell-expansion test upstream replaced). No fork-deleted-path conflicts
+  (rule not triggered). Nothing references the upstream-deleted
+  `custom-command-shell-expansion.ts`.
+- Seam review (auto-merge ≠ proof): manifests composed (engineering-test-files
+  fork entries + upstream's desktop-prune entry; architecture-policy fork
+  `compact-context-window-shared-append` exception + upstream additions);
+  v4 gateway/bridge workspace threading composes with the fork's v4 send path
+  and first-persistence admission; P001 signing untouched by this sync
+  (no verification-policy/agent-service signing hunks);
+  `compact-active.ts` reminder rework does not touch the cap predicate;
+  `00-tool-change-chain.md` fork sections preserved (0 removals);
+  noPlugins gating lives in untouched `custom-commands.ts`.
+- **Gap found + fixed (`bcde55fd`):** upstream 3.17.2 validates
+  restore-with-workspace session lineage even for ready runtimes inside
+  lifecycle `initialize`/`ensureReady` (`validateSessionActivationWorkspace`,
+  `sessionLifecycleWorkspace` capability). The fork's
+  `activateSessionForResume` active-record fast path (3.17.1, kept so resume
+  `compactContextWindow` is not dropped by the ready short-circuit) returned
+  before `initialize` and bypassed the new check — a wrong-workspace
+  `session/resume` could adopt another workspace's active record and write
+  its cap. The fast path now validates first (mismatch →
+  `project.session-lineage-invalid`, no cap write; workspace absent stays
+  passthrough). Spec: tui-attach-shared-core.md 「GLM 压缩窗口上限」.
+  Regression `bootstrap/tests/resume-active-lineage.test.ts` — mismatch
+  cases verified red without the fix, green with it (4/4).
+- Patch inventory: P001–P006 and the later carried behaviors all retained;
+  no upstream retirement (signing, tui/tui-pi, attach client, ACP lane
+  untouched by the diff). No new P-rows needed.
+- Battery on the branch tip, all green unless stated: root typecheck; CLI
+  turbo typecheck 36/36; `architecture:check --changed` — **caveat:** origin
+  now exists and sits behind main (`c2d393f7`), so the checker's
+  merge-base swept in older fork work: 1 violation,
+  `cli/src/attach/attach-session.ts` 813/800 lines — pre-existing on main
+  via `c7cf871e`, not from this branch; branch's own files add 0. Root lint
+  0 errors/84 warnings (baseline 83; +1 from upstream's new files). CLI lint
+  0/74/7 via the recorded `npm_execpath` workaround. `fork-tests.mjs --full`:
+  13,521 vitest results, exit 0 — only the 2 known re-baselined failures
+  (fail on main too), flaky set passed on solo rerun (22 rerun batches);
+  cli node tests 695/695, tui-pi 270/270; seam files
+  (resume-active-lineage, protocol-slash-commands, session-resident-pool,
+  v4-cold-resume) ran in-suite and passed. Turbo build 26/26 +
+  `build:attach`; freshness greps on fresh dist:
+  `sessionLifecycleWorkspace` ×2/×1, `session-lineage-invalid` ×3 (core
+  only, correct), `validateSessionActivationWorkspace` ×3,
+  `compactContextWindow` ×11/×6.
+- Contention: an ACP-session commit `c455443b` (FORK.md promotion record for
+  `a971df4e`, Claude Opus 5.5) landed on this sync branch mid-flight between
+  the merge and the fix — docs-only, correct content, rides the eventual
+  merge; no history rewrite.
+- UPSTREAM advanced to `a9fe401e`; origin row above corrected to reality
+  (push enabled, origin/main behind). Not exercised live (unverified): real
+  model turn, signing/allowance evidence, lineage rejection against a live
+  core — full acceptance gate unchanged and still open. Not merged to main,
+  not promoted; both are operator decisions.
