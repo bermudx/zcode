@@ -998,13 +998,9 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           noPlugins: options.noPlugins,
           additionalDirectories: options.additionalDirectories,
           env: options.env,
-          executionPort,
           logger,
           projectConfigPath: options.projectConfigPath,
-          sessionId,
-          signal: resolverOptions?.abortSignal,
           skipUserConfig: options.skipUserConfig,
-          traceContext: resolverOptions?.traceContext ?? traceContext,
           userConfigPath: options.userConfigPath,
           workingDirectory,
         });

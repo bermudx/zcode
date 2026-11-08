@@ -444,6 +444,14 @@ core 侧契约与理由见 [compact/plan.md M2.1](./compact/plan.md)。2026-11-0
 谓词客户端侧收紧（见 [tui-pi-frontend.md](./tui-pi-frontend.md) 的 ctx 仪表条目）；
 协议与 core 侧窗口语义仍不动。
 
+2026-11-07（3.17.2 sync）：`activateSessionForResume` 的活跃 record 快路径
+（为 compactContextWindow 不被 ready 短路丢弃而生）先于 lifecycle `initialize`
+返回，而上游 3.17.2 起在 `initialize`/`ensureReady` 的恢复路径上以
+`validateSessionActivationWorkspace` 校验会话血缘（显式 workspace 连 ready
+实例也不豁免）。快路径必须先自行调用同一校验：workspace 不匹配的
+`session/resume` 以 `project.session-lineage-invalid` 拒绝，不写 cap、不触碰
+活跃实例；workspace 缺省（旧协议）保持直通。
+
 ### 模型状态同步（mutation 快照 / state.updated）
 
 legacy `session/setModel`/`setThoughtLevel`/`setMode` 与订阅事件不同源：
