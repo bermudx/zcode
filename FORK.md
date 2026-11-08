@@ -1092,3 +1092,19 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
   installed bundles and frozen frontends against tested outputs. Retained
   the previous pair for rollback. No push or live-core restart.
 - [Evidence, verifier-brief corrections and remaining acceptance limits](docs/fork/reports/2026-11-08-combined-promotion-complete.md).
+
+### 2026-11-08 — live ACP verification of promoted 4caa31d5 pair
+
+- Note: the 2026-11-07 "a971df4e promotion" entry above was written before the
+  promotion actually ran (it was refused; the checkout had moved to a sync
+  branch). The effort code shipped in the operator's 4caa31d5 promotion instead.
+- dist-runtime `PROMOTED_FROM` 4caa31d5 contains a971df4e; zcode-attach.cjs
+  carries the effort option, own-change tracking and the TUI event fix.
+- Live `piz acp` stdio smoke (initialize → session/new → set_config_option →
+  close; no prompt, no model request) against the shared core:
+  GLM-5.3 effort `max of [low,high,max]`; set `low` confirmed; `bogus`
+  rejected ("Unsupported reasoning effort for the current model"); switch to
+  GLM-5.3-Flash resets effort to that model's default `max` (finding-2 trace
+  confirmed); no duplicate `config_option_update` on own changes.
+- Not verified live: another client's effort change reaching T3 (finding 3);
+  T3 UI rendering itself.
