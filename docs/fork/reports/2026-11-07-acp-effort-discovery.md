@@ -73,3 +73,31 @@ The lead session has no inherited Herdr connection or explicit operator-supplied
 socket/session. The local Herdr skill requires an explicit connection outside
 Herdr, so worker launch is blocked pending that choice. No worker was started
 and no runtime code was changed during this setup attempt.
+
+## Review of `patch/acp-reasoning-effort` (99e5646d)
+
+Read-only diff review. No tests or builds run.
+
+Verdict: correct design, OK to merge. Live check still required.
+
+- Correct: choices come from the current model's `reasoning.levels`, not
+  `thoughtLevel.available`. The attach handle unions `available` across
+  models (`attach-session.ts` `mergeCatalog`), so the shared
+  `zcodeSessionSettingsToZCodeConfigOptions` projection would show wrong
+  levels here. Re-implementing in the CLI is justified.
+- Correct: setter validates at the ACP boundary, awaits the core, returns
+  options from the confirmed snapshot. Unknown config ids still rejected.
+- Tests cover new/resume, set, invalid values, model switch vs union,
+  core rejection, fallback order, provider/model identity.
+
+Later (non-blocking):
+
+1. `currentValue` can be `""` when several levels exist and none of
+   current/default match. `""` is not a listed choice; T3 may render an
+   empty or broken select. Pick the first level instead, or verify T3.
+2. After a model switch, if core keeps a `thoughtLevel.current` the new
+   model does not support, ACP shows the fallback value while core may
+   send the old one. Unverified: core clamp behavior on `setModel` was not
+   traced. Check live by switching GLM-5.3 → Flash with a non-shared level.
+3. Effort changes made by another client are not pushed to T3 (documented
+   in the spec as a known gap).
