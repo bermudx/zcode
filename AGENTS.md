@@ -58,6 +58,9 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   only for sync or on request; before promoting use `--promote-gate`. Never `.skip`/delete upstream tests
   for speed. Real terminal/model behavior and resource cost
   require observation, not claims based on compilation or fixtures.
+  cli `tsconfig.json` covers only `src/**` — test files are never typechecked
+  (tsx strips types at run time), so type-level changes in `tests/` need an
+  explicit throwaway `tsc --noEmit` over those files to be verified.
 - Fix comments explaining bugs should follow upstream's Chinese-comment rule.
   Preserve license and upstream attribution. No inherited release/upload command
   is authorized for a fork release.

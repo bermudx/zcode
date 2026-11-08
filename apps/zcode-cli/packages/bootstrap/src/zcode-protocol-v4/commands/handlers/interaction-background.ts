@@ -194,8 +194,8 @@ async function cancelBackgroundWork(
 /**
  * resumeWorkflowRun：workId ≡ runId 直传 app 能力。
  * - 能力缺席（journal 不可用 / 端口无 resume）→ 能力不支持错误（同 cancel 的语义）。
- * - 业务拒绝（not_found / not_resumable / already_running / script_missing /
- *   script_mismatch / compile_failed）以 `fault.command.workflowRunResumeRejected.<reason>` 的 reasonCode
+ * - 业务拒绝（not_found / not_resumable / superseded / already_running /
+ *   script_missing / script_mismatch / compile_failed）以 `fault.command.workflowRunResumeRejected.<reason>` 的 reasonCode
  *   回 ACK——网关对携带 reasonCode 的领域错误原样上行，UI 按词表分流；不用错误文本做判断。
  *   compile_failed 的有界诊断经 `error.message` 收进 `ack.message`（与 startSavedWorkflow 同一约定）。
  */

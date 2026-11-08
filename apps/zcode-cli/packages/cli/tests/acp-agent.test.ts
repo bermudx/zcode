@@ -10,29 +10,89 @@ import {
   type SessionUpdate,
   type Stream,
 } from "@agentclientprotocol/sdk";
-import type { PermissionBrokerRequest, PermissionBrokerResult } from "@zcode/contracts";
+import type {
+  CollaborationMode,
+  DynamicWorkflowRunResumeResult,
+  DynamicWorkflowRunSessionSummary,
+  PermissionBrokerRequest,
+  PermissionBrokerResult,
+  SessionEvent,
+} from "@zcode/contracts";
 import { createAcpAgentApp } from "../src/acp/acp-agent.js";
 import type { AcpCorePort, AcpSession } from "../src/acp/acp-sessions.js";
 import type { AttachSessionHandle } from "../src/attach/attach-session.js";
 
 type FakeModel = { modelId: string; providerId: string };
 
+// PermissionBrokerRequest 的身份/风控字段（branded id、枚举、requestedAt）按最小真实
+// 形状固定铸造；toolName/input 是适配层的分流依据，逐测试给定。
+let permissionRequestSeq = 0;
+function permissionRequest(
+  toolName: string,
+  input: unknown,
+  sessionId: string,
+): PermissionBrokerRequest {
+  return {
+    requestId: `req_${++permissionRequestSeq}`,
+    sessionId: sessionId as PermissionBrokerRequest["sessionId"],
+    traceId: "trace_acp" as PermissionBrokerRequest["traceId"],
+    toolCallId: "t1" as PermissionBrokerRequest["toolCallId"],
+    toolName,
+    input,
+    mode: "build",
+    ruleId: "acp-test",
+    reason: "acp test",
+    riskLevel: "low",
+    requestedAt: new Date(),
+  };
+}
+
+/** requestPermission 的回包对 fake 是 unknown（SendInputOptions 契约）；取断言需要的 answers。 */
+function modifiedAnswers(result: unknown): Record<string, unknown> {
+  const modified = (result as PermissionBrokerResult | undefined)?.modifiedInput;
+  return typeof modified === "object" && modified !== null && "answers" in modified
+    ? ((modified.answers as Record<string, unknown> | undefined) ?? {})
+    : {};
+}
+
+// core 事件流按字面量喂给 sink：wire 字段（branded id/timestamp/seq）与断言无关，
+// 铸造收口这一个点；type/payload 成员名仍受 SessionEvent 约束（拼错编译失败）。
+const asEvent = (event: unknown): SessionEvent => event as SessionEvent;
+
 function fakeSession(sessionId: string): {
   handle: AttachSessionHandle;
   results: PermissionBrokerResult[];
-  mode: string;
+  mode: CollaborationMode;
   model: FakeModel;
   text?: string;
   thoughtCalls: string[];
+  goalCalls: { action: string; inputId?: string; objective?: string }[];
+  goalResult: { response: string; startedTurn: boolean };
+  dwfRuns: { runId: string; status: DynamicWorkflowRunSessionSummary["status"]; resumable?: boolean }[];
+  resumeCalls: string[];
+  cancelTaskCalls: string[];
+  resumeResult: DynamicWorkflowRunResumeResult | undefined;
+  stopCalls: number;
   emit: (event: unknown) => void;
 } {
-  const sinks = new Set<(event: unknown) => void>();
+  const sinks = new Set<(event: SessionEvent) => void>();
   const state = {
-    mode: "build",
+    mode: "build" as CollaborationMode,
     model: { modelId: "glm-5", providerId: "zhipu" },
     results: [] as PermissionBrokerResult[],
     text: undefined as string | undefined,
     thoughtCalls: [] as string[],
+    goalCalls: [] as { action: string; inputId?: string; objective?: string }[],
+    goalResult: { response: "", startedTurn: false },
+    dwfRuns: [] as {
+      runId: string;
+      status: DynamicWorkflowRunSessionSummary["status"];
+      resumable?: boolean;
+    }[],
+    resumeCalls: [] as string[],
+    cancelTaskCalls: [] as string[],
+    resumeResult: undefined as DynamicWorkflowRunResumeResult | undefined,
+    stopCalls: 0,
   };
   const reasoningFor = (modelId: string) =>
     modelId === "glm-5"
@@ -68,39 +128,73 @@ function fakeSession(sessionId: string): {
     },
     todos: [],
   };
-  const handle = {
-    addSink: (sink: (event: unknown) => void) => {
+  // snapshot 全树按 schema 是完整对象（protocol/session/runtime/messages…），本套件只经
+  // handle 消费局部形状；铸造收口这一处，handle 成员签名仍逐字受检。
+  const snapshotForHandle = snapshot as unknown as AttachSessionHandle["snapshot"];
+  const handle: Pick<
+    AttachSessionHandle,
+    | "addSink"
+    | "cancelBackgroundTask"
+    | "getMode"
+    | "goalCommand"
+    | "listDynamicWorkflowRuns"
+    | "resumeWorkflowRun"
+    | "sessionId"
+    | "snapshot"
+    | "setMode"
+    | "setModel"
+    | "setThoughtLevel"
+    | "stopActiveTurn"
+    | "submitPrompt"
+  > = {
+    addSink: (sink) => {
       sinks.add(sink);
       return () => sinks.delete(sink);
     },
+    cancelBackgroundTask: async (taskId: string) => {
+      state.cancelTaskCalls.push(taskId);
+      return { cancelled: true, status: "cancelled", taskId };
+    },
     getMode: () => state.mode,
+    goalCommand: async (input) => {
+      state.goalCalls.push(input);
+      return {
+        response: state.goalResult.response,
+        snapshot: snapshotForHandle,
+        startedTurn: state.goalResult.startedTurn,
+      };
+    },
+    listDynamicWorkflowRuns: async () =>
+      state.dwfRuns.map((run) => ({
+        resumable: run.resumable ?? false,
+        runId: run.runId,
+        status: run.status,
+      })),
+    resumeWorkflowRun: async (input: { workId: string }) => {
+      state.resumeCalls.push(input.workId);
+      return state.resumeResult ?? { ok: true, runId: input.workId };
+    },
     sessionId,
-    snapshot,
-    stopActiveTurn: async () => undefined,
-    submitPrompt: async (
-      text: string,
-      _options?: {
-        requestPermission?: (
-          request: PermissionBrokerRequest,
-          extra?: { signal?: AbortSignal },
-        ) => Promise<PermissionBrokerResult>;
-      },
-    ) => {
+    snapshot: snapshotForHandle,
+    stopActiveTurn: async () => {
+      state.stopCalls += 1;
+    },
+    submitPrompt: async (prompt) => {
+      const text = typeof prompt === "string" ? prompt : prompt.text;
       state.text = text;
       for (const sink of sinks) {
-        sink({
-          payload: { delta: "hello", kind: "text_delta" },
-          type: "model_streaming",
-        });
+        sink(asEvent({ payload: { delta: "hello", kind: "text_delta" }, type: "model_streaming" }));
       }
       return { response: text };
     },
-    setMode: async (mode: string) => {
-      state.mode = mode;
+    setMode: async (mode) => {
+      // 适配层先按广告的 modes 校验 modeId 才会调进来；state 存的是校验后的词表值。
+      state.mode = mode as CollaborationMode;
       return { mode };
     },
-    setModel: async (value: string) => {
-      state.model = { modelId: value.split("/")[1] ?? value, providerId: value.split("/")[0] ?? "zhipu" };
+    setModel: async (value) => {
+      const spec = typeof value === "string" ? value : value.modelId;
+      state.model = { modelId: spec.split("/")[1] ?? spec, providerId: spec.split("/")[0] ?? "zhipu" };
       snapshot.settings.model.current = state.model;
       snapshot.settings.thoughtLevel = {
         ...snapshot.settings.thoughtLevel,
@@ -112,19 +206,22 @@ function fakeSession(sessionId: string): {
         ),
         current: undefined,
       };
-      return { model: value };
+      return { model: spec };
     },
-    setThoughtLevel: async (level: string) => {
+    setThoughtLevel: async (level) => {
       state.thoughtCalls.push(level);
       snapshot.settings.thoughtLevel.current = level;
       // 与真实句柄一致：mergeSettings 在回包合并期间就会向 sink 补发 model_selected。
-      for (const sink of sinks) sink({ payload: { modelSelection: state.model }, type: "model_selected" });
+      for (const sink of sinks) {
+        sink(asEvent({ payload: { modelSelection: state.model }, type: "model_selected" }));
+      }
       return { thoughtLevel: level };
     },
-  } as unknown as AttachSessionHandle;
+  };
+  // 测试只兑现上面声明的成员：Cast 收口到这一个消费边界（Pick → 完整 handle）。
   return Object.assign(state, {
-    emit: (event: unknown) => { for (const sink of sinks) sink(event); },
-    handle,
+    emit: (event: unknown) => { for (const sink of sinks) sink(asEvent(event)); },
+    handle: handle as AttachSessionHandle,
   });
 }
 
@@ -496,36 +593,30 @@ test("acp agent: AskUserQuestion uses form elicitation and returns answers", asy
       mcpServers: [],
     });
     const session = core.sessions.get(created.sessionId)!;
-    const handle = session.handle as unknown as {
-      submitPrompt: (
-        text: string,
-        options: {
-          requestPermission: (
-            request: PermissionBrokerRequest,
-          ) => Promise<PermissionBrokerResult>;
-        },
-      ) => Promise<unknown>;
-    };
-    handle.submitPrompt = async (_text, options) => {
-      const result = await options.requestPermission({
-        input: {
-          questions: [
-            {
-              header: "Scope",
-              options: [
-                { label: "Single", description: "One file" },
-                { label: "Repo", description: "Whole repository" },
-              ],
-              question: "Which scope?",
-            },
-          ],
-        },
-        requestId: "r1",
-        sessionId: created.sessionId,
-        toolCallId: "t1",
-        toolName: "AskUserQuestion",
-      } as unknown as PermissionBrokerRequest);
-      answers.push((result as { modifiedInput?: { answers?: Record<string, unknown> } }).modifiedInput?.answers ?? {});
+    const handle = session.handle;
+    handle.submitPrompt = async (_prompt, options) => {
+      answers.push(
+        modifiedAnswers(
+          await options?.requestPermission?.(
+            permissionRequest(
+              "AskUserQuestion",
+              {
+                questions: [
+                  {
+                    header: "Scope",
+                    options: [
+                      { label: "Single", description: "One file" },
+                      { label: "Repo", description: "Whole repository" },
+                    ],
+                    question: "Which scope?",
+                  },
+                ],
+              },
+              created.sessionId,
+            ),
+          ),
+        ),
+      );
       return { response: "" };
     };
     await ctx.request(methods.agent.session.prompt, {
@@ -551,22 +642,13 @@ test("acp agent: ExitPlanMode cannot be auto-approved without an explicit answer
       cwd: "/workspace",
       mcpServers: [],
     });
-    const handle = core.sessions.get(created.sessionId)!.handle as unknown as {
-      submitPrompt: (
-        text: string,
-        options: {
-          requestPermission: (request: PermissionBrokerRequest) => Promise<PermissionBrokerResult>;
-        },
-      ) => Promise<unknown>;
-    };
-    handle.submitPrompt = async (_text, options) => {
+    const handle = core.sessions.get(created.sessionId)!.handle;
+    handle.submitPrompt = async (_prompt, options) => {
+      // SendInputOptions 契约里回包是 unknown；适配层恒回 PermissionBrokerResult，单跳收窄。
       results.push(
-        await options.requestPermission({
-          requestId: "r1",
-          sessionId: created.sessionId,
-          toolCallId: "t1",
-          toolName: "ExitPlanMode",
-        } as unknown as PermissionBrokerRequest),
+        (await options?.requestPermission?.(
+          permissionRequest("ExitPlanMode", undefined, created.sessionId),
+        )) as PermissionBrokerResult,
       );
       return { response: "" };
     };
@@ -732,4 +814,366 @@ test("acp agent: invalid live TodoWrite JSON closes the connection instead of hi
   await f.connection.closed;
   assert.match(f.failures[0]!.message, /projection failed/);
   assert.ok(f.failures[0]!.cause instanceof SyntaxError);
+});
+
+// ── /goal 与 /dwf 的本地命令路由（不进模型）────────────────────────────────
+
+function collectUpdates(onPermission: () => string): {
+  app: ReturnType<typeof clientApp>;
+  updates: SessionUpdate[];
+} {
+  const updates: SessionUpdate[] = [];
+  const app = clientApp(onPermission, () => ({ action: "decline" })).onNotification(
+    methods.client.session.update,
+    ({ params }) => { updates.push(params.update); },
+  );
+  return { app, updates };
+}
+
+const settle = (ms = 10): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+test("acp agent: /goal show routes to session/goal, never to submitPrompt", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "No goal is set. Use /goal <objective> to set one.", startedTurn: false };
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(session.goalCalls.map((call) => call.action), ["show"]);
+    assert.equal(session.text, undefined, "local command must not reach submitPrompt");
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text.includes("No goal is set"),
+    ));
+  });
+});
+
+test("acp agent: /goal set emits the core response, then awaits the continuation turn", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "Goal active\nObjective: ship it", startedTurn: true };
+    let resolved: { stopReason: string } | undefined;
+    const pending = ctx
+      .request(methods.agent.session.prompt, {
+        prompt: [{ text: "/goal ship it", type: "text" }],
+        sessionId: created.sessionId,
+      })
+      .then((value) => {
+        resolved = value;
+        return value;
+      });
+    await settle();
+    assert.equal(resolved, undefined, "prompt must stay open until the turn settles");
+    assert.deepEqual(session.goalCalls, [
+      { action: "set", inputId: session.goalCalls[0]?.inputId, objective: "ship it" },
+    ]);
+    const inputId = session.goalCalls[0]!.inputId!;
+    assert.match(inputId, /^acp-goal-/);
+    // 别的 inputId 收口不能误释放本次等待。
+    session.emit({ payload: { inputId: "unrelated" }, type: "turn_complete" });
+    await settle();
+    assert.equal(resolved, undefined);
+    session.emit({ payload: { inputId }, type: "turn_complete" });
+    assert.equal((await pending).stopReason, "end_turn");
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text.startsWith("Goal active"),
+    ));
+  });
+});
+
+test("acp agent: /goal pause synthesizes visible feedback for the silent core success", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    // core 对 pause 成功刻意回空串（协议 lane 无气泡）；ACP 客户端没有目标面板，
+    // 必须补一行，否则命令看起来被吞。
+    session.goalResult = { response: "", startedTurn: false };
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal pause", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(session.goalCalls.map((call) => call.action), ["pause"]);
+    assert.deepEqual(
+      updates
+        .filter((update) => update.sessionUpdate === "agent_message_chunk")
+        .map((update) => update.content.type === "text" ? update.content.text : ""),
+      ["Goal paused."],
+    );
+  });
+});
+
+test("acp agent: /goal op failure surfaces as a request error, not a fake turn", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.handle.goalCommand = async () => {
+      throw new Error("Cannot manage goals while a prompt is running");
+    };
+    await assert.rejects(
+      ctx.request(methods.agent.session.prompt, {
+        prompt: [{ text: "/goal ship it", type: "text" }],
+        sessionId: created.sessionId,
+      }),
+      (error: unknown) => {
+        assert.match((error as Error).message, /Cannot manage goals/);
+        return true;
+      },
+    );
+  });
+});
+
+test("acp agent: session/cancel during a waited goal turn returns cancelled and stops the core turn", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "Goal resumed", startedTurn: true };
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal resume", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    await settle();
+    ctx.notify(methods.agent.session.cancel, { sessionId: created.sessionId });
+    assert.equal((await pending).stopReason, "cancelled");
+    assert.equal(session.stopCalls, 1);
+  });
+});
+
+test("acp agent: session/cancel after the first goal turn still reaches the core stop", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    // prompt 只等第一轮：回合表已空，但 goal 续跑循环的后续轮（2..N）还在 core 侧
+    // 跑——此后的 cancel 必须仍走 v4 stop（暂停目标 + 中止当前轮）。
+    session.goalResult = { response: "Goal active", startedTurn: true };
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal ship it", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    await settle();
+    const inputId = session.goalCalls[0]!.inputId!;
+    session.emit({ payload: { inputId }, type: "turn_complete" });
+    assert.equal((await pending).stopReason, "end_turn");
+    ctx.notify(methods.agent.session.cancel, { sessionId: created.sessionId });
+    await settle();
+    assert.equal(session.stopCalls, 1);
+  });
+});
+
+test("acp agent: cancelling a dwf command never stops the core turn", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    // dwf 只是 op 往返：core 里没有「我们的」turn，取消不得 v4 stop 误伤其它客户端。
+    let releaseList: (() => void) | undefined;
+    session.handle.listDynamicWorkflowRuns = () =>
+      new Promise((resolve) => {
+        releaseList = () => resolve([]);
+      });
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/dwf list", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    await settle();
+    ctx.notify(methods.agent.session.cancel, { sessionId: created.sessionId });
+    // 取消只置标志/abort 信号，不会 reject 挂起的 op 调用——手动放行后再等回包。
+    releaseList?.();
+    assert.equal((await pending).stopReason, "cancelled");
+    assert.equal(session.stopCalls, 0);
+  });
+});
+
+test("acp agent: /dwf list and resume route through the dwf wire surface", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.dwfRuns = [{ runId: "dwfrun_1", status: "running" }];
+    let result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/dwf list", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text.includes("dwfrun_1 · running"),
+    ));
+    assert.equal(session.text, undefined, "dwf command must not reach submitPrompt");
+
+    result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/dwf resume dwfrun_1", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(session.resumeCalls, ["dwfrun_1"]);
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text === "Resumed dynamic workflow run dwfrun_1.",
+    ));
+  });
+});
+
+test("acp agent: /dwf cancel without runId cancels the single in-flight run", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.dwfRuns = [{ runId: "dwfrun_live", status: "running" }];
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/dwf cancel", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(session.cancelTaskCalls, ["dwfrun_live"]);
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text === "Cancelled dynamic workflow run dwfrun_live.",
+    ));
+  });
+});
+
+test("acp agent: other slash input keeps the P005 verbatim forward path", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/model glm-5", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, "/model glm-5");
+    assert.deepEqual(session.goalCalls, []);
+    assert.deepEqual(session.resumeCalls, []);
+  });
+});
+
+test("acp agent: available_commands_update advertises goal and dwf after new/resume", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+    await ctx.request(methods.agent.session.resume, {
+      cwd: "/workspace",
+      sessionId: "sess_resumed",
+    });
+    await settle(20);
+    const commands = updates.flatMap((update) =>
+      update.sessionUpdate === "available_commands_update"
+        ? update.availableCommands.map((command) => command.name)
+        : [],
+    );
+    assert.deepEqual(commands.sort(), ["dwf", "dwf", "goal", "goal"]);
+  });
+});
+
+test("acp agent: a second prompt while a local command is in flight is rejected", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    session.goalResult = { response: "Goal active", startedTurn: true };
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/goal ship it", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    await settle();
+    await assert.rejects(
+      ctx.request(methods.agent.session.prompt, {
+        prompt: [{ text: "/dwf list", type: "text" }],
+        sessionId: created.sessionId,
+      }),
+      (error: unknown) => {
+        assert.match((error as Error).message, /already running/);
+        return true;
+      },
+    );
+    session.emit({ payload: { inputId: session.goalCalls[0]?.inputId }, type: "turn_complete" });
+    assert.equal((await pending).stopReason, "end_turn");
+  });
 });

@@ -23,8 +23,22 @@ export type SavedWorkflowStartRejectionReason = z.infer<
 export const SAVED_WORKFLOW_START_REJECTED_FAULT_PREFIX =
   "fault.command.savedWorkflowStartRejected." as const;
 
-// resumeWorkflowRun 的拒绝：前缀 + 端口 reason（not_found / not_resumable / superseded /
-// already_running / script_missing / script_mismatch / compile_failed）；`ack.message` 携带
+// resumeWorkflowRun 的拒绝词表：contracts `DynamicWorkflowRunResumeErrorReason` 的镜像
+// （bootstrap 原样拼进 fault 后缀，不收敛）；attach 侧从 options 派生校验集合，避免手抄漂移。
+export const workflowRunResumeRejectionReasonSchema = z.enum([
+  "not_found",
+  "not_resumable",
+  "superseded",
+  "already_running",
+  "script_missing",
+  "script_mismatch",
+  "compile_failed",
+]);
+export type WorkflowRunResumeRejectionReason = z.infer<
+  typeof workflowRunResumeRejectionReasonSchema
+>;
+
+// resumeWorkflowRun 的拒绝：前缀 + 端口 reason；`ack.message` 携带
 // compile_failed 的有界诊断（docs/dynamic-workflow/presentation.md「The run pane」）。
 export const WORKFLOW_RUN_RESUME_REJECTED_FAULT_PREFIX =
   "fault.command.workflowRunResumeRejected." as const;
