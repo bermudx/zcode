@@ -14,7 +14,7 @@ const usage = `zcode-attach — pi-tui thin client for a shared ZCode core
 
 Usage:
   zcode-attach [--locale <en-US|zh-CN|auto>] [--no-color] [--verbose]
-               [-c|--continue] [--resume <sessionId>] [--model <provider/model>]
+               [-c|--continue] [--resume <sessionId>] [--model <model|provider/model>]
                [--version] [-h|--help]
   zcode-attach acp   stdio Agent Client Protocol (ACP v1) adapter
 
@@ -24,9 +24,11 @@ Session selection (same semantics as the main CLI):
   --resume <id>   resume a specific session
 
 Model selection:
-  --model <provider/model>  start the session on this model; a bare model
-                            id works when it matches exactly one provider,
-                            and a $effort suffix is supported (same as /model)
+  --model <model|provider/model>
+                  start on this model (e.g. --model glm-5.3); bare names
+                  ignore case and prefer the session's current provider
+                  when ambiguous. Other ambiguity requires provider/model.
+                  Quote a $effort suffix, e.g. --model 'glm-5.3$high'.
 
 Environment:
   ZCODE_SERVER_BIN   core 二进制（缺省 PATH 里的 zcode），core 不存在时

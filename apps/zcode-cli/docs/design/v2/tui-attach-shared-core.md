@@ -414,9 +414,16 @@ projection 再 reset，种子整体被抹掉）。
   做——统一走 setModel 一条链路，Ctrl+P/`/model`/`--model` 共享校验
   与状态合并语义。
 - **取值**：`provider/model` 完整 ref（支持 `$effort` 档位后缀，同
-  `/model` 参数）；bare modelId 在目录中唯一命中时自动补全 provider，
-  多命中或零命中时报错并列出可用完整 ref。模型校验复用
-  `resolveTuiModelSelection`（目录精确匹配 + 默认档位）。
+  `/model` 参数）保持精确匹配；bare modelId 不区分大小写，回填目录中的
+  原始 provider/model 拼写。例如 `piz --model glm-5.3` 可命中
+  `account:zai-individual-coding-plan/GLM-5.3`，不需要输入 provider 前缀。
+  bare id 多 provider 命中时优先当前会话的 provider（以 create/resume
+  快照为准），否则报歧义并列出候选；零命中报错并列出可用完整 ref，
+  不按目录顺序猜测 provider。仅在其他 provider 唯一命中时保留原有补全行为。
+  bare id 同样支持 `$effort`：先匹配整个字面 modelId（保留含 `$` 的 id），
+  再拆后缀，档位不区分大小写并回填目录拼写；未知档位显式失败。
+  shell 中需引用含 `$` 的参数，如 `piz --model 'glm-5.3$high'`。
+  最终模型校验仍复用 `resolveTuiModelSelection`（目录精确匹配 + 默认档位）。
 - **resume 语义**：`-c`/`--resume` 携带 `--model` 时对恢复的会话执行
   同一 setModel——启动覆盖是每次调用一次性事实。
 - **失败**：校验失败在 TUI 接管屏幕前以 stderr 报错、退出码 1。

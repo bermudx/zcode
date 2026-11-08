@@ -22,10 +22,13 @@ import {
  * `--model` 启动模型选择（docs/design/v2/tui-attach-shared-core.md
  * 「启动模型选择」）：作用域仅 tui --shared-core（attach/piz）；应用点在
  * 会话物化后经既有 session/setModel 链路；bare id 目录唯一命中时补全
- * provider；未知/多命中在 TUI 接管前以 stderr 报错退出。
+ * provider（不区分大小写，多命中优先当前 provider）；未知/未消歧的多命中
+ * 在 TUI 接管前以 stderr 报错退出。
  */
 
 const SID = "sess-1";
+const CODING_PLAN_PROVIDER = "account:zai-individual-coding-plan";
+const HIGHSPEED_PROVIDER = "account:zai-highspeed-card";
 
 /** 真实 server 的 catalog 项形状（实测 session/create 回包）：身份在 ref 里，
  *  元数据是 label/providerLabel/reasoning/properties。 */
@@ -60,6 +63,7 @@ function makeSnapshot(
     modelOption("glm-4.7"),
     modelOption("glm-5.3"),
   ],
+  currentProviderId = "zai",
 ) {
   return {
     messages: [],
@@ -92,7 +96,7 @@ function makeSnapshot(
       mode: { current: "build" },
       model: {
         available,
-        current: { modelId: currentModelId, providerId: "zai" },
+        current: { modelId: currentModelId, providerId: currentProviderId },
       },
       thoughtLevel: { available: [], current: "medium", enabled: true },
     },
@@ -170,6 +174,7 @@ interface AttachHarness {
 async function startAttachHarness(
   available?: ZCodeModelOption[],
   startModelId = "glm-4.6",
+  startProviderId = "zai",
 ): Promise<AttachHarness> {
   const dir = await mkdtemp(join(tmpdir(), "attach-model-"));
   const workspace = join(dir, "workspace");
@@ -180,9 +185,11 @@ async function startAttachHarness(
   );
   await mkdir(dirname(socketPath), { recursive: true });
   let currentModelId = startModelId;
+  let currentProviderId = startProviderId;
   const core = await startFakeCore(socketPath, (request) => {
-    if (request.method === "session/create") return makeSnapshot(currentModelId, available);
-    if (request.method === "session/resume") return makeSnapshot(currentModelId, available);
+    if (request.method === "session/create" || request.method === "session/resume") {
+      return makeSnapshot(currentModelId, available, currentProviderId);
+    }
     if (request.method === "session/list") {
       return { sessions: [{ sessionId: SID, updatedAt: 42 }] };
     }
@@ -190,8 +197,10 @@ async function startAttachHarness(
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
     if (request.method === "session/setModel") {
-      currentModelId = (request.params.model as { modelId: string }).modelId;
-      return makeSnapshot(currentModelId, available);
+      const model = request.params.model as { modelId: string; providerId: string };
+      currentModelId = model.modelId;
+      currentProviderId = model.providerId;
+      return makeSnapshot(currentModelId, available, currentProviderId);
     }
     if (request.method === "runtime/capabilities") return {};
     return {};
@@ -260,10 +269,87 @@ test("bare model id 唯一命中时补全 provider", () => {
   assert.equal(resolveInitialModelRef("glm-5.3", available), "zai/glm-5.3");
 });
 
+test("lowercase short name resolves to the coding-plan catalog's canonical GLM id", () => {
+  const available = [
+    modelOption("GLM-5.3", CODING_PLAN_PROVIDER),
+    modelOption("GLM-5.3-Flash", CODING_PLAN_PROVIDER),
+  ];
+  for (const input of ["glm-5.3", "GlM-5.3", " GLM-5.3 "]) {
+    assert.equal(resolveInitialModelRef(input, available), `${CODING_PLAN_PROVIDER}/GLM-5.3`);
+  }
+  assert.equal(
+    resolveInitialModelRef("glm-5.3-flash", available),
+    `${CODING_PLAN_PROVIDER}/GLM-5.3-Flash`,
+  );
+});
+
+test("bare ids match case-insensitively for non-GLM providers too", () => {
+  assert.equal(
+    resolveInitialModelRef("other-model", [modelOption("Other-Model", "custom")]),
+    "custom/Other-Model",
+  );
+});
+
+test("short name prefers the current provider, not catalog order", () => {
+  const available = [
+    modelOption("GLM-5.3", HIGHSPEED_PROVIDER),
+    modelOption("GLM-5.3", CODING_PLAN_PROVIDER),
+  ];
+  assert.equal(
+    resolveInitialModelRef("glm-5.3", available, CODING_PLAN_PROVIDER),
+    `${CODING_PLAN_PROVIDER}/GLM-5.3`,
+  );
+  assert.equal(
+    resolveInitialModelRef("glm-5.3", available, HIGHSPEED_PROVIDER),
+    `${HIGHSPEED_PROVIDER}/GLM-5.3`,
+  );
+  assert.throws(
+    () => resolveInitialModelRef("glm-5.3", available, "unrelated"),
+    /matches multiple providers/,
+  );
+});
+
+test("short name still resolves a unique match outside the current provider", () => {
+  assert.equal(
+    resolveInitialModelRef("glm-5.3", [modelOption("GLM-5.3", CODING_PLAN_PROVIDER)], "custom"),
+    `${CODING_PLAN_PROVIDER}/GLM-5.3`,
+  );
+});
+
+test("bare id and effort both use catalog casing", () => {
+  const available = [
+    modelOption("GLM-5.3", CODING_PLAN_PROVIDER, {
+      defaultLevel: "max",
+      levels: [{ label: "High", value: "High" }, { label: "max", value: "max" }],
+    }),
+  ];
+  assert.equal(
+    resolveInitialModelRef("glm-5.3$HIGH", available),
+    `${CODING_PLAN_PROVIDER}/GLM-5.3$High`,
+  );
+  assert.throws(
+    () => resolveInitialModelRef("glm-5.3$unknown", available),
+    /Select a supported reasoning effort.*High, max/,
+  );
+  assert.throws(
+    () => resolveInitialModelRef("glm-5.3$", available),
+    /is not available/,
+  );
+});
+
+test("literal bare model ids containing dollar signs take precedence over effort", () => {
+  const available = [modelOption("Custom$Model", "custom"), modelOption("Custom", "custom")];
+  assert.equal(resolveInitialModelRef("custom$model", available), "custom/Custom$Model");
+});
+
 test("完整 ref 与 $effort 后缀原样透传", () => {
   const available = [modelOption("glm-5.3")];
   assert.equal(resolveInitialModelRef("zai/glm-5.3", available), "zai/glm-5.3");
   assert.equal(resolveInitialModelRef("zai/glm-5.3$high", available), "zai/glm-5.3$high");
+  assert.equal(
+    resolveInitialModelRef(`${CODING_PLAN_PROVIDER}/glm-5.3$HIGH`, available),
+    `${CODING_PLAN_PROVIDER}/glm-5.3$HIGH`,
+  );
 });
 
 test("未知 bare id 报错并列出可用完整 ref", () => {
@@ -287,6 +373,22 @@ test("禁用项不参与 bare id 补全", () => {
   const available = [modelOption("glm-4.6"), disabled];
   assert.throws(
     () => resolveInitialModelRef("glm-5.3", available),
+    /is not available/,
+  );
+});
+
+test("disabled current-provider matches cannot win the short-name tiebreak", () => {
+  const available = [
+    { ...modelOption("GLM-5.3", CODING_PLAN_PROVIDER), disabledReason: "plan required" },
+    modelOption("GLM-5.3", HIGHSPEED_PROVIDER),
+    modelOption("GLM-5.3", "another-provider"),
+  ];
+  assert.throws(
+    () => resolveInitialModelRef("glm-5.3", available, CODING_PLAN_PROVIDER),
+    /matches multiple providers/,
+  );
+  assert.throws(
+    () => resolveInitialModelRef("glm-5.3", available.slice(0, 1), CODING_PLAN_PROVIDER),
     /is not available/,
   );
 });
@@ -333,16 +435,61 @@ test("create 路径：--model 完整 ref 触发 session/setModel 且目录校验
 });
 
 test("create 路径：bare id 目录唯一命中 → 补全 provider", async () => {
-  const h = await startAttachHarness();
+  const h = await startAttachHarness([modelOption("GLM-5.3", CODING_PLAN_PROVIDER)]);
   try {
     const result = await h.runAttach("glm-5.3");
     assert.equal(result.exitCode, 0, result.stderr);
     const setModel = h.coreRequests.find((r) => r.method === "session/setModel");
     assert.deepEqual(setModel?.params.model, {
-      modelId: "glm-5.3",
+      modelId: "GLM-5.3",
       options: { reasoningLevel: "max" },
-      providerId: "zai",
+      providerId: CODING_PLAN_PROVIDER,
     });
+  } finally {
+    await h.destroy();
+  }
+});
+
+for (const continueSession of [false, true]) {
+  test(`${continueSession ? "resume" : "create"}: lowercase alias keeps the current coding-plan provider and effort`, async () => {
+    const h = await startAttachHarness(
+      [
+        modelOption("GLM-5.3", HIGHSPEED_PROVIDER),
+        modelOption("GLM-5.3", CODING_PLAN_PROVIDER, {
+          defaultLevel: "max",
+          levels: [{ label: "max", value: "max" }, { label: "high", value: "high" }],
+        }),
+      ],
+      "GLM-5.3",
+      CODING_PLAN_PROVIDER,
+    );
+    try {
+      const result = await h.runAttach("glm-5.3$HIGH", { continueSession });
+      assert.equal(result.exitCode, 0, result.stderr);
+      const requests = h.coreRequests.filter((request) => request.method === "session/setModel");
+      assert.equal(requests.length, 1);
+      assert.deepEqual(requests[0]?.params.model, {
+        modelId: "GLM-5.3",
+        options: { reasoningLevel: "high" },
+        providerId: CODING_PLAN_PROVIDER,
+      });
+      if (continueSession) {
+        assert.equal(result.initialResultModel, `${CODING_PLAN_PROVIDER}/GLM-5.3`);
+      }
+    } finally {
+      await h.destroy();
+    }
+  });
+}
+
+test("unknown short-name effort fails before TUI startup and never sets a model", async () => {
+  const h = await startAttachHarness([modelOption("GLM-5.3", CODING_PLAN_PROVIDER)]);
+  try {
+    const result = await h.runAttach("glm-5.3$unknown");
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.initialModel, undefined);
+    assert.match(result.stderr, /--model: Select a supported reasoning effort/);
+    assert.equal(h.coreRequests.some((request) => request.method === "session/setModel"), false);
   } finally {
     await h.destroy();
   }
