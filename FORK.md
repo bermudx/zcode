@@ -930,3 +930,19 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
   半边、astral 截断/换行折叠字节回归、pty 冒烟 boot/exit 各自独享
   45s 预算。已知限制记入 spec（并发面板、grace 期 re-announce 闪烁）；
   spec 勘误：`script` 是 pty、照常发射，非「零字节」路径。
+
+### 2026-11-08 — merge reviewed sync and OSC branches (no promotion)
+
+- Operator authorized these two merges only; the ACP goal/dwf worktree had an
+  active Herdr session and was left untouched.
+- Merged `sync/2026-11-07-a9fe401e` at `5ae77e79` as `7d9fa0ca`, then
+  `patch/osc7501-status` at `19ef618e` as `cfc84c03`, both `--no-ff`.
+  The sole conflict was appended maintenance records in this file; kept both.
+  Source changes needed no manual resolution.
+- Combined-source checks: CLI 89/89, bootstrap lineage/socket 8/8, signing
+  13/13; CLI typecheck passed; targeted lint 0 errors/7 warnings.
+  Architecture still fails on unchanged `attach-session.ts` (814/800 by
+  this invocation), also observed before merging; no baseline was widened.
+- [Merge evidence and reproduction](docs/fork/reports/2026-11-08-sync-osc-merges.md).
+  No build, promotion, network access, push, core restart or cleanup.
+  Existing untracked adapters `backup/` left untouched.
