@@ -1075,3 +1075,20 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
   remaining gate incomplete. No whole-suite retry, skip or baseline widening.
 - [Evidence, retained artifacts, and remaining work](docs/fork/reports/2026-11-08-acp-promotion-blocked.md).
   Installed artifacts and existing cores are unchanged. No push or model call.
+
+### 2026-11-08 — combined promotion completed
+
+- Operator authorized checking ready branches, merging and promotion. Merged
+  `patch/osc7501-smoke-gate` as `4caa31d5`: corrected PTY readiness detection
+  and restored cooked terminal mode on exit. Independent diff review found
+  no blockers. Older ACP review branches were already incorporated; the
+  separate lead/sidekick experiment was not included.
+- Preserved completed gate results and finished the remaining ten packages:
+  no new failures. Fresh PTY smoke 2/2, tui-pi 271/271, tui 267/267, shared
+  engineering 101/101, typechecks and changed-file lint passed; architecture
+  had 0 new violations. Independent real-artifact checks confirmed terminal
+  restoration, ACP local commands and no-plugin core startup.
+- Promoted from clean main at `4caa31d5` with the official script; compared
+  installed bundles and frozen frontends against tested outputs. Retained
+  the previous pair for rollback. No push or live-core restart.
+- [Evidence, verifier-brief corrections and remaining acceptance limits](docs/fork/reports/2026-11-08-combined-promotion-complete.md).
