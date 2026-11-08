@@ -851,3 +851,31 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   model turn, signing/allowance evidence, lineage rejection against a live
   core — full acceptance gate unchanged and still open. Not merged to main,
   not promoted; both are operator decisions.
+
+### 2026-11-08 — subagent review of sync/2026-11-07-a9fe401e
+
+Three independent read-only reviewers (no tests run): merge seams (19
+both-sides-changed files), the bcde55fd lineage fix (all activation paths
+mapped), fork-behavior preservation (10 must-keeps). Consensus:
+**0 blockers, 0 fix-before-merge on the branch tip; fit to merge.**
+- Merge review independently re-found the fast-path lineage bypass as the
+  single semantic defect of merge commit 0f56f297 — already fixed by
+  bcde55fd on-branch; every other seam composed as designed (incl.
+  protocol-slash-commands resolution, server-operations adoption/fanout,
+  v4-bridge admission, session-facade quota facade, manifests).
+- Lineage-fix review: validate-before-mutation ordering, error shape, and
+  legacy passthrough match upstream exactly; no explicit-workspace path
+  bypasses validation; tests genuinely pin the seam.
+- Preservation review: all 10 areas SURVIVED (signing byte-identical,
+  v4 send, compact cap, attach surface, tui/tui-pi, ACP effort, no-plugin
+  gate, P005, fork-deleted paths still gone).
+- LATER (not filed anywhere yet, operator's call): op-level resume test
+  through the real JSON-RPC wrapper; `remoteSessionId`-only mismatch
+  case; 3.17.1-era notes — fast path ignores lifecycle state in the
+  mid-stop window, adoption validates against persisted not live
+  workspace facts, fast-path rejection records no lifecycle lastError;
+  untracked `apps/zcode-cli/packages/adapters/backup/` should be trashed
+  before promotion hygiene; pre-existing attach-session.ts 813/800
+  architecture violation from `c7cf871e` lives on main.
+
+Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents.
