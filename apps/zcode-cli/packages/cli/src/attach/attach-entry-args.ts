@@ -38,7 +38,7 @@ export function parseAttachEntryArgs(argv: readonly string[]): AttachEntryArgs {
     } else if (arg === "--model") {
       const value = argv[++i];
       if (value === undefined || value === "") {
-        throw new Error("--model requires a value: --model <provider/model>");
+        throw new Error("--model requires a value: --model <model|provider/model>");
       }
       initialModel = value;
     } else if (arg === "--version" || arg === "-v") {

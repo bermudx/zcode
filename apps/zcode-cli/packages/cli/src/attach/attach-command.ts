@@ -4,6 +4,7 @@
 // 客户端不持有业务状态；退出只断连接，core 端 session 照常存活。
 import {
   ZCODE_PROTOCOL_VERSION,
+  ZCODE_MODEL_REASONING_SEPARATOR,
   ZCODE_WORKSPACE_IDENTITY_ENV,
   resolveWorkspaceKey,
   resolveZCodeRuntimeEnv,
@@ -208,6 +209,7 @@ export const runAttachCommand = async (
             resolveInitialModelRef(
               initialModel,
               handle.snapshot.settings.model.available,
+              handle.snapshot.settings.model.current?.providerId,
             ),
           );
         } catch (error) {
@@ -362,27 +364,54 @@ export const runAttachCommand = async (
 export const formatExitResumeHint = (command: string, sessionId: string): string =>
   `Resume this session with:\n${command} --resume ${sessionId}\n`;
 
-/** `--model` 取值归一：bare modelId 在目录唯一命中时补全 provider，
- *  完整 ref（含 `$effort` 后缀）原样交给 setModel 的目录校验
- *  （resolveTuiModelSelection）。零/多命中都抛可操作错误——启动旗标
- *  被静默忽略比失败更糟。 */
+/** bare id 不区分大小写，但必须回填目录拼写，否则 setModel 的精确校验仍会失败。
+ *  同名模型优先当前 provider，不按目录顺序猜账单；完整 ref 继续原样交给 setModel。 */
 export function resolveInitialModelRef(
   value: string,
   available: readonly ZCodeModelOption[],
+  currentProviderId?: string,
 ): string {
   const trimmed = value.trim();
   if (trimmed.includes("/")) return trimmed;
-  const enabled = available.filter(
-    (option) => !option.disabledReason && option.ref.modelId === trimmed,
+  const selectable = available.filter((option) => !option.disabledReason);
+  const literalMatches = selectable.filter(
+    (option) => option.ref.modelId.toLowerCase() === trimmed.toLowerCase(),
   );
-  if (enabled.length === 1) {
-    return `${enabled[0].ref.providerId}/${enabled[0].ref.modelId}`;
+  // 先保留字面含 `$` 的 modelId，再拆档位；空后缀仍按未知模型报错。
+  const separatorIndex = trimmed.indexOf(ZCODE_MODEL_REASONING_SEPARATOR);
+  const hasEffort =
+    literalMatches.length === 0 &&
+    separatorIndex > 0 &&
+    separatorIndex < trimmed.length - 1;
+  const modelId = hasEffort ? trimmed.slice(0, separatorIndex) : trimmed;
+  const effort = hasEffort ? trimmed.slice(separatorIndex + 1) : undefined;
+  const enabled =
+    literalMatches.length > 0
+      ? literalMatches
+      : selectable.filter((option) => option.ref.modelId.toLowerCase() === modelId.toLowerCase());
+  const currentProviderMatches = enabled.filter(
+    (option) => option.ref.providerId === currentProviderId,
+  );
+  const matches = currentProviderMatches.length > 0 ? currentProviderMatches : enabled;
+  if (matches.length === 1) {
+    const option = matches[0];
+    const ref = `${option.ref.providerId}/${option.ref.modelId}`;
+    if (effort === undefined) return ref;
+    const level = option.reasoning?.levels.find(
+      (candidate) => candidate.value.toLowerCase() === effort.toLowerCase(),
+    );
+    if (!level) {
+      throw new Error(
+        `Select a supported reasoning effort for ${ref}: ${
+          option.reasoning?.levels.map((candidate) => candidate.value).join(", ") || "none available"
+        }`,
+      );
+    }
+    return `${ref}${ZCODE_MODEL_REASONING_SEPARATOR}${level.value}`;
   }
-  const refs = available
-    .filter((option) => !option.disabledReason)
-    .map((option) => `${option.ref.providerId}/${option.ref.modelId}`);
-  if (enabled.length > 1) {
-    const candidates = enabled
+  const refs = selectable.map((option) => `${option.ref.providerId}/${option.ref.modelId}`);
+  if (matches.length > 1) {
+    const candidates = matches
       .map((option) => `${option.ref.providerId}/${option.ref.modelId}`)
       .join(", ");
     throw new Error(
