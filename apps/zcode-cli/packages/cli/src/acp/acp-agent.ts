@@ -27,6 +27,7 @@ import {
 } from "@zcode/contracts";
 import {
   ACP_MODEL_CONFIG_ID,
+  ACP_THOUGHT_LEVEL_CONFIG_ID,
   AcpEventProjector,
   answersFromElicitationContent,
   buildConfigOptions,
@@ -145,7 +146,10 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   };
 
   const configOptionsFor = (session: AcpSession): SessionConfigOption[] =>
-    buildConfigOptions(session.handle.snapshot.settings.model);
+    buildConfigOptions(
+      session.handle.snapshot.settings.model,
+      session.handle.snapshot.settings.thoughtLevel,
+    );
 
   const emitterFor = (
     client: AgentContext,
@@ -270,17 +274,51 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
 
   app.onRequest(methods.agent.session.setConfigOption, async ({ params }) => {
     const session = requireSession(params.sessionId);
-    if (params.configId !== ACP_MODEL_CONFIG_ID) {
-      throw new RequestError(
-        INVALID_PARAMS,
-        `Unknown ACP config option: ${params.configId}`,
+    if (params.configId === ACP_MODEL_CONFIG_ID) {
+      if (typeof params.value !== "string") {
+        throw new RequestError(INVALID_PARAMS, "Model config option requires a string value");
+      }
+      await session.handle.setModel(params.value);
+      return { configOptions: configOptionsFor(session) };
+    }
+    if (params.configId === ACP_THOUGHT_LEVEL_CONFIG_ID) {
+      const effort = configOptionsFor(session).find(
+        (option) => option.id === ACP_THOUGHT_LEVEL_CONFIG_ID,
       );
+      if (effort?.type !== "select") {
+        throw new RequestError(
+          INVALID_PARAMS,
+          "Reasoning effort is not configurable for the current model",
+        );
+      }
+      if (typeof params.value !== "string" || params.value.length === 0) {
+        throw new RequestError(
+          INVALID_PARAMS,
+          "Reasoning effort config option requires a non-empty string value",
+        );
+      }
+      const supported = new Set(
+        effort.options.flatMap((entry) =>
+          "value" in entry ? [entry.value] : entry.options.map((nested) => nested.value),
+        ),
+      );
+      if (!supported.has(params.value)) {
+        throw new RequestError(
+          INVALID_PARAMS,
+          "Unsupported reasoning effort for the current model",
+        );
+      }
+      await session.handle.setThoughtLevel(params.value);
+      log?.debug?.("acp reasoning effort changed", {
+        sessionId: params.sessionId,
+        value: params.value,
+      });
+      return { configOptions: configOptionsFor(session) };
     }
-    if (typeof params.value !== "string") {
-      throw new RequestError(INVALID_PARAMS, "Model config option requires a string value");
-    }
-    await session.handle.setModel(params.value);
-    return { configOptions: configOptionsFor(session) };
+    throw new RequestError(
+      INVALID_PARAMS,
+      `Unknown ACP config option: ${params.configId}`,
+    );
   });
 
   app.onNotification(methods.agent.session.cancel, ({ params }) => {

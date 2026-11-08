@@ -6,6 +6,7 @@ import {
   ACP_BUILD_MODE,
   ACP_MODEL_CONFIG_ID,
   ACP_PLAN_MODE,
+  ACP_THOUGHT_LEVEL_CONFIG_ID,
   AcpEventProjector,
   answersFromElicitationContent,
   buildConfigOptions,
@@ -80,6 +81,170 @@ test("model config option: current ref and enabled models only", () => {
     option.options.map((entry) => entry.value),
     ["zhipu/glm-5"],
   );
+});
+
+const reasoning = (values: string[], defaultLevel?: string) => ({
+  defaultLevel,
+  levels: values.map((value) => ({ label: value.toUpperCase(), value })),
+});
+
+test("thought level config: current model reasoning drives choices, not the union", () => {
+  const options = buildConfigOptions(
+    {
+      available: [
+        {
+          label: "GLM-5",
+          reasoning: {
+            defaultLevel: "high",
+            levels: [
+              { description: "Light reasoning", label: "Low", value: "low" },
+              { label: "High", value: "high" },
+            ],
+          },
+          ref: { modelId: "glm-5", providerId: "zhipu" },
+        },
+      ],
+      current: { modelId: "glm-5", providerId: "zhipu" },
+    },
+    {
+      available: [
+        { label: "LOW", value: "low" },
+        { label: "HIGH", value: "high" },
+        { label: "TURBO", value: "turbo" },
+      ],
+      current: "high",
+      enabled: true,
+    },
+  );
+  const effort = options.find((option) => option.id === ACP_THOUGHT_LEVEL_CONFIG_ID);
+  assert.equal(effort?.type, "select");
+  assert.equal(effort?.category, "thought_level");
+  assert.equal(effort?.name, "Reasoning effort");
+  if (effort?.type !== "select") return;
+  assert.equal(effort.currentValue, "high");
+  assert.deepEqual(
+    effort.options.map((entry) => "value" in entry && entry.value),
+    ["low", "high"],
+  );
+  assert.deepEqual(
+    effort.options.map((entry) => "value" in entry && [entry.name, entry.description]),
+    [
+      ["Low", "Light reasoning"],
+      ["High", undefined],
+    ],
+  );
+});
+
+test("thought level config: current falls back through snapshot then model defaults", () => {
+  const model = {
+    label: "GLM-5",
+    reasoning: reasoning(["low", "medium", "high"], "medium"),
+    ref: { modelId: "glm-5", providerId: "zhipu" },
+  };
+  const settings = { available: [model], current: model.ref };
+  const effortValue = (thought: { current?: string; defaultLevel?: string }) =>
+    buildConfigOptions(settings, { available: [], enabled: true, ...thought })
+      .find((option) => option.id === ACP_THOUGHT_LEVEL_CONFIG_ID);
+  const currentOf = (thought: { current?: string; defaultLevel?: string }) => {
+    const option = effortValue(thought);
+    return option?.type === "select" ? option.currentValue : undefined;
+  };
+  assert.equal(currentOf({ current: "low" }), "low");
+  assert.equal(currentOf({ defaultLevel: "high" }), "high");
+  assert.equal(currentOf({}), "medium");
+  assert.equal(currentOf({ current: "stale", defaultLevel: "gone" }), "medium");
+});
+
+test("thought level config: a sole supported level becomes the current value", () => {
+  const options = buildConfigOptions(
+    {
+      available: [
+        {
+          label: "Tiny",
+          reasoning: reasoning(["only"]),
+          ref: { modelId: "tiny", providerId: "local" },
+        },
+      ],
+      current: { modelId: "tiny", providerId: "local" },
+    },
+    { available: [], enabled: true },
+  );
+  const effort = options.find((option) => option.id === ACP_THOUGHT_LEVEL_CONFIG_ID);
+  if (effort?.type !== "select") throw new Error("expected a select option");
+  assert.equal(effort.currentValue, "only");
+});
+
+test("thought level config: omitted when disabled, unlevelled, or the current model is absent", () => {
+  const model = {
+    label: "GLM-5",
+    reasoning: reasoning(["low", "high"]),
+    ref: { modelId: "glm-5", providerId: "zhipu" },
+  };
+  const settings = { available: [model], current: model.ref };
+  const ids = (options: ReturnType<typeof buildConfigOptions>) =>
+    options.map((option) => option.id);
+  assert.deepEqual(
+    ids(buildConfigOptions(settings, { available: [], enabled: false, current: "low" })),
+    [ACP_MODEL_CONFIG_ID],
+  );
+  assert.deepEqual(
+    ids(buildConfigOptions({ available: [{ ...model, reasoning: undefined }], current: model.ref },
+      { available: [], enabled: true })),
+    [ACP_MODEL_CONFIG_ID],
+  );
+  assert.deepEqual(
+    ids(buildConfigOptions({ available: [{ ...model, reasoning: reasoning([]) }], current: model.ref },
+      { available: [], enabled: true })),
+    [ACP_MODEL_CONFIG_ID],
+  );
+  assert.deepEqual(
+    ids(buildConfigOptions({ available: [model], current: undefined },
+      { available: [], enabled: true, current: "low" })),
+    [ACP_MODEL_CONFIG_ID],
+  );
+  assert.deepEqual(
+    ids(buildConfigOptions(settings, undefined)),
+    [ACP_MODEL_CONFIG_ID],
+  );
+  const multi = buildConfigOptions(
+    {
+      available: [
+        { ...model, reasoning: reasoning(["a", "b"]) },
+      ],
+      current: model.ref,
+    },
+    { available: [], current: "nope", enabled: true },
+  );
+  const effort = multi.find((option) => option.id === ACP_THOUGHT_LEVEL_CONFIG_ID);
+  assert.equal(effort?.type === "select" ? effort.currentValue : "missing", "");
+});
+
+test("thought level config: same modelId on another provider picks the exact catalog entry", () => {
+  const options = buildConfigOptions(
+    {
+      available: [
+        {
+          label: "GLM-5 zhipu",
+          reasoning: reasoning(["low", "high"], "high"),
+          ref: { modelId: "glm-5", providerId: "zhipu" },
+        },
+        {
+          label: "GLM-5 other",
+          reasoning: reasoning(["x"], "x"),
+          ref: { modelId: "glm-5", providerId: "other" },
+        },
+      ],
+      current: { modelId: "glm-5", providerId: "other" },
+    },
+    { available: [], enabled: true },
+  );
+  const effort = options.find((option) => option.id === ACP_THOUGHT_LEVEL_CONFIG_ID);
+  if (effort?.type !== "select") throw new Error("expected a select option");
+  assert.deepEqual(
+    effort.options.map((entry) => "value" in entry && entry.value),
+    ["x"],
+  );
+  assert.equal(effort.currentValue, "x");
 });
 
 test("permissions: option ids round-trip to core decisions", () => {
