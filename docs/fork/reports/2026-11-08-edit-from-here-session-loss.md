@@ -263,8 +263,8 @@ another untested one.
 
 No fork/rewind, locale, overload or doc-drift issue was added in this filing.
 
-**Recommended direction, not implementation approval:** make the shared core a
-workspace/provider-level resource owned independently of a per-session ACP
+**Recommended direction, not implementation approval:** keep the existing shared
+core a workspace-level resource owned independently of a per-session ACP
 process. Keep each ACP process's cleanup intact; retiring it releases its
 connection, not a core another client is using. Keep the current core's
 connection/orphan idle accounting rather than inventing a second session owner.
@@ -276,6 +276,16 @@ shared-resource lifecycle before introducing another permanent service.
 Setting `shared: true` alone is not a fix: the ACP scope still has a stop
 finalizer. This direction needs coordinated T3/piz ownership work, not an
 unannounced escape from T3's process containment.
+
+**Operator clarification:** avoiding duplicate core memory is the point of this
+design. Preserve one core per existing workspace identity/socket, shared by
+terminal clients and ACP clients alike. Do not add a T3-specific or
+provider-specific core alongside that workspace core. The OpenCode example is
+only an ownership-pattern reference, not approval to copy its server launcher
+or partition sharing by frontend. A proposed T3 integration that starts a
+second core for an already-served workspace is not an acceptable fix. The
+remaining decision concerns who owns the existing core's lifetime, not how many
+copies to run.
 
 No production code, installed command, T3 checkout or running core was changed
 in this follow-up. No tests/build were rerun for this documentation/issue filing.
