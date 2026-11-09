@@ -15,6 +15,12 @@ Usage:
   zcode-attach [--locale <en-US|zh-CN|auto>] [--no-color] [--verbose]
                [-c|--continue] [--resume <sessionId>] [--model <provider/model>]
                [--version] [-h|--help]
+  zcode-attach acp            ACP v1 agent over stdio (Zed, T3 Code, …)
+
+ACP (\`piz acp\`):
+  stdout is the JSON-RPC channel; diagnostics go to stderr. Sessions live in
+  the shared core, so the editor can re-open one with session/resume. ACP has
+  no login: run \`piz login\` once beforehand.
 
 Session selection (same semantics as the main CLI):
   (default)        start a NEW session
@@ -43,6 +49,17 @@ const main = async (): Promise<number> => {
   if (action === "version") {
     process.stdout.write(`${__CLI_VERSION__}\n`);
     return 0;
+  }
+  if (action === "acp") {
+    // 懒加载：ACP 前端与 pi-tui 前端互斥，先 import 会把渲染栈也拉进启动路径。
+    const { runAcpCommand } = await import("../acp/acp-command.js");
+    return await runAcpCommand({
+      env: process.env,
+      stderr: process.stderr,
+      stdin: process.stdin,
+      stdout: process.stdout,
+      version: __CLI_VERSION__,
+    });
   }
   return runAttachCommand(
     {

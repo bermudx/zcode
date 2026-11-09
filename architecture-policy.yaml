@@ -1007,6 +1007,9 @@ modules:
       - apps/zcode-cli/packages/cli/src/app-server-spawn.ts
       - apps/zcode-cli/packages/cli/src/protocol-lifecycle.ts
       - apps/zcode-cli/packages/cli/src/attach
+      # ACP 前端（`zcode-attach acp`）是同一接法的另一个前端：只经 attach-client
+      # 的 socket 会话工作，不引入 runtime，所以与 attach 同模块同边界。
+      - apps/zcode-cli/packages/cli/src/acp
     managed: true
     requires:
       - shared

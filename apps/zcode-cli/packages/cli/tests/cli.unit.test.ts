@@ -1838,6 +1838,8 @@ test("detects TUI invocations before loading the runtime", () => {
   assert.equal(isTuiInvocation(["--mode", "build"]), true);
   assert.equal(isTuiInvocation(["--resume", "session-test", "tui"]), true);
 
+  // `acp` 不是 TUI invocation：它属于瘦客户端子命令，monolith 必须报未知命令，
+  // 而不是悄悄起一个 TUI 再让编辑器对着屏幕抓瞎。
   assert.equal(isTuiInvocation(["acp"]), false);
   assert.equal(isTuiInvocation(["--help"]), false);
   assert.equal(isTuiInvocation(["tui", "--help"]), false);
@@ -6108,13 +6110,18 @@ test("loads dotenv for app-server only in development runtime", async () => {
   assert.equal(ctx.stderr.output(), "");
 });
 
-test("rejects the removed acp command", async () => {
+test("keeps `acp` out of the monolith: the ACP frontend ships only in the thin client", async () => {
+  // `zcode-attach acp`（= `piz acp`）才是入口。monolith 若接上 ACP，编辑器起的
+  // 子进程就会拖着完整运行时（bootstrap/tui/core），shim 的瘦客户端属性随之消失，
+  // 所以这里必须一直是 Unknown command。
   const ctx = createContext(["acp"]);
   const exitCode = await run(ctx);
 
   assert.equal(exitCode, 1);
   assert.match(ctx.stderr.output(), /Unknown command: acp/);
   assert.equal(ctx.stdout.output(), "");
+  // 不能是"启动了但崩了"：stdout 必须干净，编辑器才不会看到半截 JSON-RPC。
+  assert.doesNotMatch(ctx.stdout.output(), /"jsonrpc"/);
 });
 
 test("returns an error for unknown commands", async () => {

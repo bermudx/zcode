@@ -6,7 +6,12 @@ import type { GlobalOptions } from "@zcode/shared-types";
 import type { CliResumeRequest } from "../cli-types.js";
 
 export interface AttachEntryArgs {
-  action?: "help" | "version";
+  /**
+   * `acp` 是子命令位（argv[0]）：`zcode-attach acp` / `piz acp` 把 stdio 变成
+   * ACP v1 前端。它与 attach 互斥，因此必须先于旗标解析判定，且其余旗标在
+   * ACP 模式下没有意义（编辑器不会传，这里也不假装支持）。
+   */
+  action?: "acp" | "help" | "version";
   /** `--model <ref>`：启动模型选择，交给 runAttachCommand 应用。 */
   initialModel?: string;
   options: GlobalOptions;
@@ -16,8 +21,11 @@ export interface AttachEntryArgs {
 export function parseAttachEntryArgs(argv: readonly string[]): AttachEntryArgs {
   const options: GlobalOptions = { force: false, json: false, noColor: false, verbose: false };
   const resume: CliResumeRequest = { continueSession: false };
-  let action: "help" | "version" | undefined;
+  let action: "acp" | "help" | "version" | undefined;
   let initialModel: string | undefined;
+  if (argv[0] === "acp") {
+    return { action: "acp", options, resume };
+  }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--locale") {
