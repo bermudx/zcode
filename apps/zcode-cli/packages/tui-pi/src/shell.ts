@@ -227,6 +227,12 @@ const INTERACTIVE_STARTUP_NOISE =
   /^(?:\S*(?:bash|zsh)):(?: cannot set terminal process group| no job control in this shell| can't set tty pgrp| can't have job control)\b/u;
 const MAX_INTERACTIVE_STARTUP_NOISE_LINES = 2;
 
+// Ubuntu /etc/bash.bashrc 在 sudo 组用户、无 ~/.sudo_as_admin_successful 时
+// 每个交互 bash 启动都打印三行 sudo 提示（CI runner 的隔离 HOME 必中）；
+// 它跟在 job-control 诊断之后出现，所以在逐行剥离之后整块匹配。
+const UBUNTU_SUDO_LECTURE =
+  'To run a command as administrator (user "root"), use "sudo <command>".\nSee "man sudo_root" for details.\n\n';
+
 const stripInteractiveStartupNoise = (output: string): string => {
   const lines = output.split("\n");
   let stripped = 0;
@@ -237,7 +243,10 @@ const stripInteractiveStartupNoise = (output: string): string => {
   ) {
     stripped++;
   }
-  return stripped === 0 ? output : lines.slice(stripped).join("\n");
+  const body = stripped === 0 ? output : lines.slice(stripped).join("\n");
+  return body.startsWith(UBUNTU_SUDO_LECTURE)
+    ? body.slice(UBUNTU_SUDO_LECTURE.length)
+    : body;
 };
 
 const WINDOWS_SYSTEM32_BASH =
