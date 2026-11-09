@@ -52,6 +52,11 @@ import {
   watchTurnSettlement,
   type AcpLocalCommand,
 } from "./acp-commands.js";
+import {
+  buildManualSkillPrompt,
+  manualSkillCommandUsage,
+  parseSlashCommand,
+} from "../command-center/slash-commands.js";
 import type { SendInputOptions } from "../attach/attach-steer.js";
 
 const INVALID_PARAMS = -32602;
@@ -468,7 +473,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
         "A prompt turn is already running for this ACP session",
       );
     }
-    const text = promptBlocksToText(params.prompt);
+    let text = promptBlocksToText(params.prompt);
     if (text.length === 0) {
       throw new RequestError(INVALID_PARAMS, "Prompt contains no usable content");
     }
@@ -477,6 +482,26 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     const localCommand = parseLocalSlashCommand(text);
     if (localCommand) {
       return await runLocalCommand(client, session, localCommand);
+    }
+    // /skill 走 TUI command-center 同一条手动调用契约：core 不认识 `/skill`
+    // 原文，<name> [task] 必须改写成 buildManualSkillPrompt 再进普通 prompt
+    // 路径；裸 /skill 不进模型，只回 usage。技能名不在 ACP 侧校验——缺失/歧义
+    // 由 core 的 Skill 工具按实时技能集裁定，与 TUI 从不查目录同口径。
+    const slashCommand = parseSlashCommand(text);
+    if (slashCommand?.type === "known" && slashCommand.name === "skill") {
+      if (slashCommand.skillName.length === 0) {
+        const emit = emitterFor(client, session);
+        emit([
+          {
+            content: { text: manualSkillCommandUsage(), type: "text" },
+            sessionUpdate: "agent_message_chunk",
+          },
+        ]);
+        await pendingDrain;
+        if (connectionFailure) throw connectionFailure;
+        return { stopReason: "end_turn" } satisfies PromptResponse;
+      }
+      text = buildManualSkillPrompt(slashCommand.skillName, slashCommand.task);
     }
     const controller = new AbortController();
     const turn: ActiveTurn = {

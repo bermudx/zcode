@@ -21,6 +21,7 @@ import type {
 import { createAcpAgentApp } from "../src/acp/acp-agent.js";
 import type { AcpCorePort, AcpSession } from "../src/acp/acp-sessions.js";
 import type { AttachSessionHandle } from "../src/attach/attach-session.js";
+import { buildManualSkillPrompt } from "../src/command-center/slash-commands.js";
 
 type FakeModel = { modelId: string; providerId: string };
 
@@ -1175,5 +1176,77 @@ test("acp agent: a second prompt while a local command is in flight is rejected"
     );
     session.emit({ payload: { inputId: session.goalCalls[0]?.inputId }, type: "turn_complete" });
     assert.equal((await pending).stopReason, "end_turn");
+  });
+});
+
+// ── /skill 的手动调用改写（issue #9：ACP 与 TUI command-center 同契约）─────────
+
+test("acp agent: /skill <name> [task] reaches the core as the manual skill prompt", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    let result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/skill diff-review fix the bug", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(session.text, buildManualSkillPrompt("diff-review", "fix the bug"));
+    result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/skill diff-review", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(session.text, buildManualSkillPrompt("diff-review", ""));
+  });
+});
+
+test("acp agent: bare /skill replies usage locally and never reaches the core", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/skill", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(session.text, undefined, "bare /skill must not reach submitPrompt");
+    assert.ok(updates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      update.content.type === "text" &&
+      update.content.text.includes("Usage: /skill"),
+    ));
+  });
+});
+
+test("acp agent: unknown slash text keeps the verbatim forward path", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/notacommand hello", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, "/notacommand hello");
   });
 });

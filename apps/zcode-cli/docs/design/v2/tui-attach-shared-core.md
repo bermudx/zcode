@@ -356,6 +356,17 @@ markdown 命令在 attach 模式分两段：**目录走协议，展开留 core**
   刻意不接 `loadCustomCommand`。决策记录：
   [docs/fork/attach-custom-commands-design.md](../../../../../docs/fork/attach-custom-commands-design.md)。
 
+### ACP 前端的 `/skill` 手动调用（2026-11-09）
+
+`piz acp` 客户端同样没有 command-center：`session/prompt` 在 `/goal`、
+`/dwf` 本地路由之后再过一遍 TUI 同款 `parseSlashCommand`，只对 `/skill`
+特判——`/<name> [task]` 改写为 `buildManualSkillPrompt` 后走普通 prompt
+路径（core 不认识 `/skill` 原文，原文转发会把命令词喂给模型）；裸
+`/skill` 不进 core，直接回一条 `agent_message_chunk` usage
+（`manualSkillCommandUsage`）并以 `end_turn` 收口。技能名不在 ACP 侧
+校验：缺失/歧义由 core 的 Skill 工具按实时技能集裁定，与 TUI 从不查
+目录同口径；其余 slash 输入维持 P005 原文转发。
+
 ### core 死亡与重连恢复
 
 socket close → 状态行 "reconnecting" + transcript 内 `session_notice`
