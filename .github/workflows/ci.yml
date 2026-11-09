@@ -21,16 +21,18 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.local/share/pnpm/store
-          key: pnpm-${{ hashFiles('pnpm-lock.yaml', 'apps/zcode-cli/pnpm-lock.yaml') }}
+          key: pnpm-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-
-      - name: Install root workspace
+      # Root workspace covers apps/zcode-cli/packages/* too, so this one
+      # install provides every CLI dep (see root pnpm-workspace.yaml). The
+      # nested apps/zcode-cli workspace cannot install standalone: its
+      # packages declare workspace:* deps on root packages.
+      - name: Install workspace
         run: mise exec -- pnpm install --frozen-lockfile
       # CLI packages import root shared packages' built declarations; emit
       # them before the CLI build (same surface as scripts/fork-typecheck.mjs).
       - name: Build root shared surface
         run: mise exec -- node_modules/.bin/tsc -b packages/shared/tsconfig.testing.json packages/rpc packages/provider packages/provider-node packages/shared packages/model-option-map
-      - name: Install CLI workspace
-        run: mise exec -- pnpm --dir apps/zcode-cli install --frozen-lockfile
       - name: Build CLI workspace (turbo)
         run: mise exec -- pnpm --dir apps/zcode-cli build
       - name: Build model-option-map

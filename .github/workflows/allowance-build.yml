@@ -26,12 +26,12 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.local/share/pnpm/store
-          key: pnpm-allowance-${{ hashFiles('pnpm-lock.yaml', 'apps/zcode-cli/pnpm-lock.yaml') }}
+          key: pnpm-allowance-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-allowance-
-      - name: Install root workspace
+      # Root workspace covers apps/zcode-cli/packages/* too; no separate CLI
+      # install (the nested workspace can't resolve its workspace:* deps).
+      - name: Install workspace
         run: mise exec -- pnpm install --frozen-lockfile
-      - name: Install CLI workspace
-        run: mise exec -- pnpm --dir apps/zcode-cli install --frozen-lockfile
       - name: Build CLI workspace (turbo)
         run: mise exec -- pnpm --dir apps/zcode-cli build
       - name: Smoke check

@@ -8,8 +8,10 @@ verification plan, not a working-install claim.
 
 `.github/workflows/ci.yml` runs on every branch push and manual dispatch on
 `blacksmith-4vcpu-ubuntu-2404` (free tier: 3000 x64 2vCPU-min/month; the 4vCPU
-tag consumes at 2x rate): mise toolchain from `mise.toml` → root install →
-shared `tsc -b` → CLI install → `turbo run build` → `typecheck:piz` → root and
+tag consumes at 2x rate): mise toolchain from `mise.toml` → root install (the
+root workspace also covers `apps/zcode-cli/packages/*`; the nested CLI
+workspace cannot install standalone — its `workspace:*` deps point at root
+packages) → shared `tsc -b` → `turbo run build` → `typecheck:piz` → root and
 CLI lint → `architecture:check --changed` → `fork-tests.mjs --max-workers 2`
 (selected). On `main` pushes and manual dispatches it additionally runs
 `--full`. Only when every step is green it assembles and uploads
