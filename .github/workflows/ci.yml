@@ -45,12 +45,13 @@ jobs:
       - name: Lint (root)
         run: mise exec -- pnpm lint
       # run-cli-lint.mjs spawns `node "$npm_execpath" exec oxlint`; under mise
-      # npm_execpath is the ELF shim, so point it at the real JS entry
-      # (docs/fork/verification.md).
+      # npm_execpath is the ELF shim and no pnpm.cjs exists (docs/fork/
+      # verification.md). Install the npm-packaged pnpm for its JS entry.
       - name: Lint (CLI workspace)
         run: |
-          PNPM_CJS="$(find "$HOME/.local/share/mise" "$HOME/.local/share/pnpm" -name pnpm.cjs 2>/dev/null | head -1)"
-          [ -n "$PNPM_CJS" ] || { echo "pnpm.cjs not found under mise/pnpm install dirs" >&2; exit 1; }
+          mise exec -- npm install --global pnpm@10.33.2
+          PNPM_CJS="$(mise exec -- npm root --global)/pnpm/bin/pnpm.cjs"
+          [ -f "$PNPM_CJS" ] || { echo "pnpm.cjs missing at $PNPM_CJS" >&2; exit 1; }
           npm_execpath="$PNPM_CJS" mise exec -- node scripts/run-cli-lint.mjs
       - name: Architecture check (changed)
         run: mise exec -- pnpm architecture:check --changed
