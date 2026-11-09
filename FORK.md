@@ -40,7 +40,7 @@ It starts at `1473554cf6fcbce50f3cff5aa562a6089898959c` from the old
 | `feat/allowance-herdr` | Preserved standalone allowance branch; parked |
 | `sync/<date>-<short-sha>` | Future upstream integration candidates |
 | `patch/<topic>` | Future isolated product changes |
-| `origin` | Configured 2026-11 (observed 2026-11-07, by or before the `c2d393f7` push): `git@github.com:bermudi/piz.git`, fetch and push both enabled — supersedes the earlier "not configured" state; push policy below still applies |
+| `origin` | Configured 2026-11 (observed 2026-11-07, by or before the `c2d393f7` push) as `git@github.com:bermudi/piz.git`; repo transferred to `bermudx/zcode` 2026-11-08, local remote updated same day to `git@github.com:bermudx/zcode.git` (GitHub still redirects the old URL). Fetch and push both enabled; push policy below still applies |
 
 `archive-source` points at the old local clone, not a hosted backup. Its refs
 include old `main`, allowance, lucky-field and rapid-cloud tips. They are not
@@ -52,7 +52,8 @@ reference-library clone. Existing refs are preserved here; this is not yet an
 off-machine backup.
 
 Pushes are guarded locally: `push.default=nothing`, and `upstream`/`archive-source`
-have `pushurl=DISABLED`. As of 2026-11-07 `origin` (bermudi/piz.git) has push
+have `pushurl=DISABLED`. As of 2026-11-07 `origin` (bermudi/piz.git; renamed to
+bermudx/zcode.git 2026-11-08) has push
 **enabled** and `origin/main` sits behind local `main` at `c2d393f7` — this
 differs from the guard state this file recorded before; pushes still require the
 operator's explicit go-ahead.
