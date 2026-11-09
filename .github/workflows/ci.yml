@@ -57,11 +57,13 @@ jobs:
         run: mise exec -- pnpm architecture:check --changed
       # --max-workers 2: test results are load-sensitive (docs/fork/verification.md).
       # --base origin/main: actions/checkout creates no local `main` branch.
+      # Root .bin on PATH: bins like tsx live only there, not in package or
+      # inner-workspace .bin dirs, and package-script tests spawn bare shells.
       - name: Fork tests (selected)
-        run: mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --base origin/main --max-workers 2
+        run: PATH="$PWD/node_modules/.bin:$PATH" mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --base origin/main --max-workers 2
       - name: Fork tests (full)
         if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-        run: mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full --max-workers 2
+        run: PATH="$PWD/node_modules/.bin:$PATH" mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full --max-workers 2
       # Per-package logs live on the ephemeral runner; surface their tails
       # here or a failing package is undebuggable.
       - name: Dump fork-test logs on failure
