@@ -62,6 +62,11 @@ jobs:
       - name: Fork tests (full)
         if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         run: mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full --max-workers 2
+      # Per-package logs live on the ephemeral runner; surface their tails
+      # here or a failing package is undebuggable.
+      - name: Dump fork-test logs on failure
+        if: failure()
+        run: find /tmp /dev/shm -name '_zcode_*.log' -path '*fork-tests*' -exec sh -c 'echo "===== $1"; tail -150 "$1"' _ {} \;
       # Runs only after every check above is green: an uploaded artifact is
       # proof the sha passed this workflow's tiers.
       - name: Assemble dist-runtime
