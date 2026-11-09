@@ -75,9 +75,25 @@ Repository-local rerere is enabled; review every replayed resolution.
   that runtime fallback behavior has already been changed. Verify
   actual eligibility/metering with observable service/account evidence when
   available, and label it unverified otherwise.
-- Reuse shared cores across CLI invocations/sessions rather than creating a
-  heavy runtime for each client. Sharing does not remove session/workspace
-  isolation requirements or imply one global core across all workspaces.
+- One shared core process serves all workspaces, sessions and clients.
+  The operator explicitly confirmed this requirement on 2026-11-08; it is not
+  one core per workspace, provider or frontend. Workspace identity
+  belongs to session routing and isolation inside the core, not to selecting
+  a separate core process. Preserve workspace configuration, permission and
+  session boundaries while sharing the process.
+- Single-core transport/ownership (implemented on
+  `fix/edit-from-here-last-message`, source review and isolated live verification
+  accepted; not installed): the attach socket
+  derives from the data root only (`<dataBaseDir>/.zcode/v2/sockets/core.sock`),
+  never from workspace/provider/frontend. On Linux, clients auto-start the
+  core as a transient `systemd --user` service
+  (`piz-core-<sha256(socketPath)[:16]>`); requires systemd >= 254
+  (`--expand-environment=no`). The user service manager owns its
+  lifetime, so retiring any client scope (e.g. T3 ACP runtime) cannot kill it.
+  Other Unix platforms reuse an already-listening socket but fail explicitly
+  (no detached-spawn fallback) when the core is absent; win32 spawn stays
+  unsupported. Session workspace refs, adoption/orphan/drain accounting and
+  the no-plugins gate are unchanged.
 - Client and shared core must be built and installed as a matched pair. No
   cross-version protocol compatibility promise exists yet.
 - Preserve schema validation, workspace identity and path distinctions, session

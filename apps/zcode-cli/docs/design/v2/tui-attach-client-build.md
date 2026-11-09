@@ -11,8 +11,13 @@ from slice A (`feat(app-server): unix socket mode, no-plugins runtime, attach sp
 ## Already built (slice A + protocol additions, in tree)
 
 - Spawn helper: `packages/cli/src/app-server-spawn.ts`
-  `resolveSocketPath({workspacePath, workspaceIdentity?})`,
-  `ensureServer({workspace, socketPath?, env?, version?, spawnSpec?})` → `{socketPath, reused}`.
+  `resolveSocketPath({dataBaseDir?, env?, platform?})` — one core per data root,
+  workspace-independent;
+  `ensureServer({socketPath?, env?, dataBaseDir?, spawnSpec?, log?})` → `{socketPath, started}`.
+  Linux start goes through a transient `systemd --user` service
+  (`piz-core-<sha256(socketPath)[:16]>`; requires systemd >= 254 for
+  `--expand-environment=no`); other Unix platforms reuse a live
+  socket but fail explicitly on auto-start; win32 unsupported.
 - Socket listener (multi-client NDJSON): bootstrap `zcode-protocol/socket-listener.ts`.
 - Wire: NDJSON `{id,method,params?,trace?}` / `{id,result|error}` / `{method,params}`;
   server may issue reverse requests `{id,method,params}` that client must answer.

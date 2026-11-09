@@ -7,10 +7,18 @@ It owns fork direction, branch roles, active patches and maintenance policy.
 ## Working rules
 
 - Product goal: ZCode's extra GLM Coding Plan usage in a preferred CLI, without
-  Electron or a heavy core per invocation/session. Thin pi client + shared core
-  serves that goal. Standalone zcode-allowance is parked; its extra-usage/signing
-  purpose is not. Signing is mandatory: do not ship a candidate that drops or
-  breaks it, or call unsigned ordinary-quota operation success. Do not claim
+  Electron or a heavy core per invocation/session/workspace. One shared core
+  process serves all workspaces, sessions and thin clients. The single-core
+  transport/ownership candidate is implemented on
+  `fix/edit-from-here-last-message` (`99d0b843`): data-root socket +
+  Linux `systemd --user` transient service. Isolated source integration verified
+  one core across two workspaces and both client transports, surviving original
+  client scope retirement; see `docs/fork/reports/2026-11-08-single-core-live-verification.md`.
+  Built-pair verification/promotion remain pending; nothing installed
+  (operator clarified 2026-11-08). Standalone zcode-allowance is
+  parked; its extra-usage/signing purpose is not. Signing is mandatory: do not
+  ship a candidate that drops or breaks it, or call unsigned ordinary-quota
+  operation success. Do not claim
   allowance eligibility from code presence alone.
 - Preserve unrelated dirty work and existing history. New carried-change commit
   subjects use `fork:`. Work on `patch/<topic>` or `sync/<date>-<sha>` branches.
@@ -46,6 +54,15 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   runtime command admission, permission/parentage boundaries and stale-run guards.
   For async/state changes, diagram ownership and event order. Validate external
   input; no TS `any`, no sync network/filesystem IO in production paths.
+- ACP rollback diagnosis: T3 starts a replacement process before retiring the
+  original scope. A workspace core spawned by the original client can therefore
+  be reused by the replacement and then terminated by supervisor cleanup;
+  isolated real-binary reproduction confirmed scope inheritance and systemd
+  SIGTERM. `detached: true` is not proof of independent ownership. Zero-turn
+  draft loss after core restart is already a documented limit; distinguish that
+  from the automatic restart during an edit. Check the core's
+  shutdown timeline before treating `proto.sessionNotFound` as a bad ID or
+  adding resume retries. See `docs/fork/reports/2026-11-08-edit-from-here-session-loss.md`.
 - Respect architecture boundaries and public package exports. UI uses service
   hooks and IPlatformService, never direct Repo/runtime or window.zcode calls.
 - Keep client/core protocol schemas in sync, including root packages/shared.

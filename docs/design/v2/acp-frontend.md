@@ -33,6 +33,15 @@ session/close          ──►  v4 stop + session/close ───────�
 permission callbacks; it does not re-implement the share-core client. `session/new`
 ignores `mcpServers` and logs the count — core owns its MCP configuration.
 
+Core ownership: since 2026-11-08 there is exactly one shared core per data root.
+When the socket is absent the adapter asks `ensureServer` for it without a
+workspace; on Linux `ensureServer` starts the core as a transient `systemd --user`
+service (`piz-core-<sha256(socketPath)[:16]>`) so the core's lifetime is owned by
+the user service manager, not by this adapter's process or any client scope (T3
+runtime scope retirement cannot kill it). The launch requires systemd ≥ 254
+(`--expand-environment=no`; local man systemd-run(1)). Platforms without a user
+service manager fail explicitly — no detached-spawn fallback.
+
 ## Use with T3 Code
 
 In T3 Code, open **Settings → Providers → Add provider → Show more → Local ACP
@@ -226,7 +235,7 @@ not hand-copied per call site.
 | Sessions | `session/new`, `session/resume`, `session/close` (real stop); no `session/load`, so history is never replayed |
 | Turns | `session/prompt` (text + resource blocks only; images/audio rejected with a message), `session/cancel`, `session/update` |
 | Local commands | `/goal` (+`/target`) and `/dwf` intercepted in `session/prompt`, routed through core ops, response emitted as an `agent_message_chunk`; advertised via `available_commands_update` (see the section above) |
-| Workspaces | one lazy `AttachRuntime` + socket client per `cwd`; sessions are per-cwd but share that lane |
+| Workspaces | one lazy `AttachRuntime` + socket client per `cwd`; sessions are per-cwd but share that lane. All lanes converge on the single shared core: the socket endpoint is derived from the data root only, never from `cwd`/workspace identity (2026-11-08 single-core consolidation); workspace refs still travel in every `session/create`/`session/resume`/`session/list` so per-session isolation is unchanged |
 | Permissions | `session/request_permission`; `allow_once` / `allow_always` (only when core suggests permission updates) / `reject_once`; answer is the core option's `response` |
 | `AskUserQuestion` | form elicitation: one string property per question, single-select as `enum`, multi-select as comma-separated text; answers are keyed by question text |
 | `ExitPlanMode` | form elicitation with an explicit `approve` / `reject` enum; Auto/Full cannot silently approve a plan because the client must return a decision |

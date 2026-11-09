@@ -5,6 +5,7 @@ import { appServerInfoSchema } from "./contract.js";
 
 export const exampleAppServerInfo = appServerInfoSchema.parse({
   version: "test",
-  workspaceIdentity: "/workspace",
+  scope: "user",
+  socketPath: "/home/user/.zcode/v2/sockets/core.sock",
   startedAt: "2026-10-21T00:00:00.000Z",
 });

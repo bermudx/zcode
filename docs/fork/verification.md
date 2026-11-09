@@ -58,13 +58,13 @@ npm_execpath="$HOME/.local/share/pnpm/.tools/pnpm/10.33.2/node_modules/pnpm/bin/
 
 Interactive shells inside a piz/core-managed session can inherit
 `ZCODE_WORKSPACE_IDENTITY` (and `ZCODE_SERVER_BIN`/`ZCODE_ATTACH_CORE`).
-`runAttachCommand` derives the socket path hash from that identity, so
-attach tests that fake a core on a `resolveSocketPath`-derived path resolve
-a *different* socket inside `runAttachCommand`, fail the reuse probe, and
-spawn a real core ("app-server exited before accepting"). 2026-10-24: the
-whole attach suite requires `env -u ZCODE_WORKSPACE_IDENTITY`; it is an
-environment gap, not a regression (22/22 adapter + 48/48 attach set pass
-with it unset).
+Since 2026-11-08 the socket path derives from the data root only, so the
+identity no longer redirects the attach socket — but it still changes the
+session `workspaceRef`/`workspaceKey` sent to the core, and it is
+deliberately excluded from the spawned service env. Keep stripping it for
+attach tests (`env -u ZCODE_WORKSPACE_IDENTITY`, also handled by
+`fork-tests.mjs` STRIPPED_ENV): ambient identity otherwise produces a
+different workspace key than the fake-core fixtures assume.
 
 Rebuild changed dependency packages before consumer typechecks when checks use
 dist declarations. Do not suppress missing-export errors; determine whether

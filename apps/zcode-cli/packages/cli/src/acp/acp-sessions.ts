@@ -38,7 +38,6 @@ export interface AcpCorePort {
 
 export interface AcpCoreSessionsOptions {
   env: NodeJS.ProcessEnv;
-  version: string;
   /** 测试注入点：替换 ensureServer/connect，测试可直连真实 socket。 */
   connect?: (socketPath: string) => Promise<AttachClient>;
   ensureConnected?: (workspace: AcpWorkspaceRef) => Promise<{ socketPath: string }>;
@@ -54,8 +53,8 @@ type WorkspaceLane = {
 };
 
 /**
- * 一个 workspace 一条连接：ACP 的 cwd 决定 core 的 workspace 归属，
- * 同一 cwd 的多个会话共享连接（不重复 spawn core）。
+ * 一个 cwd 一条连接：per-cwd lane 是会话级 workspace 路由的载体，
+ * 全部 lane 汇聚到同一个共享 core（core 进程不按 workspace 分）。
  */
 export class AcpCoreSessions implements AcpCorePort {
   private readonly options: AcpCoreSessionsOptions;
@@ -183,13 +182,11 @@ export class AcpCoreSessions implements AcpCorePort {
 
   private async ensureConnected(ref: AcpWorkspaceRef): Promise<{ socketPath: string }> {
     if (this.options.ensureConnected) return await this.options.ensureConnected(ref);
+    // 单一 core：传输选择不带 workspace；ref 仍随 session/create|resume|
+    // list 进入每个请求，per-cwd lane 只是多条到同一 core 的连接。
     return await ensureServer({
       env: this.options.env,
-      version: this.options.version,
-      workspace: {
-        workspaceIdentity: ref.workspaceIdentity,
-        workspacePath: ref.workspacePath,
-      },
+      log: (line) => this.options.logger?.debug?.(line),
     });
   }
 }
