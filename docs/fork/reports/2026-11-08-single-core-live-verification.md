@@ -181,3 +181,39 @@ for automated branch validation. This does not hold up #10's source fix and
 does not authorize a push, build, merge, promotion or live-core restart.
 Full-suite and matched-binary verification remain gates for the operator's
 next merge/promotion decision.
+
+## Static-review follow-up — two P3 findings
+
+Both findings are fixed before merge; production code is unchanged.
+
+- Awaited the four floating `assert.rejects()` calls in
+  `app-server-spawn.test.ts`, so residual-artifact failures remain inside their
+  test bodies.
+- Built the ACP scope argv once in `spawnAcpScope` and used that array for both
+  `CommandRecord.argv` and `spawn`. New ledgers include the actual
+  `--quiet --collect` flags and the actual suffix-free `--unit` argument.
+  The earlier retained ledgers are historical: their scope-launch argv omitted
+  those two flags and included the `.scope` suffix. They have not been rewritten.
+  Their process/cgroup observations and acceptance results remain unchanged.
+
+Focused checks ran once, with logs and command exit statuses under
+`/tmp/piz-single-core-p3-review/`:
+
+- The three affected launcher tests pass (concurrency, rejected service start,
+  accepted-but-never-listening timeout).
+- A fixture-only source-extracted `spawnAcpScope` check captures the actual
+  `spawn` arguments and compares them exactly with the ledger; it confirms both
+  flags and the suffix-free unit argument. This is evidence-recording coverage,
+  not an additional live cgroup run.
+- An AST check confirms all 12 `assert.rejects()` calls in the spawn tests are
+  awaited.
+- Strict explicit typecheck of both changed files passes.
+- Lint exits 0 with one pre-existing `no-array-sort` warning at the untouched
+  environment-name listing in the driver; no lint errors.
+- Architecture before/after: one accepted baseline violation, zero new.
+  `git diff --check` is clean.
+
+No live service scenario, signing gate, unrelated suite, build or installation
+was repeated for these test/evidence-only changes. Permission/auth and platform
+compatibility callouts remain documented limits; this follow-up does not change
+their behavior.

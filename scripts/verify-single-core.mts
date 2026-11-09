@@ -991,20 +991,22 @@ async function main(): Promise<void> {
   // ----- worker scope launcher ----------------------------------------------
   const spawnAcpScope = async (role: string): Promise<WorkerProc> => {
     const unit = `piz-single-core-test-${role}-${randomUUID().slice(0, 8)}.scope`;
+    const argv = [
+      "--user",
+      "--scope",
+      "--quiet",
+      "--collect",
+      `--unit=${unit.replace(/\.scope$/, "")}`,
+      "--",
+      nodePath,
+      "--import",
+      tsxUrl,
+      "--import",
+      registerUrl,
+      acpWorkerPath,
+    ];
     const command: CommandRecord = {
-      argv: [
-        systemdRunShim,
-        "--user",
-        "--scope",
-        `--unit=${unit}`,
-        "--",
-        nodePath,
-        "--import",
-        tsxUrl,
-        "--import",
-        registerUrl,
-        acpWorkerPath,
-      ],
+      argv: [systemdRunShim, ...argv],
       exitCode: null,
       finishedAt: "",
       signal: null,
@@ -1013,20 +1015,7 @@ async function main(): Promise<void> {
     commands.push(command);
     const child = spawn(
       systemdRunShim,
-      [
-        "--user",
-        "--scope",
-        "--quiet",
-        "--collect",
-        `--unit=${unit.replace(/\.scope$/, "")}`,
-        "--",
-        nodePath,
-        "--import",
-        tsxUrl,
-        "--import",
-        registerUrl,
-        acpWorkerPath,
-      ],
+      argv,
       { env: serviceEnv, stdio: ["pipe", "pipe", "pipe"] },
     );
     const worker: WorkerProc = {

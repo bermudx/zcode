@@ -422,7 +422,7 @@ test("concurrent ensureServer callers issue exactly one service request on the s
   const invocations = (await readFile(`${argvFile}.count`, "utf8")).trim().split("\n");
   assert.equal(invocations.length, 1);
   // 锁释放后不应残留 lock 文件。
-  assert.rejects(readFile(`${socketPath}.lock`, "utf8"));
+  await assert.rejects(readFile(`${socketPath}.lock`, "utf8"));
 });
 
 test("service argv requests a user service (not a scope) with neutral cwd and no workspace env", async (t) => {
@@ -603,8 +603,8 @@ test("a failing service manager reports an explicit error and kills no shared se
     },
   );
   // 失败路径不残留锁，也没有拉起任何 core 进程可停。
-  assert.rejects(readFile(`${socketPath}.lock`, "utf8"));
-  assert.rejects(readFile(`${socketPath}.pid`, "utf8"));
+  await assert.rejects(readFile(`${socketPath}.lock`, "utf8"));
+  await assert.rejects(readFile(`${socketPath}.pid`, "utf8"));
 });
 
 test("a service accepted but never listening times out with unit identity for inspection", async (t) => {
@@ -636,7 +636,7 @@ test("a service accepted but never listening times out with unit identity for in
       return true;
     },
   );
-  assert.rejects(readFile(`${socketPath}.lock`, "utf8"));
+  await assert.rejects(readFile(`${socketPath}.lock`, "utf8"));
 });
 
 test("an already-live socket is reused even when the service manager is unavailable", async (t) => {
