@@ -13,10 +13,11 @@
 // - POSIX children spawn detached (new session, no controlling tty), so no
 //   interactive job-control tcsetpgrp can ever steal the client terminal.
 //   `-i` without a controlling tty still emits startup diagnostics on some
-//   shells (bash job-control/tty-pgrp lines); the known leading lines (≤2)
-//   are stripped from the captured tail at finish for interactive shells
-//   only — lookalike user output lines survive, and the spill file keeps
-//   the stream verbatim (sanitized full stream, noise included).
+//   shells (bash job-control/tty-pgrp lines on stderr, the Ubuntu sudo
+//   lecture on stdout); the known leading noise is stripped per stream at
+//   finish for interactive shells only — lookalike user output lines
+//   survive, and the spill file keeps the stream verbatim (sanitized full
+//   stream, noise included).
 // - Timeout/abort kills the whole process tree (SIGKILL to -pgid, or
 //   taskkill /F /T on Windows); detached children are tracked so shutdown
 //   can reap them (see killTrackedShellChildren, wired in run-tui.ts).
@@ -229,24 +230,62 @@ const MAX_INTERACTIVE_STARTUP_NOISE_LINES = 2;
 
 // Ubuntu /etc/bash.bashrc 在 sudo 组用户、无 ~/.sudo_as_admin_successful 时
 // 每个交互 bash 启动都打印三行 sudo 提示（CI runner 的隔离 HOME 必中）；
-// 它跟在 job-control 诊断之后出现，所以在逐行剥离之后整块匹配。
+// 它走 stdout，只在该流的流首整块匹配。
 const UBUNTU_SUDO_LECTURE =
   'To run a command as administrator (user "root"), use "sudo <command>".\nSee "man sudo_root" for details.\n\n';
 
-const stripInteractiveStartupNoise = (output: string): string => {
-  const lines = output.split("\n");
-  let stripped = 0;
-  while (
-    stripped < lines.length &&
-    stripped < MAX_INTERACTIVE_STARTUP_NOISE_LINES &&
-    INTERACTIVE_STARTUP_NOISE.test(lines[stripped]!)
-  ) {
-    stripped++;
+type ShellOutputSource = "stdout" | "stderr";
+type ShellOutputChunk = { text: string; source: ShellOutputSource };
+
+/**
+ * 按来源剥流首、按到达序拼接：stdout/stderr 是两条独立管道，合并缓冲里的
+ * 到达顺序由管道调度决定，启动噪声可能落在命令输出之后（CI 实测
+ * probe-out 先于两行 job-control 诊断到达）。先在各自流内取流首——
+ * stderr 至多 MAX_INTERACTIVE_STARTUP_NOISE_LINES 行 job-control 诊断、
+ * stdout 恰好一块 sudo 提示——再从到达序拼接里删掉这些前缀长度；用户
+ * 输出零重排，长得像噪声的 stdout 行永远不会被 stderr 规则吃掉。
+ * headEvicted 标记某条流的流首已被滚动缓冲淘汰：此时保留段的“流首”
+ * 其实是中段用户输出，该流不再剥离。
+ */
+const joinInteractiveOutput = (
+  chunks: readonly ShellOutputChunk[],
+  headEvicted: Record<ShellOutputSource, boolean>,
+): string => {
+  const strip: Record<ShellOutputSource, number> = { stdout: 0, stderr: 0 };
+  const joinedSource = (source: ShellOutputSource): string =>
+    chunks
+      .filter((chunk) => chunk.source === source)
+      .map((chunk) => chunk.text)
+      .join("");
+  if (!headEvicted.stderr) {
+    const lines = joinedSource("stderr").split("\n");
+    let chars = 0;
+    for (
+      let i = 0;
+      i < lines.length && i < MAX_INTERACTIVE_STARTUP_NOISE_LINES;
+      i++
+    ) {
+      if (!INTERACTIVE_STARTUP_NOISE.test(lines[i]!)) break;
+      chars += lines[i]!.length + 1;
+    }
+    strip.stderr = chars;
   }
-  const body = stripped === 0 ? output : lines.slice(stripped).join("\n");
-  return body.startsWith(UBUNTU_SUDO_LECTURE)
-    ? body.slice(UBUNTU_SUDO_LECTURE.length)
-    : body;
+  if (!headEvicted.stdout) {
+    const text = joinedSource("stdout");
+    if (text.startsWith(UBUNTU_SUDO_LECTURE)) {
+      strip.stdout = UBUNTU_SUDO_LECTURE.length;
+    }
+  }
+  if (strip.stdout === 0 && strip.stderr === 0) {
+    return chunks.map((chunk) => chunk.text).join("");
+  }
+  let out = "";
+  for (const chunk of chunks) {
+    const skip = Math.min(chunk.text.length, strip[chunk.source]);
+    strip[chunk.source] -= skip;
+    out += chunk.text.slice(skip);
+  }
+  return out;
 };
 
 const WINDOWS_SYSTEM32_BASH =
@@ -600,7 +639,14 @@ export const runShellCommand = async (input: {
     // pi-mono bash-executor 溢出策略：滚动缓冲保留尾部 2×阈值；累计越过阈值
     // 即懒开启 spill 文件并回填已缓冲块（此后淘汰只影响内存，不影响文件），
     // 行数超限而字符未越界时由 finish 兜底开启。
-    const chunks: string[] = [];
+    const chunks: ShellOutputChunk[] = [];
+    // 「流首是否已淘汰」标记：滚动淘汰只 shift 最旧块，某条流第一次被淘汰的
+    // 必然是它的首块；首块离队后该流保留段的起点就是中段输出，finish 不得
+    // 再剥流首。
+    const headEvicted: Record<ShellOutputSource, boolean> = {
+      stdout: false,
+      stderr: false,
+    };
     let bufferedChars = 0;
     let totalChars = 0;
     let spill: ShellSpillStream | undefined;
@@ -616,7 +662,7 @@ export const runShellCommand = async (input: {
           input.onSpillError?.(error);
         });
         spillPath = spill.path;
-        for (const chunk of chunks) spill.stream.write(chunk);
+        for (const chunk of chunks) spill.stream.write(chunk.text);
       } catch (error) {
         spillFailed = true;
         spillPath = undefined;
@@ -648,7 +694,7 @@ export const runShellCommand = async (input: {
     }
     if (child.pid !== undefined) trackedShellPids.add(child.pid);
 
-    const append = (chunk: Buffer | string): void => {
+    const append = (chunk: Buffer | string, source: ShellOutputSource): void => {
       // 逐块先清理（pi bash-executor 同序）：计数、滚动缓冲、spill 落盘走同
       // 一清理后文本——控制字符密集的输出不会让滚动淘汰跑赢截断阈值，也避免
       // 懒开启回填（清理后）与后续写入（原始）在 spill 文件里混流。
@@ -659,10 +705,13 @@ export const runShellCommand = async (input: {
       totalChars += text.length;
       if (totalChars > MAX_OUTPUT_CHARS) openSpill();
       spill?.stream.write(text);
-      chunks.push(text);
+      const entry: ShellOutputChunk = { text, source };
+      chunks.push(entry);
       bufferedChars += text.length;
       while (bufferedChars > MAX_ROLLING_CHARS && chunks.length > 1) {
-        bufferedChars -= chunks.shift()!.length;
+        const evicted = chunks.shift()!;
+        bufferedChars -= evicted.text.length;
+        headEvicted[evicted.source] = true;
       }
     };
 
@@ -680,8 +729,8 @@ export const runShellCommand = async (input: {
           ? 128 + (osConstants.signals[child.signalCode] ?? 0)
           : 1);
       const body = spec.interactive
-        ? stripInteractiveStartupNoise(chunks.join(""))
-        : chunks.join("");
+        ? joinInteractiveOutput(chunks, headEvicted)
+        : chunks.map((chunk) => chunk.text).join("");
       const tail = truncateTail(body, MAX_OUTPUT_LINES, MAX_OUTPUT_CHARS);
       if (tail.truncated) openSpill();
       const settle = (path: string | undefined): void => {
@@ -730,10 +779,10 @@ export const runShellCommand = async (input: {
     // The timer must not keep the client alive once the TUI exits.
     timer.unref?.();
 
-    child.stdout?.on("data", append);
-    child.stderr?.on("data", append);
+    child.stdout?.on("data", (chunk: Buffer) => append(chunk, "stdout"));
+    child.stderr?.on("data", (chunk: Buffer) => append(chunk, "stderr"));
     void waitForChildProcess(child).then(finish, (error: Error) => {
-      append(`${error.message}\n`);
+      append(`${error.message}\n`, "stderr");
       finish(null);
     });
     if (input.signal?.aborted) onAbort();

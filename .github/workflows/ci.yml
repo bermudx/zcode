@@ -68,7 +68,16 @@ jobs:
       # here or a failing package is undebuggable.
       - name: Dump fork-test logs on failure
         if: failure()
-        run: find /tmp /dev/shm -name '_zcode_*.log' -path '*fork-tests*' -exec sh -c 'echo "===== $1"; tail -150 "$1"' _ {} \;
+        # Only the fork-tests run dirs — a bare `find /tmp /dev/shm` scans
+        # systemd-private dirs and logs permission-denied noise.
+        run: |
+          shopt -s nullglob
+          for dir in /tmp/piz-fork-tests-run-* /dev/shm/piz-fork-tests-run-*; do
+            for log in "$dir"/_zcode_*.log; do
+              echo "===== $log"
+              tail -150 "$log"
+            done
+          done
       # Runs only after every check above is green: an uploaded artifact is
       # proof the sha passed this workflow's tiers.
       - name: Assemble dist-runtime
