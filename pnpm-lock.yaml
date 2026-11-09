@@ -9,6 +9,7 @@ overrides:
   electron-to-chromium: 1.5.452
   react: 19.2.7
   react-dom: 19.2.7
+  zod@>=4 <5: 4.6.5
 
 patchedDependencies:
   '@ai-sdk/anthropic@3.0.81':
@@ -412,7 +413,7 @@ importers:
     dependencies:
       '@agentclientprotocol/sdk':
         specifier: 2.4.0
-        version: 2.4.0(zod@4.6.7)
+        version: 2.4.0(zod@4.6.5)
       '@zcode/adapters':
         specifier: workspace:*
         version: link:../adapters
@@ -654,7 +655,7 @@ importers:
         specifier: workspace:*
         version: link:../../../../packages/zcode-cua
       zod:
-        specifier: ^4.4.3
+        specifier: 4.6.5
         version: 4.6.5
     devDependencies:
       '@modelcontextprotocol/client':
@@ -1045,7 +1046,7 @@ importers:
         version: 2.0.0
       '@modelcontextprotocol/ext-apps':
         specifier: 2.0.0
-        version: 2.0.0(@modelcontextprotocol/client@2.0.0)(@modelcontextprotocol/core@2.0.0)(@modelcontextprotocol/server@2.0.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.6.7)
+        version: 2.0.0(@modelcontextprotocol/client@2.0.0)(@modelcontextprotocol/core@2.0.0)(@modelcontextprotocol/server@2.0.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.6.5)
       '@opentelemetry/api':
         specifier: 1.9.1
         version: 1.9.1
@@ -1595,7 +1596,7 @@ importers:
         version: link:../shared
       ai:
         specifier: ^6.0.138
-        version: 6.0.159(zod@4.6.7)
+        version: 6.0.159(zod@4.6.5)
       ansi-to-react:
         specifier: ^6.2.6
         version: 6.2.6(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -2093,7 +2094,7 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1.27.1
-        version: 1.29.0(zod@4.6.7)
+        version: 1.29.0(zod@4.6.5)
 
   packages/zcode-server-cli:
     dependencies:
@@ -2149,13 +2150,13 @@ packages:
   '@agentclientprotocol/sdk@0.21.1':
     resolution: {integrity: sha512-ZTLH+o9QxcZDLX/9ww+W7C2iExnXFM+vD/uGFVSlR61Kzj9FaxUqBC6Rv/kwgA7qVWYUEI9c5ZNqCuO9PM4rKg==}
     peerDependencies:
-      zod: ^3.25.0 || ^4.0.0
+      zod: 4.6.5
 
   '@agentclientprotocol/sdk@2.4.0':
     resolution: {integrity: sha512-7qJ8nnyj7WesC5ve185ioTpB2/svQoeGV4HA4nLEhgDUrcmBe54/08VcXc/oL4p14tDbxxECZzdYmUYQ+4l+Wg==}
     peerDependencies:
       '@modelcontextprotocol/server': ^2.4.0
-      zod: ^3.25.76 || ^4.0.0
+      zod: 4.6.5
     peerDependenciesMeta:
       '@modelcontextprotocol/server':
         optional: true
@@ -2164,49 +2165,49 @@ packages:
     resolution: {integrity: sha512-B1JDd9Ugq9R5AgIaW3674lhGCMMYJcPUxnrZh8fzbGojgg4QvHFRv6eZahGQAUsmGHbcf74G9bdSBDLWQGY2GA==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   '@ai-sdk/gateway@3.0.121':
     resolution: {integrity: sha512-uY248djJRxa5W68MHiyqO8WLdOeKQoRClGg7PVX/VPhVW8SJNM7/l5DcrA5WAM3YfQrLyNkgZa2VOu8T0t8LUw==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   '@ai-sdk/gateway@3.0.96':
     resolution: {integrity: sha512-BDiVEMUVHGpngReeigzLyJobG0TvzYbNGzdHI8JYBZHrjOX4aL6qwIls7z3p7V4TuXVWUCbG8TSWEe7ksX4Vhw==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   '@ai-sdk/openai-compatible@2.0.60':
     resolution: {integrity: sha512-803At7y2fQ/FT6vSedCFbcWlW9JsP2AZHUPZsAYUO9idiIePIgiqcLonhbIm/kMp6wRbVzPtmb8TeXOF/4bTdA==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   '@ai-sdk/openai@3.0.65':
     resolution: {integrity: sha512-ZlVoWH+zrdiYDiUt6n/xvfCsk33mzsB81TUQkBRVx79rxU1FKZqVH9J/QCtEpSLqx0cUzjvtIw9l9p7EbUv+dw==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   '@ai-sdk/provider-utils@4.0.23':
     resolution: {integrity: sha512-z8GlDaCmRSDlqkMF2f4/RFgWxdarvIbyuk+m6WXT1LYgsnGiXRJGTD2Z1+SDl3LqtFuRtGX1aghYvQLoHL/9pg==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   '@ai-sdk/provider-utils@4.0.27':
     resolution: {integrity: sha512-ubkAJ+xODouwtmN1tYlvTPphH1hPOBfZaEQe8U7skGvFAnIRs9PPpsq57bC2+Ky/MB4yzhd6YOsxTAx9sGpazw==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   '@ai-sdk/provider-utils@4.0.39':
     resolution: {integrity: sha512-XPR6o7561RYUkfYlLYouWsvm6Gv2tYIQy5pttGRkvML98u138ClPThn5yiQg5rMQutTtZLB+GUC8qFFCzDKQQQ==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   '@ai-sdk/provider@3.0.10':
     resolution: {integrity: sha512-Q3BZ27qfpYqnCYGvE3vt+Qi6LGOF9R5Nmzn+9JoM1lCRsD9mYaIhfJLkSunN48nfGXJ6n+XNV0J/XVpqGQl7Dw==}
@@ -3617,7 +3618,7 @@ packages:
       '@modelcontextprotocol/server': ^2.0.0
       react: 19.2.7
       react-dom: 19.2.7
-      zod: ^4.2.0
+      zod: 4.6.5
     peerDependenciesMeta:
       '@modelcontextprotocol/server':
         optional: true
@@ -3631,7 +3632,7 @@ packages:
     engines: {node: '>=18'}
     peerDependencies:
       '@cfworker/json-schema': ^4.1.1
-      zod: ^3.25 || ^4.0
+      zod: 4.6.5
     peerDependenciesMeta:
       '@cfworker/json-schema':
         optional: true
@@ -7083,13 +7084,13 @@ packages:
     resolution: {integrity: sha512-S18ozG7Dkm3Ud1tzOtAK5acczD4vygfml80RkpM9VWMFpvAFwAKSHaGYkATvPQHIE+VpD1tJY9zcTXLZ/zR5cw==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   ai@6.0.193:
     resolution: {integrity: sha512-VQOTOse8+X8kMtg61DNSXlYJzwOW4NjMLDJNk/qxClWsFe4oiyFJDHGGG1oezfGcFzuYuQe/8Z7r4kwiZWh2YQ==}
     engines: {node: '>=18'}
     peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
+      zod: 4.6.5
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
@@ -13508,13 +13509,13 @@ packages:
   zod-to-json-schema@3.25.2:
     resolution: {integrity: sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA==}
     peerDependencies:
-      zod: ^3.25.28 || ^4
+      zod: 4.6.5
 
   zod-validation-error@4.0.2:
     resolution: {integrity: sha512-Q6/nZLe6jxuU80qb/4uJ4t5v2VEZ44lzQjPDhYJNztRQ4wyWc6VF3D3Kb/fAuPetZQnhS3hnajCf9CsWesghLQ==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      zod: ^3.25.0 || ^4.0.0
+      zod: 4.6.5
 
   zod@3.23.8:
     resolution: {integrity: sha512-XBx9AXhXktjUqnepgTiE5flcKIYWi/rme0Eaj+5Y0lftuGBq+jyRu/md4WnuxqgP1ubdpNCsYEYPxrzVHD8d6g==}
@@ -13524,9 +13525,6 @@ packages:
 
   zod@4.6.5:
     resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
-
-  zod@4.6.7:
-    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
   zrender@6.1.0:
     resolution: {integrity: sha512-oEGMDB6pOP2S6OwRR4PdVv610zrjnA3Bh+JnSG12fYJlBKjtNAoEb5fSUoCOOINlH96I2fU38/A2UpRKs67xYQ==}
@@ -13573,9 +13571,9 @@ snapshots:
     dependencies:
       zod: 4.6.5
 
-  '@agentclientprotocol/sdk@2.4.0(zod@4.6.7)':
+  '@agentclientprotocol/sdk@2.4.0(zod@4.6.5)':
     dependencies:
-      zod: 4.6.7
+      zod: 4.6.5
 
   '@ai-sdk/anthropic@3.0.81(patch_hash=d3a7c381eba7f5157f765a0528003af17cf84544911dfb7412c7800168e01c18)(zod@4.6.5)':
     dependencies:
@@ -13597,13 +13595,6 @@ snapshots:
       '@vercel/oidc': 3.1.0
       zod: 4.6.5
 
-  '@ai-sdk/gateway@3.0.96(zod@4.6.7)':
-    dependencies:
-      '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.23(zod@4.6.7)
-      '@vercel/oidc': 3.1.0
-      zod: 4.6.7
-
   '@ai-sdk/openai-compatible@2.0.60(patch_hash=9632fe9d821b3dc20939ae509cc35b968d90d018bbd1d812390718898182a38b)(zod@4.6.5)':
     dependencies:
       '@ai-sdk/provider': 3.0.14
@@ -13622,13 +13613,6 @@ snapshots:
       '@standard-schema/spec': 1.1.0
       eventsource-parser: 3.1.0
       zod: 4.6.5
-
-  '@ai-sdk/provider-utils@4.0.23(zod@4.6.7)':
-    dependencies:
-      '@ai-sdk/provider': 3.0.8
-      '@standard-schema/spec': 1.1.0
-      eventsource-parser: 3.1.0
-      zod: 4.6.7
 
   '@ai-sdk/provider-utils@4.0.27(zod@4.6.5)':
     dependencies:
@@ -15449,17 +15433,6 @@ snapshots:
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
 
-  '@modelcontextprotocol/ext-apps@2.0.0(@modelcontextprotocol/client@2.0.0)(@modelcontextprotocol/core@2.0.0)(@modelcontextprotocol/server@2.0.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.6.7)':
-    dependencies:
-      '@modelcontextprotocol/client': 2.0.0
-      '@modelcontextprotocol/core': 2.0.0
-      '@standard-schema/spec': 1.1.0
-      zod: 4.6.7
-    optionalDependencies:
-      '@modelcontextprotocol/server': 2.0.0
-      react: 19.2.7
-      react-dom: 19.2.7(react@19.2.7)
-
   '@modelcontextprotocol/sdk@1.29.0(zod@3.25.76)':
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.12)
@@ -15501,28 +15474,6 @@ snapshots:
       raw-body: 3.0.2
       zod: 4.6.5
       zod-to-json-schema: 3.25.2(zod@4.6.5)
-    transitivePeerDependencies:
-      - supports-color
-
-  '@modelcontextprotocol/sdk@1.29.0(zod@4.6.7)':
-    dependencies:
-      '@hono/node-server': 1.19.14(hono@4.12.12)
-      ajv: 8.18.0
-      ajv-formats: 3.0.1(ajv@8.18.0)
-      content-type: 1.0.5
-      cors: 2.8.6
-      cross-spawn: 7.0.6
-      eventsource: 3.0.7
-      eventsource-parser: 3.1.0
-      express: 5.2.1
-      express-rate-limit: 8.3.2(express@5.2.1)
-      hono: 4.12.12
-      jose: 6.2.2
-      json-schema-typed: 8.0.2
-      pkce-challenge: 5.0.1
-      raw-body: 3.0.2
-      zod: 4.6.7
-      zod-to-json-schema: 3.25.2(zod@4.6.7)
     transitivePeerDependencies:
       - supports-color
 
@@ -18685,14 +18636,6 @@ snapshots:
       '@ai-sdk/provider-utils': 4.0.23(zod@4.6.5)
       '@opentelemetry/api': 1.9.0
       zod: 4.6.5
-
-  ai@6.0.159(zod@4.6.7):
-    dependencies:
-      '@ai-sdk/gateway': 3.0.96(zod@4.6.7)
-      '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.23(zod@4.6.7)
-      '@opentelemetry/api': 1.9.0
-      zod: 4.6.7
 
   ai@6.0.193(zod@4.6.5):
     dependencies:
@@ -26719,10 +26662,6 @@ snapshots:
     dependencies:
       zod: 4.6.5
 
-  zod-to-json-schema@3.25.2(zod@4.6.7):
-    dependencies:
-      zod: 4.6.7
-
   zod-validation-error@4.0.2(zod@4.6.5):
     dependencies:
       zod: 4.6.5
@@ -26732,8 +26671,6 @@ snapshots:
   zod@3.25.76: {}
 
   zod@4.6.5: {}
-
-  zod@4.6.7: {}
 
   zrender@6.1.0:
     dependencies:
