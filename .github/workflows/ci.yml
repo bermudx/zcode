@@ -56,8 +56,9 @@ jobs:
       - name: Architecture check (changed)
         run: mise exec -- pnpm architecture:check --changed
       # --max-workers 2: test results are load-sensitive (docs/fork/verification.md).
+      # --base origin/main: actions/checkout creates no local `main` branch.
       - name: Fork tests (selected)
-        run: mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --max-workers 2
+        run: mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --base origin/main --max-workers 2
       - name: Fork tests (full)
         if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         run: mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full --max-workers 2
