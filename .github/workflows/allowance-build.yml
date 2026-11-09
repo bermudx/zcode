@@ -33,7 +33,7 @@ jobs:
       - name: Install workspace
         run: mise exec -- pnpm install --frozen-lockfile
       - name: Build CLI workspace (turbo)
-        run: mise exec -- pnpm --dir apps/zcode-cli build
+        run: cd apps/zcode-cli && mise exec -- ../../node_modules/.bin/turbo run build
       - name: Smoke check
         run: |
           node apps/zcode-cli/packages/cli/dist/zcode.cjs --version

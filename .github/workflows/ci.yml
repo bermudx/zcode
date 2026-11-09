@@ -33,8 +33,11 @@ jobs:
       # them before the CLI build (same surface as scripts/fork-typecheck.mjs).
       - name: Build root shared surface
         run: mise exec -- node_modules/.bin/tsc -b packages/shared/tsconfig.testing.json packages/rpc packages/provider packages/provider-node packages/shared packages/model-option-map
+      # pnpm --dir apps/zcode-cli build fails: turbo's bin only exists in root
+      # node_modules/.bin (docs/fork/verification.md PATH gap). Root binary,
+      # cli cwd — same shape fork-typecheck.mjs uses.
       - name: Build CLI workspace (turbo)
-        run: mise exec -- pnpm --dir apps/zcode-cli build
+        run: cd apps/zcode-cli && mise exec -- ../../node_modules/.bin/turbo run build
       - name: Build model-option-map
         run: mise exec -- pnpm --filter @zcode/model-option-map build
       - name: Typecheck (piz gate)
