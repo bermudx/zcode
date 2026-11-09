@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+  COREPACK_ENABLE_PROJECT_SPEC: "0"
+
+jobs:
+  check:
+    name: check + build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # merge-base needed by --changed checks and fork-tests selection
+      - uses: jdx/mise-action@v2 # toolchain pins live in root mise.toml
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ hashFiles('pnpm-lock.yaml', 'apps/zcode-cli/pnpm-lock.yaml') }}
+          restore-keys: pnpm-
+      - name: Install root workspace
+        run: mise exec -- pnpm install --frozen-lockfile
+      # CLI packages import root shared packages' built declarations; emit
+      # them before the CLI build (same surface as scripts/fork-typecheck.mjs).
+      - name: Build root shared surface
+        run: mise exec -- node_modules/.bin/tsc -b packages/shared/tsconfig.testing.json packages/rpc packages/provider packages/provider-node packages/shared packages/model-option-map
+      - name: Install CLI workspace
+        run: mise exec -- pnpm --dir apps/zcode-cli install --frozen-lockfile
+      - name: Build CLI workspace (turbo)
+        run: mise exec -- pnpm --dir apps/zcode-cli build
+      - name: Build model-option-map
+        run: mise exec -- pnpm --filter @zcode/model-option-map build
+      - name: Typecheck (piz gate)
+        run: mise exec -- pnpm typecheck:piz
+      - name: Lint (root)
+        run: mise exec -- pnpm lint
+      # run-cli-lint.mjs spawns `node "$npm_execpath" exec oxlint`; under mise
+      # npm_execpath is the ELF shim, so point it at the real JS entry
+      # (docs/fork/verification.md).
+      - name: Lint (CLI workspace)
+        run: |
+          PNPM_CJS="$(find "$HOME/.local/share/mise" "$HOME/.local/share/pnpm" -name pnpm.cjs 2>/dev/null | head -1)"
+          [ -n "$PNPM_CJS" ] || { echo "pnpm.cjs not found under mise/pnpm install dirs" >&2; exit 1; }
+          npm_execpath="$PNPM_CJS" mise exec -- node scripts/run-cli-lint.mjs
+      - name: Architecture check (changed)
+        run: mise exec -- pnpm architecture:check --changed
+      # --max-workers 2: test results are load-sensitive (docs/fork/verification.md).
+      - name: Fork tests (selected)
+        run: mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --max-workers 2
+      - name: Fork tests (full)
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        run: mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full --max-workers 2
+      # Runs only after every check above is green: an uploaded artifact is
+      # proof the sha passed this workflow's tiers.
+      - name: Assemble dist-runtime
+        run: sh apps/zcode-cli/scripts/assemble-dist-runtime.sh "$PWD" "$PWD/apps/zcode-cli/packages/cli/dist-runtime"
+      - name: Upload dist-runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-runtime-${{ github.sha }}
+          path: apps/zcode-cli/packages/cli/dist-runtime
+          retention-days: 14
