@@ -22,6 +22,7 @@ import {
   type ZCodeSessionEventFormat,
   type ModelSelection,
   type ZCodeModelContextBudgetStrategy,
+  type ZCodeProtocolMcpServer,
   type ZCodeProtocolMessage,
   type ZCodeProtocolMethod,
   type ZCodeProtocolNotification,
@@ -157,6 +158,13 @@ export interface ZCodeProtocolSessionRecord {
   restoreWarning?: { message: string; type: string };
   /** 冷恢复候选只供初始投影；新的选模事件立即清除，不能替代 Runtime 执行绑定。 */
   restoredModelSelection?: ModelSelection;
+  /**
+   * 客户端注入的 MCP 声明（session/create|resume 的 mcpServers）的最近一份已接受副本。
+   * 仅 in-memory 来源事实：resume 用它区分「省略=保留」与「[]=清空」，fork 用它继承；
+   * 绝不写进持久化 session info、snapshot、事件或诊断（含凭据，不落盘）。
+   * undefined 表示本会话从未接受过 client MCP 声明（非 client-MCP provenance）。
+   */
+  clientMcpServers?: ZCodeProtocolMcpServer[];
 }
 
 export interface ZCodeProtocolClientRequestOptions {

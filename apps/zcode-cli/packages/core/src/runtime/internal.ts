@@ -21,6 +21,7 @@ import type {
   ImageProcessorPort,
   PdfDocumentPort,
   McpConnectionSnapshot,
+  McpServerConfig,
   SkillLoadOutcome,
   SkillPort,
   McpPort,
@@ -62,6 +63,18 @@ import type { ProjectMemoryExtractionScheduler } from "./helpers/project-memory-
 import type { ProjectMemoryUpdate } from "./helpers/project-memory-dream.js";
 import type { RuntimeTelemetryFacade } from "../telemetry/runtime-telemetry.js";
 import type { WorkspaceHookRuntimeAdmissionPort } from "../hooks/workspace-hook-runtime-admission.js";
+
+/**
+ * 一个在飞 client MCP connect 操作（startup 或 boundary apply 的单次 connect
+ * await）。servers 是开连时的不可变声明快照，controller 持有本次 connect 的
+ * signal，epoch 是登记时的 attachment 代次——只作登记时点诊断，判定仍以
+ * 当前 mcpAttachEpoch 为准。
+ */
+export interface McpConnectOperation {
+  readonly servers: Readonly<Record<string, McpServerConfig>>;
+  readonly controller: AbortController;
+  readonly epoch: number;
+}
 
 export interface AgentRuntimeInternal
   extends AgentRuntimeCoreMethods, AgentRuntimeTurnMethods, AgentRuntimeHookMethods {
@@ -120,6 +133,46 @@ export interface AgentRuntimeInternal
   skillPort?: SkillPort;
   mcpPort?: McpPort;
   mcpStartupPromise?: Promise<McpConnectionSnapshot>;
+  /**
+   * 迟到注入补建 session MCP port 的同步工厂（issue #31 client MCP）。
+   * 由 bootstrap 的 app 装配注入；空会话首个显式 server 到来前不得调用它。
+   */
+  createMcpPort?: () => McpPort | undefined;
+  /**
+   * client 注入 MCP 的期望/已生效配置（`Record<serverName, config>`）。undefined =
+   * 从未收到 client 声明，继续用 config.mcp.servers；显式 {} = client 清空，
+   * 不回退文件/plugin 配置。版本号只在 desired 变化时递增，apply 按版本判断是否欠账。
+   */
+  mcpDesiredServers?: Record<string, McpServerConfig>;
+  mcpDesiredVersion: number;
+  mcpAppliedVersion: number;
+  /** 当前连接集合对应的配置快照；undefined = 仍是启动时 config.mcp.servers。 */
+  mcpAppliedServers?: Record<string, McpServerConfig>;
+  /**
+   * client 侧 attach/detach 闸门。false 时同步拒绝新的 client stdio 准入，
+   * 迟到连接结果不得复活子进程；adoption 置回 true 并把 mcpReconnectNeeded 立起。
+   */
+  mcpClientAttached: boolean;
+  /**
+   * attach/detach 代次。performMcpApply 在 connect 前取样、await 后比对：
+   * 代次变了（detach/adopt/close）本轮结果作废——只有当前 attached owner
+   * 允许提交 apply 与清 reconnect 旗标（评审 R2）。
+   */
+  mcpAttachEpoch: number;
+  /**
+   * 全部在飞 client MCP connect 操作的登记表（startup 与 boundary apply 各一条/
+   * 次）。每次 connect await 前登记、finally 只删自己那条——单标量会被
+   * constructor startup 与并发 apply 互相覆盖，导致 detach 并集漏掉在飞条目、
+   * 子进程泄漏（评审 F1）。detach 先取全表 server 名并集再 abort 各自 controller；
+   * beginShutdown abort 全部在飞记录。
+   */
+  mcpInFlightConnects: Set<McpConnectOperation>;
+  /** detach 断开过连接，attach 后回合边界需要补连。 */
+  mcpReconnectNeeded: boolean;
+  /** 串行化所有 configure/attach/detach 的应用尾部；防迟到完成覆盖新配置。 */
+  mcpApplyTail: Promise<void>;
+  /** runtime 关闭后置位；之后的 configure/apply 一律拒绝落地。 */
+  mcpClosed: boolean;
   residencyBlockingWorkCount: number;
   residencyBlockingWork: Set<Promise<unknown>>;
   mcpInitialized: boolean;

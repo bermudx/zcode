@@ -23,7 +23,6 @@ import {
   type JsonSchema,
   type PdfDocumentPort,
   type Logger,
-  type McpPort,
   type ModelRequestAdmission,
   type SessionId,
   type SessionStorePort,
@@ -51,7 +50,6 @@ export interface ScriptWorkflowAgentRuntimeDeps {
   imageProcessorPort: ImageProcessorPort;
   pdfDocumentPort?: PdfDocumentPort;
   logger: Logger;
-  mcpPort?: McpPort;
   /** 父会话的 model factory：child 与主 turn 从同一份 Registry 视图造 Model，不各自冻结。 */
   modelFactory: NonNullable<AgentRuntimeDeps["modelFactory"]>;
   permissionService: PermissionService;
@@ -136,6 +134,9 @@ export function createScriptWorkflowAgentRuntime(input: {
     {
       ...inheritedConfig,
       ...(systemPrompt === undefined ? {} : { systemPrompt }),
+      // 借用父 port：生效 mcp 只认父 runtime 已落地的配置（评审 S4）；servers 置空
+      // 让 child 启动只做 discovery，不能 connect/close 父会话的连接生命周期。
+      mcp: borrowedMcpConfig(input.deps.runtime),
       agentName: input.request.opts?.agentType ?? "zcode-workflow",
       maxTurns: input.request.opts?.maxTurns ?? input.deps.runtimeConfig.maxTurns,
       // 基线 YOLO，父任务仍保留自己的 Guarded。legacy script workflow child 就停在这里；dwf actor
@@ -263,7 +264,9 @@ function createRuntimeDeps(
     imageProcessorPort: deps.imageProcessorPort,
     pdfDocumentPort: deps.pdfDocumentPort,
     logger: deps.logger,
-    mcpPort: deps.mcpPort,
+    // child 借用父 port 的现有连接：port 在构造时从父 runtime 现读（评审 S4）——
+    // 空会话迟到注入/清空再注入之后，子会话必须拿到当前 port 而不是装配期快照。
+    mcpPort: deps.runtime.getMcpPort(),
     modelFactory: deps.modelFactory,
     resolveEffectiveModelSelection: deps.appOptions.resolveEffectiveModelSelection,
     // permissionBroker + providerRuntimeHeadersPort 都在这里面：父 runtime 派生，路由身份已改写成父会话。
@@ -296,4 +299,15 @@ export function createWorkflowChildSkillPort(
       disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),
     })
   );
+}
+
+/**
+ * 子会话借用父 port 时的生效 MCP 配置（评审 S4）：APPLIED config.mcp 克隆 +
+ * servers 置空——子会话 discovery 只读父现有 tools/status，不接管连接生命周期。
+ */
+export function borrowedMcpConfig(runtime: {
+  getEffectiveMcpConfig(): AgentRuntimeConfig["mcp"];
+}): AgentRuntimeConfig["mcp"] {
+  const effective = runtime.getEffectiveMcpConfig();
+  return effective === undefined ? undefined : { ...effective, servers: {} };
 }

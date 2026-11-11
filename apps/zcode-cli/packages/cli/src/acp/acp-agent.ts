@@ -43,6 +43,7 @@ import {
   type AcpPermissionResult,
 } from "./acp-project.js";
 import type { AcpCorePort, AcpSession } from "./acp-sessions.js";
+import { AcpMcpMapError, mapAcpMcpServers } from "./acp-mcp.js";
 import {
   localSlashCommandsUpdate,
   newGoalInputId,
@@ -245,7 +246,9 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
       agentCapabilities: {
         // 不实现 session/load：ACP 的 resume 不重放历史，与 attach 语义一致。
         loadSession: false,
-        mcpCapabilities: { http: false, sse: false },
+        // client 注入 MCP（issue #31 CMCP01）：stdio/http/sse 三种声明都接，
+        // stdio 无独立能力位——ACP 里它始终可用。
+        mcpCapabilities: { http: true, sse: true },
         promptCapabilities: { audio: false, embeddedContext: true, image: false },
         sessionCapabilities: { close: {}, resume: {} },
       },
@@ -256,23 +259,37 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   });
 
   app.onRequest(methods.agent.session.new, async ({ client, params }) => {
-    if (params.mcpServers.length > 0) {
-      // core 的 MCP 由自己的 workspace 配置装配；T3 注入的 MCP 不转发。
-      log?.warn?.("acp ignored client MCP servers", {
-        count: params.mcpServers.length,
-        cwd: params.cwd,
-      });
+    // client 注入 MCP（issue #31 CMCP01/12）：边界转换 + 脱敏报错，
+    // env/header/URL/command 值不进错误消息与日志。
+    let mcpServers;
+    try {
+      mcpServers = mapAcpMcpServers(params.mcpServers, params.cwd);
+    } catch (error) {
+      if (error instanceof AcpMcpMapError) {
+        throw new RequestError(INVALID_PARAMS, error.message);
+      }
+      throw error;
     }
-    const session = await options.sessions.open(params.cwd);
+    const session = await options.sessions.open(params.cwd, mcpServers);
     bindSession(client, session);
     advertiseLocalCommands(client, session);
     return sharedOptions(session);
   });
 
   app.onRequest(methods.agent.session.resume, async ({ client, params }) => {
+    let mcpServers;
+    try {
+      mcpServers = mapAcpMcpServers(params.mcpServers, params.cwd);
+    } catch (error) {
+      if (error instanceof AcpMcpMapError) {
+        throw new RequestError(INVALID_PARAMS, error.message);
+      }
+      throw error;
+    }
     const session = await options.sessions.resume({
       cwd: params.cwd,
       sessionId: params.sessionId,
+      ...(mcpServers !== undefined ? { mcpServers } : {}),
     });
     bindSession(client, session);
     advertiseLocalCommands(client, session);

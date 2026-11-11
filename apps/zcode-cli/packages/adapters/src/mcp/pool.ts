@@ -339,7 +339,15 @@ export function createMcpConnectionPool(options: McpConnectionPoolOptions): McpC
               refCount: previous.refs.size,
               ...(sessionId ? { sessionId } : {}),
             });
-            if (previous.refs.size === 0) scheduleClose(previous);
+            // session 隔离连接没有跨 lease 共享者：配置被替换时旧连接（stdio 子进程）
+            // 必须就地关死再返回，不能走 idle grace 让旧凭据/旧进程继续活 30s。
+            if (previous.refs.size === 0) {
+              if (previous.connectionContext.mcpIsolation === "session") {
+                await closeEntry(previous);
+              } else {
+                scheduleClose(previous);
+              }
+            }
           }
         }
       }
@@ -544,8 +552,10 @@ export function createMcpConnectionPool(options: McpConnectionPoolOptions): McpC
           configuredServers.set(serverName, config);
         }
         const configuredNames = new Set(Object.keys(servers));
-        for (const serverName of [...leased.keys()]) {
-          if (!configuredNames.has(serverName)) release(serverName);
+        for (const serverName of Array.from(leased.keys())) {
+          // 被移除的 session 隔离连接要 await 真实关闭（含 stdio 子进程退出）；
+          // workspace 隔离连接仍由共享 idle grace 管理。
+          if (!configuredNames.has(serverName)) await release(serverName, true);
         }
         await Promise.all(
           Object.entries(servers).map(([serverName, config]) =>
@@ -566,7 +576,9 @@ export function createMcpConnectionPool(options: McpConnectionPoolOptions): McpC
         const key = leased.get(serverName);
         const entry = key ? entries.get(key) : undefined;
         const status = entry ? (await entry.adapter.status())[serverName] : undefined;
-        release(serverName);
+        // disconnect 必须等到 session 隔离连接真正关闭：detach/close 语义要求
+        // stdio 子进程在返回前退出，而不是仅摘掉 lease 引用后等 idle grace。
+        await release(serverName, true);
         return status
           ? {
               ...status,

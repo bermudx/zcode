@@ -7,6 +7,7 @@ import {
   resolveWorkspaceKey,
   zcodeProtocolMethods,
   zcodeSessionStateSnapshotSchema,
+  type ZCodeProtocolMcpServer,
   type ZCodeSessionStateSnapshot,
 } from "@zcode/shared";
 import { ensureServer } from "../app-server-spawn.js";
@@ -32,8 +33,13 @@ export interface AcpCorePort {
   closeAll(): Promise<void>;
   closeSession(sessionId: string): Promise<void>;
   get(sessionId: string): AcpSession | undefined;
-  open(cwd: string): Promise<AcpSession>;
-  resume(input: { cwd: string; sessionId: string }): Promise<AcpSession>;
+  /** client 注入 MCP（issue #31）：undefined=未声明；[]=显式清空。 */
+  open(cwd: string, mcpServers?: ZCodeProtocolMcpServer[]): Promise<AcpSession>;
+  resume(input: {
+    cwd: string;
+    sessionId: string;
+    mcpServers?: ZCodeProtocolMcpServer[];
+  }): Promise<AcpSession>;
 }
 
 export interface AcpCoreSessionsOptions {
@@ -69,29 +75,46 @@ export class AcpCoreSessions implements AcpCorePort {
     return this.sessions.get(sessionId);
   }
 
-  async open(cwd: string): Promise<AcpSession> {
+  async open(cwd: string, mcpServers?: ZCodeProtocolMcpServer[]): Promise<AcpSession> {
     const lane = await this.laneFor(cwd);
     const created = await lane.runtime.currentClient().request(zcodeProtocolMethods.sessionCreate, {
       // 与 attach 启动同规：首发前的空会话是 deferred 草稿，不污染 session/list。
       persistence: "deferred",
       workspace: lane.ref,
+      ...(mcpServers !== undefined ? { mcpServers } : {}),
     });
     return await this.bindSession(lane, asSnapshot(created));
   }
 
-  async resume(input: { cwd: string; sessionId: string }): Promise<AcpSession> {
+  async resume(input: {
+    cwd: string;
+    sessionId: string;
+    mcpServers?: ZCodeProtocolMcpServer[];
+  }): Promise<AcpSession> {
     const existing = this.sessions.get(input.sessionId);
     if (existing) {
       if (existing.cwd !== input.cwd) {
         throw new Error(`ACP session ${input.sessionId} is bound to a different cwd`);
       }
       // 原句柄持有在途回合的 waiter；重复 resume 不能换掉事件接收者。
+      // 但 client 显式下发的 MCP 声明仍要转给 warm record（CMCP04-07）：
+      // 同一 AttachSessionHandle 保留，仅协议层更新配置。省略时不发请求，
+      // core 侧保留内存声明。
+      if (input.mcpServers !== undefined) {
+        const lane = await this.laneFor(input.cwd);
+        await lane.runtime.currentClient().request(zcodeProtocolMethods.sessionResume, {
+          sessionId: input.sessionId,
+          workspace: lane.ref,
+          mcpServers: input.mcpServers,
+        });
+      }
       return existing;
     }
     const lane = await this.laneFor(input.cwd);
     const resumed = await lane.runtime.currentClient().request(zcodeProtocolMethods.sessionResume, {
       sessionId: input.sessionId,
       workspace: lane.ref,
+      ...(input.mcpServers !== undefined ? { mcpServers: input.mcpServers } : {}),
     });
     return await this.bindSession(lane, asSnapshot(resumed));
   }

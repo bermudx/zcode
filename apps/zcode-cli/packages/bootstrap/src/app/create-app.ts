@@ -20,7 +20,11 @@ import { createPopplerPdfDocumentAdapter } from "@zcode/adapters/pdf";
 import { createNodeSessionMailboxAdapter } from "@zcode/adapters/mailbox";
 import { createNodeContextSourceAdapter } from "@zcode/adapters/context";
 import { createNodeSkillAdapter } from "@zcode/adapters/skills";
-import { createMcpAdapter } from "@zcode/adapters/mcp";
+import {
+  createMcpAdapter,
+  createMcpConnectionPool,
+  type McpConnectionPool,
+} from "@zcode/adapters/mcp";
 import {
   AgentRuntime,
   normalizeAgentProfiles,
@@ -40,6 +44,7 @@ import {
   createSessionEvent,
   SessionEventType,
   type ExecutionShellSelection,
+  type McpPort,
   type MessageId,
 } from "@zcode/contracts";
 import { isRemoteWorkspaceIdentity, resolveZCodeRuntimeEnv } from "@zcode/shared";
@@ -417,11 +422,63 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       startupTimer,
       storageRoot,
     });
-    const rawMcpPort =
-      options.mcpPort ??
-      (runtimeConfig.mcp?.enabled === false
-        ? undefined
-        : (options.mcpPortFactory?.({ workingDirectory }) ??
+    // Session 级 MCP port 装配（issue #31）：noPlugins（attach 共享 core）下进程级
+    // pool / settings lease / broker 一律不建；首个显式注入的 client server 才在本
+    // session 内建自有 zero-grace pool + lease（detach/close 必须立即收 stdio 子进程，
+    // 不能走共享池的 workspace idle grace）。普通模式维持 mcpPortFactory / 独立
+    // adapter 的旧路径。空会话不创建任何 MCP 资源——getOrCreateSessionMcpPort 只在
+    // 有非空配置需要 port 时被调用（enabled 会话的 eager 创建，或 runtime 的迟到注入）。
+    let ownedSessionMcpPool: McpConnectionPool | undefined;
+    let sessionMcpPort: McpPort | undefined;
+    const guardSessionMcpPort = (raw: McpPort): McpPort =>
+      createWorkspaceMcpTrust({
+        workingDirectory,
+        workspaceIdentity: options.runtimeConfig?.memory?.workspaceIdentity,
+        userConfigPath: options.userConfigPath,
+        projectConfigPath: options.projectConfigPath,
+        skipUserConfig: options.skipUserConfig,
+        env: options.env,
+        onAdmissionChanged: async (payload) => {
+          if (!runtime) return;
+          await runtime.appendEvent(
+            createSessionEvent(
+              SessionEventType.WorkspaceMcpAdmissionUpdated,
+              sessionId,
+              payload,
+              { traceId: traceContext.traceId },
+            ),
+            traceContext,
+          );
+        },
+      }).guard(raw);
+    const getOrCreateSessionMcpPort = (): McpPort | undefined => {
+      if (sessionMcpPort) return sessionMcpPort;
+      let raw: McpPort | undefined;
+      if (options.mcpPort) {
+        raw = options.mcpPort;
+      } else if (options.noPlugins === true) {
+        ownedSessionMcpPool ??= createMcpConnectionPool({
+          // 会话自有池零 grace：detach/配置替换/close 的 stdio 子进程必须立即退出。
+          idleGraceMs: 0,
+          logger,
+          createAdapter: ({ workingDirectory: adapterWorkingDirectory }) =>
+            createMcpAdapter({
+              clientVersion: appVersion,
+              env: options.env,
+              logger,
+              network: {
+                httpProxy: configResult.config.network.httpProxy,
+                noProxy: configResult.config.network.noProxy,
+                caCertFile: configResult.config.network.caCertFile,
+              },
+              nodeFallback: resolveMcpNodeFallbackProvider({ cliStorageRoot, logger }),
+              workingDirectory: adapterWorkingDirectory ?? workingDirectory,
+            }),
+        });
+        raw = ownedSessionMcpPool.acquireLease({ leaseId: sessionId, sessionId });
+      } else {
+        raw =
+          options.mcpPortFactory?.({ workingDirectory }) ??
           createMcpAdapter({
             clientVersion: appVersion,
             env: options.env,
@@ -433,30 +490,51 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
             },
             nodeFallback: resolveMcpNodeFallbackProvider({ cliStorageRoot, logger }),
             workingDirectory,
-          })));
-    const mcpPort = rawMcpPort
-      ? createWorkspaceMcpTrust({
-          workingDirectory,
-          workspaceIdentity: options.runtimeConfig?.memory?.workspaceIdentity,
-          userConfigPath: options.userConfigPath,
-          projectConfigPath: options.projectConfigPath,
-          skipUserConfig: options.skipUserConfig,
-          env: options.env,
-          onAdmissionChanged: async (payload) => {
-            if (!runtime) return;
-            await runtime.appendEvent(
-              createSessionEvent(
-                SessionEventType.WorkspaceMcpAdmissionUpdated,
-                sessionId,
-                payload,
-                { traceId: traceContext.traceId },
-              ),
-              traceContext,
-            );
-          },
-        }).guard(rawMcpPort)
-      : undefined;
-    const ownsMcpPort = options.mcpPort === undefined && mcpPort !== undefined;
+          });
+      }
+      if (!raw) return undefined;
+      const guarded = guardSessionMcpPort(raw);
+      if (options.mcpPort !== undefined) {
+        // 注入 port 只加 trust guard；关闭语义归注入方，App 不包资源释放。
+        sessionMcpPort = guarded;
+        return sessionMcpPort;
+      }
+      // App 自有 port（noPlugins session pool lease / 进程池 lease / 独立 adapter）：
+      // close 先让 guard/lease 释放连接，再销毁 session 自有 pool。
+      // 幂等/代际语义（评审 S3/F2）：`.close` 属性读永远返回同一个函数、共享一份
+      // closePromise；两张 memo 在首个 await 之前同步摘除（引用相等才摘，不误伤
+      // 新代）；finally 只清本代捕获的 guarded/pool，迟到收尾不碰新资源。
+      const ownedPool = ownedSessionMcpPool;
+      let closePromise: Promise<void> | undefined;
+      const closeOwnedPort = (): Promise<void> => {
+        closePromise ??= (async () => {
+          if (sessionMcpPort === ownedPort) sessionMcpPort = undefined;
+          if (ownedPool && ownedSessionMcpPool === ownedPool) {
+            ownedSessionMcpPool = undefined;
+          }
+          try {
+            await guarded.close();
+          } finally {
+            await ownedPool?.close();
+          }
+        })();
+        return closePromise;
+      };
+      const ownedPort = new Proxy(guarded, {
+        get(target, key) {
+          if (key === "close") return closeOwnedPort;
+          const value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      sessionMcpPort = ownedPort;
+      return sessionMcpPort;
+    };
+    const mcpPort =
+      runtimeConfig.mcp?.enabled === false ? undefined : getOrCreateSessionMcpPort();
+    // 注入 port 之外的装配（含迟到工厂产物）都归 App 关闭；mcp.enabled=false 的
+    // 空会话此刻没有 port，closeMcp 经 runtime.getMcpPort() 取到的是 undefined 即 no-op。
+    const ownsMcpPort = options.mcpPort === undefined;
     const baseExecutionPort =
       options.executionPort ??
       createNodeExecutionAdapter({
@@ -594,7 +672,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
         await runtime.activatePausedTargetAfterResume(resumeTraceContext);
         // SessionResumed 已清理旧投影；即使声明未变也要重新发布当前准入。
         try {
-          await mcpPort?.refreshWorkspaceTrustAdmission?.(true);
+          await runtime?.getMcpPort()?.refreshWorkspaceTrustAdmission?.(true);
         } catch (error) {
           logger.warn("MCP trust admission publication failed after resume", {
             event: "mcp.trust.admission.failed",
@@ -676,7 +754,6 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       imageProcessorPort,
       pdfDocumentPort,
       logger,
-      mcpPort,
       modelFactory,
       permissionService,
       pluginSkillRoots: pluginOutcome.skillRoots,
@@ -754,7 +831,6 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
                   httpClientPort,
                   imageProcessorPort,
                   logger,
-                  mcpPort,
                   // 父会话的 model factory：actor 与主 turn 从同一份 Registry 视图造 Model，
                   // 不各自冻结一份。
                   modelFactory,
@@ -932,6 +1008,10 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
             }))
           : undefined,
       mcpPort,
+      // 迟到注入（空会话启动后才收到 client MCP 声明）经这个同步工厂补建
+      // session port；已建的 port 由 memo 返回同一对象。注入方拥有的 mcpPort
+      // 不配工厂——runtime 显式清空时只断连接，不能替注入方关借来的资源（评审 R7）。
+      createMcpPort: options.mcpPort === undefined ? getOrCreateSessionMcpPort : undefined,
       eventSink: options.eventSink,
       onOffPeakLifecycleEvent: options.onOffPeakLifecycleEvent
         ? (event) => options.onOffPeakLifecycleEvent!({ ...event, sessionId })
@@ -1023,7 +1103,6 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       imageProcessorPort,
       pdfDocumentPort,
       logger,
-      mcpPort,
       modelFactory,
       permissionService,
       prepareUserExecutionBoundary,
@@ -1086,7 +1165,6 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       localSettingStore,
       logger,
       loggerFactory,
-      mcpPort,
       ownsExecutionPort,
       ownsMcpPort,
       closeNodeReplBrowserBroker: async () => {
@@ -1226,7 +1304,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       reloadWorkspaceHookTrust: () =>
         workspaceHookRuntimeSecurity?.reloadTrust() ?? Promise.resolve(),
       reloadWorkspaceMcpTrust: () =>
-        mcpPort?.refreshWorkspaceTrustAdmission?.() ?? Promise.resolve(),
+        runtime?.getMcpPort()?.refreshWorkspaceTrustAdmission?.() ?? Promise.resolve(),
       setModelIoFullRetentionEnabled: (enabled) =>
         modelAdapter.setModelIoFullRetentionEnabled(enabled),
       readToolResultArtifact: (uri) =>

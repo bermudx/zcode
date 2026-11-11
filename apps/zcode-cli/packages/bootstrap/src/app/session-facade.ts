@@ -130,7 +130,6 @@ interface CreateSessionFacadeDeps {
   localSettingStore?: LocalSettingStorePort;
   logger: Logger;
   loggerFactory: LoggerFactory;
-  mcpPort?: McpPort;
   ownsExecutionPort: boolean;
   ownsMcpPort: boolean;
   ownsSessionStore: boolean;
@@ -158,6 +157,18 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
   let currentLocale = resolveLocale(deps.configResult.config.ui.locale);
   // App-Provided Tools：本会话当前登记在 ToolRegistry 里的模型侧名字（整体替换时先注销）。
   let appProvidedToolNames: string[] = [];
+  // MCP port/声明走 runtime 动态读取（issue #31）：空会话启动后可经
+  // configureMcpServers 迟到注入，facade 不能钉死创建时的空快照。
+  // 声明只认 client override（评审 R6）：未注入过回落装配期完整清单——
+  // builtin/官方 server（如 node_repl）在 omitMcpServers 之后仍是可配置事实。
+  const currentMcpPort = (): McpPort | undefined => deps.runtime.getMcpPort();
+  const currentMcpServers = (): Record<string, McpServerConfig> =>
+    deps.runtime.getConfiguredMcpServers() ?? deps.configuredMcpServers;
+  const requireMcpPort = (): McpPort => {
+    const port = currentMcpPort();
+    if (!port) throw new Error("MCP is disabled");
+    return port;
+  };
   const currentRegistrySelection = ():
     | { owned: false }
     | {
@@ -320,7 +331,7 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
               deps.ownsExecutionPort && deps.executionPort.close
                 ? () => deps.executionPort.close?.()
                 : undefined,
-            closeMcp: deps.ownsMcpPort && deps.mcpPort ? () => deps.mcpPort?.close() : undefined,
+            closeMcp: deps.ownsMcpPort ? () => currentMcpPort()?.close() : undefined,
             closeNodeReplBrowserBroker: deps.closeNodeReplBrowserBroker,
             closeSessionStore: closableSessionStore
               ? () => closableSessionStore.close()
@@ -410,102 +421,98 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
     },
     listMcpServers: async () =>
       listMcpServerStatuses(
-        deps.mcpPort,
-        deps.configuredMcpServers,
+        currentMcpPort(),
+        currentMcpServers(),
         deps.untrustedProjectMcpServers,
       ),
     connectMcpServer: async (name) => {
-      const config = deps.configuredMcpServers[name];
+      const config = currentMcpServers()[name];
       if (!config) {
         throw new Error(`MCP server is not configured: ${name}`);
       }
-      if (!deps.mcpPort) {
-        throw new Error("MCP is disabled");
-      }
-      return deps.mcpPort.connectServer(name, config, {
+      const port = requireMcpPort();
+      return port.connectServer(name, config, {
         trace: deps.traceContext,
         workingDirectory: deps.workingDirectory,
       });
     },
     readMcpResource: async (serverName, uri, options) => {
-      if (!deps.mcpPort) {
-        throw new Error("MCP is disabled");
-      }
-      if (!deps.mcpPort.readResource) {
+      const port = requireMcpPort();
+      if (!port.readResource) {
         throw new Error("MCP resources are not supported by this runtime");
       }
-      return deps.mcpPort.readResource(
+      return port.readResource(
         { serverName, uri, trace: deps.traceContext },
         { signal: options?.signal },
       );
     },
     readMcpResourceForUi: async (serverName, uri, options) => {
-      if (!deps.mcpPort) {
-        throw new Error("MCP is disabled");
-      }
-      if (!deps.mcpPort.readResource) {
+      const port = requireMcpPort();
+      if (!port.readResource) {
         throw new Error("MCP resources are not supported by this runtime");
       }
-      return deps.mcpPort.readResource(
+      return port.readResource(
         { serverName, uri, trace: deps.traceContext },
         { signal: options?.signal },
       );
     },
     listMcpResourcesForUi: async (serverName, cursor, options) => {
-      if (!deps.mcpPort) throw new Error("MCP is disabled");
-      if (!deps.mcpPort.listResources) {
+      const port = requireMcpPort();
+      if (!port.listResources) {
         throw new McpResourceSubscribeUnsupportedError(serverName);
       }
-      return deps.mcpPort.listResources(
+      return port.listResources(
         { serverName, ...(cursor ? { cursor } : {}), trace: deps.traceContext },
         { signal: options?.signal },
       );
     },
     listMcpResourceTemplatesForUi: async (serverName, cursor, options) => {
-      if (!deps.mcpPort) throw new Error("MCP is disabled");
-      if (!deps.mcpPort.listResourceTemplates) {
+      const port = requireMcpPort();
+      if (!port.listResourceTemplates) {
         throw new McpResourceSubscribeUnsupportedError(serverName);
       }
-      return deps.mcpPort.listResourceTemplates(
+      return port.listResourceTemplates(
         { serverName, ...(cursor ? { cursor } : {}), trace: deps.traceContext },
         { signal: options?.signal },
       );
     },
     subscribeMcpResourceForUi: async (serverName, uri, subscriberKey, options) => {
-      if (!deps.mcpPort) throw new Error("MCP is disabled");
-      if (!deps.mcpPort.subscribeResource) {
+      const port = requireMcpPort();
+      if (!port.subscribeResource) {
         throw new McpResourceSubscribeUnsupportedError(serverName);
       }
-      await deps.mcpPort.subscribeResource(
+      await port.subscribeResource(
         { serverName, uri, subscriberKey, trace: deps.traceContext },
         { signal: options?.signal },
       );
     },
     unsubscribeMcpResourceForUi: async (serverName, uri, subscriberKey, options) => {
-      if (!deps.mcpPort?.unsubscribeResource) return;
-      await deps.mcpPort.unsubscribeResource(
+      const port = currentMcpPort();
+      if (!port?.unsubscribeResource) return;
+      await port.unsubscribeResource(
         { serverName, uri, subscriberKey, trace: deps.traceContext },
         { signal: options?.signal },
       );
     },
     unsubscribeMcpResourcesForUi: async (subscriberKeyPrefix) => {
-      if (!deps.mcpPort?.unsubscribeResourcesBySubscriber) return 0;
-      return deps.mcpPort.unsubscribeResourcesBySubscriber(subscriberKeyPrefix);
+      const port = currentMcpPort();
+      if (!port?.unsubscribeResourcesBySubscriber) return 0;
+      return port.unsubscribeResourcesBySubscriber(subscriberKeyPrefix);
     },
     onMcpAppConnectionInvalidated: (name, listener) =>
-      deps.mcpPort?.onAppConnectionInvalidated?.(name, listener) ?? (() => {}),
-    getMcpAppConnectionSnapshot: (name) => deps.mcpPort?.appConnectionSnapshot?.(name) ?? null,
-    waitForMcpAppConnection: async (name) =>
-      deps.mcpPort?.waitForAppConnection
-        ? deps.mcpPort.waitForAppConnection(name)
-        : (deps.mcpPort?.appConnectionSnapshot?.(name) ?? null),
+      currentMcpPort()?.onAppConnectionInvalidated?.(name, listener) ?? (() => {}),
+    getMcpAppConnectionSnapshot: (name) => currentMcpPort()?.appConnectionSnapshot?.(name) ?? null,
+    waitForMcpAppConnection: async (name) => {
+      const port = currentMcpPort();
+      return port?.waitForAppConnection
+        ? port.waitForAppConnection(name)
+        : (port?.appConnectionSnapshot?.(name) ?? null);
+    },
     callMcpToolForUi: async (serverName, toolName, args, options) => {
-      if (!deps.mcpPort) {
-        throw new Error("MCP is disabled");
-      }
-      const snapshot = deps.mcpPort.appConnectionSnapshot?.(serverName);
+      const port = requireMcpPort();
+      const snapshot = port.appConnectionSnapshot?.(serverName);
       if (!snapshot) throw new Error("MCP App connection is unavailable");
-      const descriptor = (await deps.mcpPort.listTools()).find(
+      const descriptor = (await port.listTools()).find(
         (tool) => tool.serverName === serverName && tool.toolName === toolName,
       );
       if (!descriptor || !resolveMcpToolVisibility(descriptor).includes("app"))
@@ -520,8 +527,7 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
             entry.metadata.mcpPresentation.toolName === toolName,
         );
       const entry =
-        registered ??
-        createMcpToolEntry(toMcpToolName(descriptor), descriptor, deps.mcpPort, false);
+        registered ?? createMcpToolEntry(toMcpToolName(descriptor), descriptor, port, false);
       const executor = deps.runtime.getToolExecutor();
       if (!executor.authorizeAppTool) throw new Error("MCP App host authorization is unavailable");
       const input = await executor.authorizeAppTool(
@@ -531,14 +537,14 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
       );
       // 审批期间连接可能被替换：批准只属于原连接，执行前必须再次验证。
       options?.signal?.throwIfAborted();
-      const current = deps.mcpPort.appConnectionSnapshot?.(serverName);
+      const current = port.appConnectionSnapshot?.(serverName);
       if (
         !current ||
         current.identity !== snapshot.identity ||
         current.generation !== snapshot.generation
       )
         throw new Error("MCP App connection changed during authorization");
-      return deps.mcpPort.callTool(
+      return port.callTool(
         {
           serverName,
           toolName,
@@ -568,9 +574,10 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
       return registered;
     },
     getMcpToolVisibility: async (serverName, toolName) => {
-      if (!deps.mcpPort) return null;
+      const port = currentMcpPort();
+      if (!port) return null;
       // 真相是 adapter 归一化过的 descriptor（同一份 tools/list），不另存副本。
-      const descriptor = (await deps.mcpPort.listTools()).find(
+      const descriptor = (await port.listTools()).find(
         (tool) => tool.serverName === serverName && tool.toolName === toolName,
       );
       return descriptor ? resolveMcpToolVisibility(descriptor) : null;
@@ -582,8 +589,9 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
         traceContext: options?.traceContext ?? deps.traceContext,
       }),
     disconnectMcpServer: async (name) => {
-      if (!deps.mcpPort) return undefined;
-      return deps.mcpPort.disconnectServer(name);
+      const port = currentMcpPort();
+      if (!port) return undefined;
+      return port.disconnectServer(name);
     },
     listCheckpoints: async (options) => {
       await deps.prepareResume();

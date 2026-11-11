@@ -367,6 +367,12 @@ export interface AgentRuntimeDeps {
   pdfDocumentPort?: PdfDocumentPort;
   skillPort?: SkillPort;
   mcpPort?: McpPort;
+  /**
+   * 迟到注入补建 session MCP port 的同步工厂（issue #31 client MCP）。bootstrap 在
+   * 空会话首个显式 server 到来前不建任何 MCP 资源；runtime 只在需要非空配置的
+   * port 而 mcpPort 尚不存在时调用。与注入 mcpPort 并存，已建 port 继续复用。
+   */
+  createMcpPort?: () => McpPort | undefined;
   subagentPort?: SubagentPort;
   coordinatorResponsePort?: CoordinatorResponsePort;
   /** 工作流 actor 提交终态结果的端口；存在即作为 submit_result 工具的注册门。 */

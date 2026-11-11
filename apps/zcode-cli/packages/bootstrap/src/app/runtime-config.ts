@@ -91,11 +91,12 @@ export function resolveAppRuntimeConfig(input: {
   // Protocol session/create 传入的 mcp.servers 只包含 UI MCP 设置里的用户配置，
   // 不包含插件注册的 MCP。宿主内建 server 最后合并并保留其 identity，避免用户或第三方
   // 用同名配置劫持 mcp__node_repl__*；普通 plugin MCP 仍允许显式用户配置覆盖。
-  // noPlugins（attach 共享 core）时整表清空：客户端携带的 mcp 配置不允许重新启用 MCP，
-  // connectMcpServer / listMcpServers 读的是同一张表。
+  // noPlugins（attach 共享 core）时唯一的例外是客户端显式会话 override
+  // （issue #31）：runtimeConfig.mcp.servers 只认调用方注入的那一份，
+  // file/plugin/builtin MCP 仍然全部不加载。省略与显式空集都保持零 MCP。
   const configuredMcpServers =
     options.noPlugins === true
-      ? {}
+      ? { ...options.runtimeConfig?.mcp?.servers }
       : {
           ...pluginMcpServers,
           ...(options.runtimeConfig?.mcp?.servers ?? configResult.config.mcp.servers),
@@ -114,6 +115,16 @@ export function resolveAppRuntimeConfig(input: {
   }
   const untrustedProjectMcpServers = new Set<string>();
   for (const [name, config] of Object.entries(configuredMcpServers)) {
+    if (options.noPlugins === true) {
+      // noPlugins 下 configuredMcpServers 只来自客户端显式注入：file 侧
+      // serverSources 不能回贴到注入名上（同名 workspace 声明会把客户端 server
+      // 误标成待信任/被拦）；未带来源的注入配置按 user 来源处理——它是 owning
+      // 协议客户端下发的可信配置，不是仓库声明。
+      if (!config.source) {
+        configuredMcpServers[name] = { ...config, source: { kind: "user" } };
+      }
+      continue;
+    }
     if (
       config.source?.kind === "workspace" ||
       (!config.source && configResult.sources.mcp.serverSources[name] === "project")
@@ -171,11 +182,18 @@ export function resolveAppRuntimeConfig(input: {
       ...configResult.config.modelAnomalyGuard,
       ...options.runtimeConfig?.modelAnomalyGuard,
     },
-    // noPlugins 是入口级硬门：runtimeConfig.mcp.enabled 不能由 session/create 参数重新打开，
-    // 否则 attach 共享 core 会被单个客户端的会话参数偷拉回有 MCP 子进程的形态。
+    // noPlugins 是入口级硬门：file/plugin/builtin MCP 不能由 session/create 参数重新打开，
+    // 唯一的例外是客户端显式注入的 servers——它们不是 file 配置重放，是 owning
+    // 客户端的可信会话声明（issue #31）。空集/省略仍保持 enabled=false、零 MCP 资源。
     mcp:
       options.noPlugins === true
-        ? { enabled: false, servers: {}, trustedOfficialCuaServerNames: [] }
+        ? {
+            enabled:
+              Object.keys(configuredMcpServers).length > 0 &&
+              (options.runtimeConfig?.mcp?.enabled ?? true),
+            servers: autoConnectMcpServers,
+            trustedOfficialCuaServerNames: [],
+          }
         : {
             enabled: options.runtimeConfig?.mcp?.enabled ?? configResult.config.features.mcp,
             servers: autoConnectMcpServers,

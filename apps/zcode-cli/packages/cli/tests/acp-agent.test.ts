@@ -280,7 +280,9 @@ test("acp agent: initialize advertises resume/close and no loadSession", async (
       close: {},
       resume: {},
     });
-    assert.equal(init.agentCapabilities?.mcpCapabilities?.http, false);
+    // Client MCP（issue #31）：ACP 会话可注入 stdio/HTTP/SSE server 声明。
+    assert.equal(init.agentCapabilities?.mcpCapabilities?.http, true);
+    assert.equal(init.agentCapabilities?.mcpCapabilities?.sse, true);
   });
 });
 

@@ -1,0 +1,106 @@
+// Disposable MCP stdio fixture for lifecycle tests (issue #31 / CMCP*).
+// Newline-delimited JSON-RPC over stdio; fake credentials only.
+// Env:
+//   MCP_FIXTURE_PID_FILE — write own PID here so tests can assert child death.
+//   MCP_FIXTURE_PID_DIR  — additionally write <dir>/<pid>.pid so identical
+//                          configs spawning several children leave one record each.
+//   MCP_FIXTURE_LABEL    — harmless generation label (e.g. "v1"/"v2") stamped in
+//                          echo output; lets tests prove which connection answered.
+//   MCP_FIXTURE_HOLD_INITIALIZE=1 — never answer initialize (blocked handshake).
+// Tool results carry pid + label + echoed input only — env/credential values are
+// never read into or echoed back from results.
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+if (process.env.MCP_FIXTURE_PID_FILE) {
+  writeFileSync(process.env.MCP_FIXTURE_PID_FILE, String(process.pid));
+}
+if (process.env.MCP_FIXTURE_PID_DIR) {
+  mkdirSync(process.env.MCP_FIXTURE_PID_DIR, { recursive: true });
+  writeFileSync(join(process.env.MCP_FIXTURE_PID_DIR, `${process.pid}.pid`), String(process.pid));
+}
+const holdInitialize = process.env.MCP_FIXTURE_HOLD_INITIALIZE === "1";
+const label = process.env.MCP_FIXTURE_LABEL ?? "unlabeled";
+
+function respond(message) {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  for (;;) {
+    const index = buffer.indexOf("\n");
+    if (index < 0) break;
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (!line.trim()) continue;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (message.id === undefined) continue; // notifications need no response
+    if (message.method === "initialize") {
+      if (holdInitialize) continue; // 握手永远不完成—— detach/close 必须中止它
+      respond({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: message.params?.protocolVersion ?? "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "fixture-echo", version: "0.0.1" },
+        },
+      });
+      continue;
+    }
+    if (message.method === "tools/list") {
+      respond({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          tools: [
+            {
+              name: "echo",
+              description: "fixture echo tool",
+              inputSchema: {
+                type: "object",
+                properties: { text: { type: "string" } },
+              },
+            },
+          ],
+        },
+      });
+      continue;
+    }
+    if (message.method === "tools/call") {
+      respond({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: `echo[${label}@${process.pid}]:${message.params?.arguments?.text ?? ""}`,
+            },
+          ],
+        },
+      });
+      continue;
+    }
+    if (message.method === "ping") {
+      respond({ jsonrpc: "2.0", id: message.id, result: {} });
+      continue;
+    }
+    respond({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: { code: -32601, message: "method not found" },
+    });
+  }
+});
+
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));

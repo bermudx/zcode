@@ -502,6 +502,24 @@ export class ZCodeProtocolAgentServer {
       }
       this.armDetachedRequestTimeout(pending);
     }
+    // client 注入 MCP（issue #31 CMCP08/10）：detach 的 session 同步落下 client
+    // stdio 准入闸门（setMcpClientAttached 的标志位先于任何 await 生效），
+    // teardown 排进 runtime apply tail 并计入 residency；adoption 经
+    // setMcpClientAttached(true) 在回合边界补连。只作用带声明的 record，
+    // 普通 file/plugin 会话的 MCP 生命周期不变。
+    for (const record of this.context.sessions.values()) {
+      if (record.clientMcpServers === undefined) continue;
+      void record.app.runtime
+        .setMcpClientAttached(false)
+        .catch((suspendError: unknown) => {
+          // MCP teardown 错误可能回显 command/env/header——诊断只报类别（评审 R8）。
+          this.logger?.warn("Client MCP suspend on detach failed", {
+            errorKind: suspendError instanceof Error ? suspendError.name : typeof suspendError,
+            event: "zcode_protocol.session.mcp_suspend_failed",
+            sessionId: record.app.sessionId,
+          });
+        });
+    }
   }
 
   /**
@@ -1481,6 +1499,20 @@ export class ZCodeProtocolAgentServer {
     );
     record.ownerContext = this.context;
     this.context.sessions.set(sessionId, record);
+    // client 注入 MCP（issue #31 CMCP08）：ownership 转移到本 context 之后才
+    // 抬 attach 闸门——旧 owner 的迟到 suspend 先落地（apply tail 串行），
+    // 重连推迟到下一整轮边界，不让 detach 中杀的 stdio 在同一瞬复活竞态。
+    if (record.clientMcpServers !== undefined) {
+      void record.app.runtime
+        .setMcpClientAttached(true)
+        .catch((attachError: unknown) => {
+          this.logger?.warn("Client MCP reattach on adoption failed", {
+            errorKind: attachError instanceof Error ? attachError.name : typeof attachError,
+            event: "zcode_protocol.session.mcp_reattach_failed",
+            sessionId: record.app.sessionId,
+          });
+        });
+    }
     this.logger?.info("ZCode Protocol detached session adopted", {
       event: "zcode_protocol.session.adopted",
       sessionId,

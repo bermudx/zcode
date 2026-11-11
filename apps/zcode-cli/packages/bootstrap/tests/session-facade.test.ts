@@ -66,11 +66,6 @@ describe("session facade shutdown", () => {
       } as never,
       logger: {} as never,
       loggerFactory: {} as never,
-      mcpPort: {
-        async close() {
-          calls.push("mcp");
-        },
-      } as never,
       modelAdapter: {} as never,
       modelConfig: undefined,
       ownsExecutionPort: true,
@@ -84,6 +79,7 @@ describe("session facade shutdown", () => {
         beginShutdown: vi.fn(() => {
           calls.push("shutdown");
         }),
+        getMcpPort: () => ({ async close() { calls.push("mcp"); } }) as never,
         closeBrowserSession: async () => {
           calls.push("browser");
         },
@@ -146,11 +142,6 @@ describe("session facade shutdown", () => {
       } as never,
       logger: { warn } as never,
       loggerFactory: {} as never,
-      mcpPort: {
-        async close() {
-          calls.push("mcp");
-        },
-      } as never,
       modelAdapter: {} as never,
       modelConfig: undefined,
       ownsExecutionPort: true,
@@ -164,6 +155,7 @@ describe("session facade shutdown", () => {
         beginShutdown: () => {
           calls.push("shutdown");
         },
+        getMcpPort: () => ({ async close() { calls.push("mcp"); } }) as never,
         closeBrowserSession: async () => {
           calls.push("browser");
         },
@@ -390,6 +382,63 @@ describe("session facade model selection", () => {
     expect(other).not.toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ event: expect.stringMatching(/^session\.model_selection\./) }),
+    );
+  });
+});
+
+describe("session facade MCP inventory provenance (issue #31)", () => {
+  // client 未注入过（desired===undefined）→ facade 回落到装配期完整清单，
+  // builtin 官方 server（node_repl 形态）仍可出现并可 connect；显式 {} 的
+  // client override 压制回退——连 builtin 也不进清单。
+  const nodeReplConfig = {
+    type: "stdio",
+    command: "node",
+    args: ["repl.mjs"],
+  } as never;
+
+  const baseDeps = (
+    desired: Record<string, never> | undefined,
+    port?: { connectServer: (...args: unknown[]) => Promise<unknown>; status: () => Promise<object> },
+  ) =>
+    ({
+      configResult: {
+        config: DefaultRuntimeConfig,
+        configPort: {} as never,
+        sources: {} as never,
+      },
+      configuredMcpServers: { node_repl: nodeReplConfig },
+      runtime: {
+        getMcpPort: () => port,
+        getConfiguredMcpServers: () => desired,
+      },
+      sessionId: createSessionId("facade-mcp-inventory"),
+      traceContext: { traceId: "facade-mcp-inventory" },
+      untrustedProjectMcpServers: new Set<string>(),
+      workingDirectory: "/workspace",
+    }) as never;
+
+  it("undefined desired falls back to the assembled inventory including builtin servers", async () => {
+    const connected: Array<[string, unknown]> = [];
+    const facade = createSessionFacade(
+      baseDeps(undefined, {
+        connectServer: async (name, config) => {
+          connected.push([String(name), config]);
+          return { status: "connected" };
+        },
+        status: async () => ({}),
+      }),
+    );
+    const listed = await facade.listMcpServers();
+    expect(listed.node_repl).toBeDefined();
+    await facade.connectMcpServer("node_repl");
+    expect(connected).toEqual([["node_repl", nodeReplConfig]]);
+  });
+
+  it("explicit empty client set suppresses the assembled-inventory fallback", async () => {
+    const facade = createSessionFacade(baseDeps({}));
+    expect(await facade.listMcpServers()).toEqual({});
+    await expect(facade.connectMcpServer("node_repl")).rejects.toThrow(
+      /not configured/i,
     );
   });
 });
