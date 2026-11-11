@@ -464,6 +464,10 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           createAdapter: ({ workingDirectory: adapterWorkingDirectory }) =>
             createMcpAdapter({
               clientVersion: appVersion,
+              // ACP client 供给的 command/args/env/stderr 属不可信诊断文本：本路径
+              // 只发稳定分类与结构字段（mcp.md 的错误脱敏要求），普通文件/插件路径
+              // 仍保留 standard 诊断。
+              connectionDiagnostics: "structural",
               env: options.env,
               logger,
               network: {

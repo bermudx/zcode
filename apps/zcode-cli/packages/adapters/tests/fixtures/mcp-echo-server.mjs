@@ -8,6 +8,13 @@
 //                          echo output; lets tests prove which connection answered.
 //   MCP_FIXTURE_HOLD_INITIALIZE=1 — never answer initialize (blocked handshake).
 //   MCP_FIXTURE_HOLD_CALL=1 — never answer tools/call (barrier for detach tests).
+//   MCP_FIXTURE_CALL_MARKER_FILE — write own PID here when a tools/call is
+//                          RECEIVED, before the holdCall gate; lets tests await
+//                          real call receipt instead of sleeping.
+//   MCP_FIXTURE_FAIL_INITIALIZE=1 — answer initialize with an error result so
+//                          the connection fails through the normal path.
+//   MCP_FIXTURE_STDERR_TEXT   — write this exact text to stderr at startup
+//                          (disposable sentinel tests only; never real values).
 //   MCP_FIXTURE_VERSION_ENV — name of an env var whose fake value is appended to
 //                          the label, so a credential-only config change yields
 //                          an observable generation change (fake constants only).
@@ -25,6 +32,10 @@ if (process.env.MCP_FIXTURE_PID_DIR) {
 }
 const holdInitialize = process.env.MCP_FIXTURE_HOLD_INITIALIZE === "1";
 const holdCall = process.env.MCP_FIXTURE_HOLD_CALL === "1";
+const failInitialize = process.env.MCP_FIXTURE_FAIL_INITIALIZE === "1";
+if (process.env.MCP_FIXTURE_STDERR_TEXT) {
+  process.stderr.write(`${process.env.MCP_FIXTURE_STDERR_TEXT}\n`);
+}
 const baseLabel = process.env.MCP_FIXTURE_LABEL ?? "unlabeled";
 const versionEnv = process.env.MCP_FIXTURE_VERSION_ENV;
 // 版本只来自测试显式给的 fake env 值；真实 token 从不进 echo 输出。
@@ -53,6 +64,14 @@ process.stdin.on("data", (chunk) => {
     if (message.id === undefined) continue; // notifications need no response
     if (message.method === "initialize") {
       if (holdInitialize) continue; // 握手永远不完成—— detach/close 必须中止它
+      if (failInitialize) {
+        respond({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32000, message: "fixture init failure" },
+        });
+        continue;
+      }
       respond({
         jsonrpc: "2.0",
         id: message.id,
@@ -84,6 +103,11 @@ process.stdin.on("data", (chunk) => {
       continue;
     }
     if (message.method === "tools/call") {
+      // 收到即落标（在 holdCall 闸门之前）：测试用标记文件证明调用真实到达
+      // 子进程，而不是靠 sleep 猜时序。
+      if (process.env.MCP_FIXTURE_CALL_MARKER_FILE) {
+        writeFileSync(process.env.MCP_FIXTURE_CALL_MARKER_FILE, String(process.pid));
+      }
       if (holdCall) continue; // 工具调用被闸门挡住——detach 必须中止挂起调用
       respond({
         jsonrpc: "2.0",

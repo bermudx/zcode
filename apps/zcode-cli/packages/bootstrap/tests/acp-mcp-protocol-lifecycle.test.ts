@@ -80,6 +80,7 @@ function stdioWireServer(
     label?: string;
     hold?: boolean;
     holdCall?: boolean;
+    callMarker?: string;
     pidDir?: string;
     versionEnv?: string;
     env?: Record<string, string>;
@@ -91,6 +92,9 @@ function stdioWireServer(
     ...(options.label ? [{ name: "MCP_FIXTURE_LABEL", value: options.label }] : []),
     ...(options.hold ? [{ name: "MCP_FIXTURE_HOLD_INITIALIZE", value: "1" }] : []),
     ...(options.holdCall ? [{ name: "MCP_FIXTURE_HOLD_CALL", value: "1" }] : []),
+    ...(options.callMarker
+      ? [{ name: "MCP_FIXTURE_CALL_MARKER_FILE", value: options.callMarker }]
+      : []),
     ...(options.versionEnv
       ? [{ name: "MCP_FIXTURE_VERSION_ENV", value: options.versionEnv }]
       : []),
@@ -618,6 +622,7 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
               toolCalls: [
                 { id: "call-blocked", name: "mcp__s1__echo", input: { text: "blocked" } },
               ],
+              usage: {},
             } as ModelResult;
           }
           return {
@@ -632,10 +637,16 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
     const client1 = await fixture.connectRawClient();
     allowAllPermissions(client1);
     try {
+      const callMarker = join(dir, "call.marker");
       const sessionId = await createSession(client1, fixture, {
-        mcpServers: [stdioWireServer("s1", dir, { label: "v1", holdCall: true })],
+        mcpServers: [
+          stdioWireServer("s1", dir, { label: "v1", holdCall: true, callMarker }),
+        ],
       });
       const pid = await waitForFile(join(dir, "s1.pid"));
+      // 等工具注册完成再 send：未注册时 callTool 直接失败，调用永远到不了
+      // 子进程（旧 300ms sleep 掩盖了这个竞态）。
+      await waitForToolRegistered(fixture, sessionId, "s1", "echo");
       // send 在后台跑：模型请求已发出并返回 toolCalls，真实 tools/call 被
       // fixture 闸门挡住——detach 时该调用仍在飞行。
       void client1
@@ -646,8 +657,10 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
         })
         .catch(() => undefined);
       await waitTurnRequests(requests, 1);
-      // 让 tools/call 真的进入 MCP adapter（等一小拍，send ACK 后调度）。
-      await new Promise((r) => setTimeout(r, 300));
+      // tools/call 真实到达子进程才有标记（fixture 在 holdCall 闸门之前写
+      // 自身 pid）——不靠 sleep 猜 adapter 调度时序。
+      const markerPid = await waitForFile(callMarker);
+      expect(markerPid).toBe(pid);
       const appBefore = fixture.apps.get(sessionId);
       const ownerA = fixture.ownerOf(sessionId);
 
@@ -1073,15 +1086,19 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       expect(JSON.stringify(appliedMidTurn)).not.toContain('"FAKE_AUTH":"v2"');
 
       release();
-      // turn 1 跑完：req2 的 echo 与 req3 里的 tool 结果都还是旧代（gen-v1@pidOld）。
+      // turn 1 跑完：本turn两次 echo 的 tool 结果逐条断言——分别落在 req2
+      // （call-1 回包）与 req3（call-2 回包）末条 tool 消息上；拼接整段只验
+      // 一条 gen-v1 会漏掉「第二次调用切到新连接」的漂移。
       await waitTurnRequests(requests, 3);
-      const turnOneToolText = requests
-        .slice(0, 3)
-        .flatMap((r) => r.messages)
-        .filter((m) => m.role === "tool")
-        .map((m) => JSON.stringify(m))
-        .join("\n");
-      expect(turnOneToolText).toContain(`echo[gen-v1@${pidOld}]`);
+      const turnOneResults = [requests[1], requests[2]].map(
+        (r) => r!.messages.filter((m) => m.role === "tool").at(-1),
+      );
+      expect(turnOneResults.every((m) => m !== undefined)).toBe(true);
+      for (const result of turnOneResults) {
+        const text = JSON.stringify(result);
+        expect(text).toContain(`echo[gen-v1@${pidOld}]`);
+        expect(text).not.toContain("gen-v2");
+      }
 
       // 整轮边界：staged apply 落地（v2 新 PID），steer 队列项不会自动开新
       // turn（服务端不擅自开新回合，队列由客户端 flush）——idle 后客户端
@@ -1232,12 +1249,8 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
   // （logger 输出、session events、session/read 快照、持久化 transcript、
   // storage 落盘文件）只允许结构化类别/计数，不得回显任何 client 值。
   // 任一命中即 fail —— 命中处就是真实的凭据泄漏生产者。
-  // KNOWN LEAK（rework4 评审确认，待 privacy-boundary 设计，不许悄悄修）：
-  // packages/adapters/src/mcp/index.ts:1938 `failConnection` 的 warn 日志
-  // context.error = 原始 displayMessage（error.message），stdio spawn ENOENT
-  // 时回显整条 client command 路径——sentinel 命中 1 条
-  // event="mcp.server.failed" 记录。stderr 面已由 sanitizeMcpStdioStderr
-  // 覆盖；其余四面无命中。修复决策权在 lead（脱敏边界设计）。
+  // 会话自有 noPlugins adapter 走 connectionDiagnostics:"structural"：失败
+  // status/log 只发 failureKind 与数值/结构字段（rework5 落地）。
   it("CMCP13 connect-failure diagnostics never echo client-supplied values", async () => {
     const logs: Array<{
       level: string;
@@ -1316,7 +1329,27 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       // 五个面一次收齐再断言——单次运行给出完整泄漏面（face:命中明细）。
       const leaks: string[] = [];
 
-      // 面 1：产品 logger 全部记录。
+      // 面 2：协议 notification 流（内存快照，顺序无关）。
+      for (const n of notifications) {
+        if (n.includes(SENTINEL_CRED)) {
+          leaks.push(`notification:${n.slice(0, 80)}`);
+        }
+      }
+
+      // 面 3：session/read 快照（消息/状态投影视图）——需要 live session，
+      // 必须在 app.close 之前读。
+      const snapshot = await client.request(
+        zcodeProtocolMethods.sessionRead,
+        { sessionId },
+      );
+      if (JSON.stringify(snapshot).includes(SENTINEL_CRED)) leaks.push("sessionRead");
+
+      // 收尾 close/flush：先关掉 app，让 adapter 关闭路径日志（mcp.server.closed
+      // 等）全部落进捕获器再扫——不扫迟到日志等于漏掉一个泄露面。
+      // sessionStore 保留给面 4；fixture.rootDir 由 fixture.close 最后清理。
+      await app.close?.();
+
+      // 面 1：产品 logger 全部记录（含 close/flush 后的迟到记录）。
       for (const entry of logs) {
         if (JSON.stringify(entry).includes(SENTINEL_CRED)) {
           leaks.push(
@@ -1324,20 +1357,6 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
           );
         }
       }
-
-      // 面 2：协议 notification 流。
-      for (const n of notifications) {
-        if (n.includes(SENTINEL_CRED)) {
-          leaks.push(`notification:${n.slice(0, 80)}`);
-        }
-      }
-
-      // 面 3：session/read 快照（消息/状态投影视图）。
-      const snapshot = await client.request(
-        zcodeProtocolMethods.sessionRead,
-        { sessionId },
-      );
-      if (JSON.stringify(snapshot).includes(SENTINEL_CRED)) leaks.push("sessionRead");
 
       // 面 4：持久化 transcript（sessionStore 是真实 SQLite）。
       const persisted = await fixture.sessionStore.messages({

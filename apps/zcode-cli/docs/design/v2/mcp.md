@@ -305,6 +305,7 @@ See [mcp-node-fallback.md](mcp-node-fallback.md) for the shim directory, env con
 - A failed server connection marks only that server as `failed`; other servers may still connect.
 - Tool calls against disconnected or failed servers return structured tool errors.
 - Adapter errors preserve the original error message for logs and status, but do not expose secrets from configured headers or environment values.
+- Client-supplied (session-owned) connections use structural diagnostics: failure status and logs carry only the stable `failureKind` classification and structural fields — never raw error text, stderr content, or external request ids, since command paths, args, env values and child output are all client-controlled. Ordinary file/plugin adapter paths keep the standard detailed diagnostics.
 - Timeouts apply to connect, tool listing, and tool calls.
 
 ## Tests

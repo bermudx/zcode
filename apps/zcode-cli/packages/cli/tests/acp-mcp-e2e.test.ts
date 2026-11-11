@@ -387,15 +387,17 @@ test("CMCP12 ACP boundary: malformed/duplicate mcpServers fail with INVALID_PARA
       ],
       FAKE_SECRET,
     );
-    // (b) 重复 name + sentinel env → duplicate 报错，同样不回显值。
-    await expectInvalidParams(
-      [
-        stdioAcpServer("dup", await mkdtemp(join(tmpdir(), "acp-dup-")), "x"),
-        stdioAcpServer("dup", await mkdtemp(join(tmpdir(), "acp-dup-")), "y"),
-        { name: "dup", command: FAKE_SECRET },
-      ],
-      FAKE_SECRET,
-    );
+    // (b) 恰好两条各自合法的同名 stdio（sentinel 埋在 env 值里）→ 只能是
+    // duplicate 报错；第三条非法形状会掩盖 duplicate 路径，不放进来。
+    // 临时状态挂在 fixture.rootDir 下，fixture.close 统一回收。
+    const dupServer = (label: string): Record<string, unknown> => {
+      const server = stdioAcpServer("dup", join(fixture.rootDir, "dup"), label) as {
+        env: Array<{ name: string; value: string }>;
+      };
+      server.env.push({ name: "AUTH", value: FAKE_SECRET });
+      return server;
+    };
+    await expectInvalidParams([dupServer("x"), dupServer("y")], FAKE_SECRET);
     // (c) http 形状缺 url（header 里埋 sentinel）→ invalid_params。
     await expectInvalidParams(
       [
