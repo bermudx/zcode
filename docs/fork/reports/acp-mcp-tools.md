@@ -1,6 +1,6 @@
 # ACP client MCP tools — implementation evidence (issue #31)
 
-Status: implemented on `feat/acp-mcp-tools`. CMCP01–13 verified through real
+Status: implemented on `feat/acp-mcp-tools`. CMCP01–13 regression-tested through real
 disposable seams (protocol socket app, ACP SDK client, real stdio/http/sse
 fixtures). The CMCP13 logger leak found in rework 4 is repaired in rework 5 by
 bounded structural connection diagnostics on the session-owned client path.
@@ -11,7 +11,7 @@ Historical detail: `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/rework5.md`
 (current round; supersedes rework4 and earlier notes, which record previous
 passes and are not restated here).
 
-## CMCP matrix (final)
+## CMCP regression matrix
 
 | Case | Result | Evidence |
 |------|--------|----------|
@@ -120,12 +120,66 @@ in `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/rework5-*`.
 ## Disposable exercise
 
 ```bash
-cd apps/zcode-cli/packages/cli && node --disable-warning=DEP0205 --import tsx \
+cd apps/zcode-cli/packages/cli && mise exec -- node --disable-warning=DEP0205 --import tsx \
   --test --test-name-pattern "CMCP01" tests/acp-mcp-e2e.test.ts
 ```
 
 Real ACP app + protocol socket + disposable stdio/http/sse fixtures; performs a
 tool call through permission allow and observes the real result, then cleans up.
+
+## Independent verification and lead disposition
+
+Verifier verdict, verbatim:
+
+```text
+PASS+NOTES
+```
+
+Accepted source commit: `8be867d705f9d6158a4ffe05da2751bf7a87dce6`.
+The fresh piz / GLM-5.3 verification report is
+`/home/daniel/.local/state/piz-acp-mcp-009cbbe5/verification2.md`.
+Its final driver log (`verify2-driver.log`, run `v2-mwcmmqkb`) records
+93 checks and zero failed checks. The driver exercises the production
+`runAcpCommand` from source in separate processes, a disposable socket core,
+SQLite storage, and real stdio/HTTP/SSE servers. No installed command changed.
+The first verifier attempt failed before verification with a DNS error; it
+provides no feature verdict.
+
+Lead disposition of the notes:
+
+- **Real T3 remains unverified (CMCP14).** Credential rotation and authorization
+  are still required. An isolated matched candidate is sufficient for that
+  check; installing over the operator's current pair is not a prerequisite.
+  Do not restart a live core or promote this branch to obtain the evidence.
+- **Model and signing limits accepted.** The driver uses a scripted executor.
+  Neither its tool calls nor these tests prove real model behavior, signing,
+  extra-usage eligibility, or account metering.
+- **Wire constraints accepted.** The SDK requires an array on `session/new`;
+  omitted declarations were exercised on resume. Legacy `session/fork`
+  ownership/active-turn/checkpoint restrictions remain unchanged; the separate
+  V4 active-turn fork regression is listed above.
+- **Idle replacement behavior accepted.** Replacing an idle connection can
+  leave no serving connection until its new handshake finishes. This does not
+  relax the whole-turn deferral requirement for an active turn.
+- **Deferred-session limit retained.** A never-prompted draft is not evidence
+  of persistent cross-connection lineage. Adoption tests use persisted history.
+- **Driver errors are not product findings.** The driver recorded pipe-close
+  `ECONNRESET` rejections during deliberate adapter termination. Its recorded
+  check results, rather than exit code alone, are the evidence: the driver
+  exits zero even if its check list contains failures.
+- **Independent coverage is narrower than the regression matrix.** This
+  driver exercised permission allow, not reject, and a subsequent prompt,
+  not a separately queued/goal-continuation turn. Those additional paths have
+  the regression evidence above, not independent live verification. Its fork
+  calls also use the MCP port directly after ACP resume; the regression suite
+  separately drives a forked child's tool through a protocol prompt.
+- **CI unavailable.** This is a local, unpushed branch. No PR verdict comment,
+  push, merge, install, or promotion has been performed.
+
+The verifier found no proved product defect. This accepts the disposable
+verification stage with the stated limits, not the still-gated real T3 stage.
+There is no repository `verify-*` skill; `/create-verification-skill` is an
+optional follow-up, not part of this change.
 
 ## Not claimed
 
