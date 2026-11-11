@@ -69,6 +69,10 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   Thin client must not import the full runtime; no-plugin startup is a hard gate.
 - Errors must surface with context. Use existing project loggers; diagnostics
   go to stderr, never protocol stdout. Do not print credentials or secret config.
+  For ACP model/options discovery, use typed T3 thread configuration metadata,
+  never `env`/`printenv` or process-environment dumps: even a model-name filter
+  can match `T3_ACP_MCP_AUTHORIZATION`. MCP checks use disposable servers and
+  fake credentials until the operator authorizes a post-rotation T3 check.
 - Root and CLI workspace typecheck/lint are separate. Run relevant checks and
   report actual failures/limits. CLI tests on patch branches:
   `mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs` (selected); `--full`

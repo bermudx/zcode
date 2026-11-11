@@ -1,5 +1,19 @@
 # Tool Change Chain Spec
 
+## ACP client-supplied MCP（issue #31）
+
+ACP `mcpServers` → shared protocol schema → session runtime 的显式 MCP override →
+session-owned stdio/HTTP/SSE → 既有 MCP registry / ToolSearch → 既有 permission、
+executor、result 和 trace 链路。`--no-plugins` 不再丢弃显式会话声明，但仍不加载
+file/plugin/builtin MCP；空声明不构造 MCP 资源。
+
+配置变更只能在完整 turn 之间生效，不能借 model-request 内循环刷新提前切换。
+相同声明保留连接；替换时显式失效工具注册与缓存，不能依赖 revision 求和恰好变化。
+断链立即封住新的 client-MCP 连接准入并回收该 session 的 stdio，保留 runtime 可收养；
+fork 只在内存复制声明，另建 session 连接。凭据不进入日志、事件或持久化。
+完整合同与验收项见根目录 `docs/design/v2/acp-frontend.md`「Client MCP extension」；
+实现与实际 T3 验收尚待记录，不改变模型签名请求路径。
+
 ## Bash shell init 快照与用户 alias
 
 snapshot 创建由 `shell -c -l` 改为 `shell -ic`：多数用户 rc 对非交互执行提前 return，

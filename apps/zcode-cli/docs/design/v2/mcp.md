@@ -176,6 +176,26 @@ ZCode app-server sessions are protocol-controlled and already accept `mcpServers
 
 This prevents a generic ZCode protocol client from accidentally enabling repository-local MCP servers.
 
+#### Explicit session MCP in no-plugins shared cores
+
+Issue #31 permits explicit protocol-client MCP overrides in `--no-plugins`
+sessions without enabling automatic MCP/plugin discovery. Absent or empty
+overrides keep the existing zero-MCP startup path: no pool, adapter, broker,
+settings lease, telemetry timer, or child process is created. Nonempty client
+overrides allocate session-owned transports lazily; they never merge with file,
+plugin, or builtin MCP servers.
+
+The runtime applies changed overrides between whole turns, not between model
+requests within a turn. Unchanged declarations preserve live connections.
+Session close or client detach promptly terminates the session's stdio
+transports; detach keeps the runtime and in-memory declaration adoptable.
+Forks inherit that declaration in memory but use independent connections.
+No client credentials enter persistence or diagnostic payloads.
+
+The authoritative ownership/order contract and acceptance cases are in the
+[ACP frontend](../../../../../docs/design/v2/acp-frontend.md#client-mcp-extension--issue-31).
+This is an approved source contract, not installation or live-T3 evidence.
+
 ### Implementation Plan
 
 1. Config discovery
