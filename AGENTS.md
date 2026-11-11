@@ -73,6 +73,9 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   never `env`/`printenv` or process-environment dumps: even a model-name filter
   can match `T3_ACP_MCP_AUTHORIZATION`. MCP checks use disposable servers and
   fake credentials until the operator authorizes a post-rotation T3 check.
+  Shared credentials use atomic file replacement: a symlink to the live
+  credential file is not safe shared write-through access and can be replaced
+  with a separate credential copy. Do not use one for isolated live checks.
 - Root and CLI workspace typecheck/lint are separate. Run relevant checks and
   report actual failures/limits. CLI tests on patch branches:
   `mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs` (selected); `--full`
