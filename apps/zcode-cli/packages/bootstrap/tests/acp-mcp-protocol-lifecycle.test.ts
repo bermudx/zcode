@@ -8,6 +8,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  type Logger,
+  type LoggerFactory,
+  type LogContext,
   type ModelRequest,
   type ModelResult,
   type SessionId,
@@ -73,13 +76,24 @@ async function listPids(dir: string): Promise<number[]> {
 function stdioWireServer(
   name: string,
   dir: string,
-  options: { label?: string; hold?: boolean; pidDir?: string; env?: Record<string, string> } = {},
+  options: {
+    label?: string;
+    hold?: boolean;
+    holdCall?: boolean;
+    pidDir?: string;
+    versionEnv?: string;
+    env?: Record<string, string>;
+  } = {},
 ): Record<string, unknown> {
   const env = [
     { name: "MCP_FIXTURE_PID_FILE", value: join(dir, `${name}.pid`) },
     ...(options.pidDir ? [{ name: "MCP_FIXTURE_PID_DIR", value: options.pidDir }] : []),
     ...(options.label ? [{ name: "MCP_FIXTURE_LABEL", value: options.label }] : []),
     ...(options.hold ? [{ name: "MCP_FIXTURE_HOLD_INITIALIZE", value: "1" }] : []),
+    ...(options.holdCall ? [{ name: "MCP_FIXTURE_HOLD_CALL", value: "1" }] : []),
+    ...(options.versionEnv
+      ? [{ name: "MCP_FIXTURE_VERSION_ENV", value: options.versionEnv }]
+      : []),
     ...Object.entries(options.env ?? {}).map(([key, value]) => ({ name: key, value })),
   ];
   return {
@@ -130,6 +144,26 @@ async function waitIdle(
   throw new Error(`session ${sessionId} never went idle`);
 }
 
+/** tools/list 在 connect 后异步完成；轮询直到目标 mcp__ 工具在 runtime 工具面可见。 */
+async function waitForToolRegistered(
+  fixture: AcpMcpCoreFixture,
+  sessionId: string,
+  serverName: string,
+  toolName: string,
+  attempts = 400,
+): Promise<void> {
+  const app = fixture.apps.get(sessionId)!;
+  const fullName = `mcp__${serverName}__${toolName}`;
+  for (let i = 0; i < attempts; i += 1) {
+    const tools = (await app.runtime.getMcpPort()?.listTools()) ?? [];
+    if (tools.some((t) => t.serverName === serverName && `mcp__${t.serverName}__${t.toolName}` === fullName)) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`tool ${fullName} never registered for ${sessionId}`);
+}
+
 /** 让真实 turn 流过：首个请求要 tool-call（若工具在面），随后 stop 并回显 tool 结果文本。 */
 function createToolCallingExecutor(
   toolName: string,
@@ -138,11 +172,11 @@ function createToolCallingExecutor(
   return {
     generateText: async (request) => {
       requests.push(request);
-      const priorCalls = requests
-        .flatMap((r) => r.messages)
-        .filter((m) => m.role === "tool").length;
+      // 每轮 turn 恰好调一次：turn 的第一个请求末尾是 user 输入，续跑请求
+      // 末尾是上一步的 tool 结果——last-role 判据让每轮都真实走一遍调用。
+      const lastRole = request.messages.at(-1)?.role;
       const offered = request.tools?.some((tool) => tool.name === toolName);
-      if (offered && priorCalls === 0) {
+      if (offered && lastRole !== "tool") {
         return {
           finishReason: "tool-calls",
           text: "",
@@ -483,8 +517,11 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
     }
   }, 60_000);
 
-  it("CMCP08 transport detach kills children; adopted resume without mcpServers reconnects the same session/history", async () => {
-    const fixture = await createAcpMcpCoreFixture();
+  it("CMCP08 idle detach kills children; a different server owner adopts without mcpServers, keeping app+history and reconnecting", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = await createAcpMcpCoreFixture({
+      modelExecutor: createToolCallingExecutor("mcp__s1__echo", requests),
+    });
     const dir = await mkdtemp(join(tmpdir(), "cmcp08-"));
     const client1 = await fixture.connectRawClient();
     allowAllPermissions(client1);
@@ -492,17 +529,28 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       const sessionId = await createSession(client1, fixture, {
         mcpServers: [stdioWireServer("s1", dir, { label: "v1" })],
       });
+      // 先跑一轮真 turn 把 history 落进 session——收养必须保住它。
+      await client1.request(zcodeProtocolMethods.sessionSend, {
+        sessionId,
+        content: "seed-history-cmcp08",
+        inputId: "in-1",
+      });
+      await waitTurnRequests(requests, 2);
+      await waitIdle(client1, sessionId);
       const pid = await waitForFile(join(dir, "s1.pid"));
       expect(processAlive(pid)).toBe(true);
       const appBefore = fixture.apps.get(sessionId);
+      const ownerA = fixture.ownerOf(sessionId);
+      expect(ownerA).toBeDefined();
 
       // client socket 断开 = transport detach：软 detach 触发 client MCP suspend，
       // session 隔离 stdio 子进程必须死。
       client1.close();
       expect(await waitForExit(pid)).toBe(true);
 
-      // 新 client 连接 + resume 省略 mcpServers → 收养同 session（同 app、同
-      // 声明）并按 reconnect debt 补连——不是重建 runtime。
+      // 新 socket = 新 server（per-connection 生产语义）；resume 省略
+      // mcpServers → 走 locateSessionOwner 收养 detached 旧 owner 的常驻
+      // session，同一 app/runtime，不是重建。
       const client2 = await fixture.connectRawClient();
       allowAllPermissions(client2);
       try {
@@ -511,13 +559,128 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
           workspace: workspaceRef(fixture),
         });
         expect(fixture.apps.get(sessionId)).toBe(appBefore);
+        const ownerB = fixture.ownerOf(sessionId);
+        expect(ownerB).toBeDefined();
+        // owner 转移可观测：收养方是另一个 server 实例。
+        expect(ownerB).not.toBe(ownerA);
+        expect(ownerA!.isDetached()).toBe(true);
+        expect(ownerB!.isDetached()).toBe(false);
+
+        // history 保留：收养后的 session 仍带上一轮 seeded user 输入。
+        const history = await client2.request<{ messages: unknown[] }>(
+          zcodeProtocolMethods.sessionMessages,
+          { sessionId },
+        );
+        expect(
+          history.messages.some((m) =>
+            JSON.stringify(m).includes("seed-history-cmcp08"),
+          ),
+        ).toBe(true);
+
+        // 收养 reconnect 起新代子进程，下一轮 tool call 真实走通。
         const pid2 = await waitForFile(join(dir, "s1.pid"), 400);
         expect(processAlive(pid2)).toBe(true);
         expect(pid2).not.toBe(pid);
+        const before = requests.length;
+        await client2.request(zcodeProtocolMethods.sessionSend, {
+          sessionId,
+          content: "post-adopt",
+          inputId: "in-2",
+        });
+        await waitTurnRequests(requests, before + 1);
+        await waitIdle(client2, sessionId);
+        const post = requests.slice(before);
+        const toolMessages = post
+          .flatMap((r) => r.messages)
+          .filter((m) => m.role === "tool")
+          .map((m) => JSON.stringify(m));
+        expect(toolMessages.some((m) => m.includes(`echo[v1@${pid2}]`))).toBe(true);
       } finally {
         client2.close();
       }
     } finally {
+      client1.close();
+      await fixture.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("CMCP08 active detach: blocked in-flight tool call dies with the socket owner; the turn/session is not destroyed and adopts cleanly", async () => {
+    const requests: ModelRequest[] = [];
+    // 首轮模型要 echo；fixture HOLD_CALL 让真实 tools/call 永远挂起。
+    const fixture = await createAcpMcpCoreFixture({
+      modelExecutor: {
+        generateText: async (request: ModelRequest) => {
+          requests.push(request);
+          if (requests.length === 1) {
+            return {
+              finishReason: "tool-calls",
+              toolCalls: [
+                { id: "call-blocked", name: "mcp__s1__echo", input: { text: "blocked" } },
+              ],
+            } as ModelResult;
+          }
+          return {
+            finishReason: "stop",
+            text: "done",
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          } as ModelResult;
+        },
+      },
+    });
+    const dir = await mkdtemp(join(tmpdir(), "cmcp08-active-"));
+    const client1 = await fixture.connectRawClient();
+    allowAllPermissions(client1);
+    try {
+      const sessionId = await createSession(client1, fixture, {
+        mcpServers: [stdioWireServer("s1", dir, { label: "v1", holdCall: true })],
+      });
+      const pid = await waitForFile(join(dir, "s1.pid"));
+      // send 在后台跑：模型请求已发出并返回 toolCalls，真实 tools/call 被
+      // fixture 闸门挡住——detach 时该调用仍在飞行。
+      void client1
+        .request(zcodeProtocolMethods.sessionSend, {
+          sessionId,
+          content: "call-blocked-tool",
+          inputId: "in-1",
+        })
+        .catch(() => undefined);
+      await waitTurnRequests(requests, 1);
+      // 让 tools/call 真的进入 MCP adapter（等一小拍，send ACK 后调度）。
+      await new Promise((r) => setTimeout(r, 300));
+      const appBefore = fixture.apps.get(sessionId);
+      const ownerA = fixture.ownerOf(sessionId);
+
+      client1.close();
+      // session 隔离子进程必须随 detach 立即死。
+      expect(await waitForExit(pid)).toBe(true);
+      // 整个 turn/session 不被销毁：app 仍 resident 在旧 owner。
+      expect(fixture.apps.get(sessionId)).toBe(appBefore);
+      expect(fixture.ownerOf(sessionId)).toBe(ownerA);
+
+      // 新 owner 收养 + resume：session 可用，下一轮正常完成（此轮不调工具）。
+      const client2 = await fixture.connectRawClient();
+      allowAllPermissions(client2);
+      try {
+        await client2.request(zcodeProtocolMethods.sessionResume, {
+          sessionId,
+          workspace: workspaceRef(fixture),
+        });
+        expect(fixture.apps.get(sessionId)).toBe(appBefore);
+        expect(fixture.ownerOf(sessionId)).not.toBe(ownerA);
+        const before = requests.length;
+        await client2.request(zcodeProtocolMethods.sessionSend, {
+          sessionId,
+          content: "after-active-detach",
+          inputId: "in-2",
+        });
+        await waitTurnRequests(requests, before + 1);
+        await waitIdle(client2, sessionId);
+      } finally {
+        client2.close();
+      }
+    } finally {
+      client1.close();
       await fixture.close();
       await rm(dir, { recursive: true, force: true });
     }
@@ -537,12 +700,10 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
           requestCount += 1;
           if (requestCount === 3) await turnGate; // 第二轮首个请求阻塞 → parent active
           const tools = request.tools ?? [];
-          // tool 结果落在当前请求的 messages 里——必须连当前请求一起数，
-          // 否则第二个请求会再次发 tool-calls 形成无限调用环。
-          const alreadyCalled = requests
-            .flatMap((r) => r.messages)
-            .some((m) => m.role === "tool");
-          if (tools.some((t) => t.name === "mcp__fork__echo") && !alreadyCalled) {
+          // 每轮一次调用：末条消息是 tool 结果就停（parent/child 各自的
+          // transcript 互不干扰——跨会话扫全部请求会误判已调过）。
+          const lastRole = request.messages.at(-1)?.role;
+          if (tools.some((t) => t.name === "mcp__fork__echo") && lastRole !== "tool") {
             return {
               finishReason: "tool-calls",
               text: "",
@@ -709,11 +870,12 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       expect(childId).toBeTruthy();
       expect(childId).not.toBe(sessionId);
 
-      // parent 轮取消闸门放行 → 正常跑完；child 已存在。
+      // parent 轮取消闸门放行 → 正常跑完；child 已存在。整轮边界落地
+      // pending v2：v1 连接（parentPid）此刻被替换——进程回收异步发生，
+      // 这里只断回合正常完成、app 未取消。
       gate();
       await send2;
       await waitIdle(client, sessionId);
-      expect(processAlive(parentPid)).toBe(true);
 
       // child 的 accepted 声明是 pending v2（落在 config.mcp.servers，
       // 不是 desired——fork 物化时直接盖进 runtimeConfig）。
@@ -722,19 +884,48 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       const childServers = childApp!.runtime.getEffectiveMcpConfig()?.servers;
       expect(childServers?.fork?.type).toBe("stdio");
       // 继承的是 pending v2 声明，不是 parent 连接的 v1 快照。
-      expect(childServers?.fork?.env?.MCP_FIXTURE_LABEL).toBe("v2");
-      // child 经真实协议 resume/send 调用工具：结果带 v2 标签（独立连接）。
+      expect(
+        (childServers?.fork as { env?: Record<string, string> } | undefined)?.env
+          ?.MCP_FIXTURE_LABEL,
+      ).toBe("v2");
+      // child 经真实协议 resume/send 跑一轮：scripted model 调继承的
+      // mcp__fork__echo，tool 结果回到下一个 child ModelRequest——全程不走
+      // callTool 旁路。等 child 的 session 连接+工具注册完成再 send。
       await client.request(zcodeProtocolMethods.sessionResume, {
         sessionId: childId,
         workspace: workspaceRef(fixture),
       });
-      const childResult = await childApp!.runtime.getMcpPort()?.callTool({
+      await waitForToolRegistered(fixture, String(childId), "fork", "echo");
+      const childRequestsBefore = requests.length;
+      await client.request(zcodeProtocolMethods.sessionSend, {
+        sessionId: String(childId),
+        content: "child turn",
+        inputId: "child-in-1",
+      });
+      await waitTurnRequests(requests, childRequestsBefore + 2);
+      await waitIdle(client, String(childId));
+      // child 的 tool 结果：v2 标签 + 独立 pid（与 parent 连接不同进程）。
+      const childToolText = requests
+        .slice(childRequestsBefore)
+        .flatMap((r) => r.messages)
+        .filter((m) => m.role === "tool")
+        .map((m) => JSON.stringify(m))
+        .join("\n");
+      expect(childToolText).toContain("echo[v2@");
+      const childPid = Number(/echo\[v2@(\d+)\]/.exec(childToolText)?.[1]);
+      expect(childPid).toBeGreaterThan(0);
+      // parent 边界后已切到 v2 连接——child 必须是另一台进程（session 隔离）。
+      const parentEcho = await app.runtime.getMcpPort()?.callTool({
         serverName: "fork",
         toolName: "echo",
-        arguments: { text: "child" },
+        arguments: { text: "parent-alive" },
       });
-      expect(childResult).toBeDefined();
-      expect(JSON.stringify(childResult)).toContain("echo[v2@");
+      const parentLivePid = Number(
+        /echo\[v2@(\d+)\]/.exec(JSON.stringify(parentEcho))?.[1],
+      );
+      expect(parentLivePid).toBeGreaterThan(0);
+      expect(childPid).not.toBe(parentLivePid);
+      expect(childPid).not.toBe(parentPid);
 
       // 凭据不落盘：全 rootDir 扫描 sentinel，除 pid/label 外不得出现 CRED 值。
       const hits = await scanDirForNeedle(fixture.rootDir, SENTINEL_CRED);
@@ -796,21 +987,170 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
     }
   }, 60_000);
 
-  it("CMCP05 goal continuation: continueActiveTargetIfIdle with a persisted target runs a real turn on the post-apply toolset", async () => {
+  it("CMCP05 credential swap mid-turn: staged apply keeps OLD connection for the whole turn; queued next turn uses NEW", async () => {
     const requests: ModelRequest[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const fixture = await createAcpMcpCoreFixture({
       modelExecutor: {
         generateText: async (request: ModelRequest) => {
           requests.push(request);
+          const index = requests.length;
+          const toolCalls = {
+            finishReason: "tool-calls",
+            text: "",
+            toolCalls: [{ id: `call-${index}`, name: "mcp__s1__echo", input: { text: "ping" } }],
+            usage: {},
+          } as ModelResult;
+          const stop = {
+            finishReason: "stop",
+            text: "done",
+            usage: {},
+          } as ModelResult;
+          // turn 1: req1 调 echo → req2 被闸门挡住（apply 不得进入本轮）→ 放行后
+          // 再调 echo → req3 stop。queued turn 2: req4 调 echo → req5 stop。
+          if (index === 1) return toolCalls;
+          if (index === 2) {
+            await gate;
+            return toolCalls;
+          }
+          if (index === 3) return stop;
+          if (index === 4) return toolCalls;
+          return stop;
+        },
+      },
+    });
+    const dir = await mkdtemp(join(tmpdir(), "cmcp05-swap-"));
+    const client = await fixture.connectRawClient();
+    allowAllPermissions(client);
+    const wire = (auth: string) =>
+      stdioWireServer("s1", dir, {
+        label: "gen",
+        versionEnv: "FAKE_AUTH",
+        env: { FAKE_AUTH: auth },
+      });
+    try {
+      // 同名、同 command/args，只换 FAKE_AUTH——credential-only 配置漂移；
+      // fixture 把 env 值映成无害代际标签（gen-v1/gen-v2），token 不回显。
+      const sessionId = await createSession(client, fixture, {
+        mcpServers: [wire("v1")],
+      });
+      const pidOld = await waitForFile(join(dir, "s1.pid"));
+      await waitForToolRegistered(fixture, sessionId, "s1", "echo");
+
+      await client.request(zcodeProtocolMethods.sessionSend, {
+        sessionId,
+        content: "turn-one",
+        inputId: "in-1",
+      });
+      await waitTurnRequests(requests, 2, 120); // req2 已发出并阻塞在闸门
+
+      // turn 活跃期间：下一 prompt 走真实 queue admission（steer lane →
+      // steerTurn 排队），再 resume 仅改 FAKE_AUTH=v2——两处都必须等到整轮
+      // 边界才生效。
+      const steerAck = await client.request<{ steerQueued?: { queueLength: number } }>(
+        zcodeProtocolMethods.sessionSend,
+        {
+          sessionId,
+          content: "turn-two-queued",
+          delivery: "steer",
+          inputId: "in-2",
+        },
+      );
+      expect(steerAck.steerQueued?.queueLength).toBe(1);
+      await client.request(zcodeProtocolMethods.sessionResume, {
+        sessionId,
+        mcpServers: [wire("v2")],
+      });
+      // staged 证明：阻塞未放行前，queued turn 未启动、OLD 子进程仍存活。
+      expect(requests.length).toBe(2);
+      expect(processAlive(pidOld)).toBe(true);
+      const appliedMidTurn =
+        fixture.apps.get(sessionId)!.runtime.getEffectiveMcpConfig();
+      expect(JSON.stringify(appliedMidTurn)).toContain('"FAKE_AUTH":"v1"');
+      expect(JSON.stringify(appliedMidTurn)).not.toContain('"FAKE_AUTH":"v2"');
+
+      release();
+      // turn 1 跑完：req2 的 echo 与 req3 里的 tool 结果都还是旧代（gen-v1@pidOld）。
+      await waitTurnRequests(requests, 3);
+      const turnOneToolText = requests
+        .slice(0, 3)
+        .flatMap((r) => r.messages)
+        .filter((m) => m.role === "tool")
+        .map((m) => JSON.stringify(m))
+        .join("\n");
+      expect(turnOneToolText).toContain(`echo[gen-v1@${pidOld}]`);
+
+      // 整轮边界：staged apply 落地（v2 新 PID），steer 队列项不会自动开新
+      // turn（服务端不擅自开新回合，队列由客户端 flush）——idle 后客户端
+      // flush 重发，turn 2 的 req4/req5 落在新代连接上。
+      await waitIdle(client, sessionId);
+      let pidNew = pidOld;
+      for (let i = 0; i < 200 && pidNew === pidOld; i += 1) {
+        pidNew = Number((await readFile(join(dir, "s1.pid"), "utf8")).trim());
+        if (pidNew === pidOld) await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(pidNew).not.toBe(pidOld);
+      expect(processAlive(pidNew)).toBe(true);
+      // 客户端 flush 队列项 → turn 2。
+      await client.request(zcodeProtocolMethods.sessionSend, {
+        sessionId,
+        content: "turn-two-flush",
+        inputId: "in-3",
+      });
+      await waitTurnRequests(requests, 5);
+      await waitIdle(client, sessionId);
+      // turn 2 新增的 tool 结果是新代——req5 的消息含整段 transcript（turn 1
+      // 的 gen-v1 结果本就在其中），所以只取 turn 2 触发的最新一条。
+      const turnTwoToolMessages = requests[4]!.messages.filter(
+        (m) => m.role === "tool",
+      );
+      const latestToolText = JSON.stringify(turnTwoToolMessages.at(-1));
+      expect(latestToolText).toContain(`echo[gen-v2@${pidNew}]`);
+      expect(latestToolText).not.toContain("gen-v1");
+      // 旧代子进程在整轮边界后才被回收。
+      expect(await waitForExit(pidOld)).toBe(true);
+    } finally {
+      release();
+      client.close();
+      await fixture.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("CMCP05 goal continuation: change staged during an active turn is picked up by continueActiveTargetIfIdle's next turn", async () => {
+    const requests: ModelRequest[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fixture = await createAcpMcpCoreFixture({
+      modelExecutor: {
+        generateText: async (request: ModelRequest) => {
+          requests.push(request);
+          const index = requests.length;
+          if (index === 1) {
+            await gate;
+            return {
+              finishReason: "tool-calls",
+              text: "",
+              toolCalls: [
+                { id: "call-g1", name: "mcp__s1__echo", input: { text: "seed" } },
+              ],
+              usage: {},
+            } as ModelResult;
+          }
           return {
             finishReason: "stop",
             text: "done",
-            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            usage: {},
           } as ModelResult;
         },
       },
     });
-    const dir = await mkdtemp(join(tmpdir(), "cmcp05-"));
+    const dir = await mkdtemp(join(tmpdir(), "cmcp05-goal-"));
     const client = await fixture.connectRawClient();
     allowAllPermissions(client);
     try {
@@ -818,25 +1158,38 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
         mcpServers: [stdioWireServer("s1", dir, { label: "v1" })],
       });
       await waitForFile(join(dir, "s1.pid"));
-      await client.request(zcodeProtocolMethods.sessionSend, {
-        sessionId,
-        content: "seed",
-        inputId: "in-1",
-      });
-      await waitTurnRequests(requests, 1);
-      await waitIdle(client, sessionId);
-      // turn 1 看到的是 v1 工具面。
-      expect(requests.at(-1)!.tools?.some((t) => t.name === "mcp__s1__echo")).toBe(true);
+      await waitForToolRegistered(fixture, sessionId, "s1", "echo");
+      void client
+        .request(zcodeProtocolMethods.sessionSend, {
+          sessionId,
+          content: "seed",
+          inputId: "in-1",
+        })
+        .catch(() => undefined);
+      await waitTurnRequests(requests, 1); // req1 阻塞在闸门内，turn 活跃
 
-      // 会话空转时换成 v2（换 server 名使工具名可区分代际）。
+      // turn 活跃期间 resume 换 server 名（s1→s2）：只能 staged，不能落地。
       await client.request(zcodeProtocolMethods.sessionResume, {
         sessionId,
         mcpServers: [stdioWireServer("s2", dir, { label: "v2" })],
       });
-      await waitForFile(join(dir, "s2.pid"));
+      const stagedEffective =
+        fixture.apps.get(sessionId)!.runtime.getEffectiveMcpConfig()?.servers;
+      expect(stagedEffective?.s1).toBeDefined();
+      expect(stagedEffective?.s2).toBeUndefined();
 
-      // 持久化 active target，经真实 continueActiveTargetIfIdle → 目标续跑命令
-      // → 新 turn admission；续跑的 ModelRequest 必须看见 apply 后的 v2 工具面。
+      release();
+      await waitTurnRequests(requests, 2);
+      await waitIdle(client, sessionId);
+      // 本轮的 tool 结果来自旧 s1 连接（staged 没有中途换连接）。
+      const turnToolText = requests
+        .slice(0, 2)
+        .flatMap((r) => r.messages)
+        .filter((m) => m.role === "tool")
+        .map((m) => JSON.stringify(m))
+        .join("\n");
+      expect(turnToolText).toContain("echo[v1@");
+
       // 协议 create 经 resume 语义把 runtime.sessionPersisted 直接置真，sqlite
       // session 行并不写（registry 是 metadata 权威）；目标表 FK 需要该行，
       // 补写与 persistSession 同构的最小行后走真实 createTarget。
@@ -863,8 +1216,141 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       expect(turn).not.toBeNull();
       const continuation = requests.slice(before)[0];
       expect(continuation).toBeDefined();
+      // staged 的 s2 在续跑 admission 边界落地——续跑 ModelRequest 看见新代。
       expect(continuation.tools?.some((t) => t.name === "mcp__s2__echo")).toBe(true);
       expect(continuation.tools?.some((t) => t.name === "mcp__s1__echo")).toBe(false);
+    } finally {
+      release();
+      client.close();
+      await fixture.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // CMCP13：故意的连接失败把唯一 sentinel 塞进错误文本——spawn ENOENT 的
+  // message 必然回显 command 路径；env/header 值也埋 sentinel。产品面
+  // （logger 输出、session events、session/read 快照、持久化 transcript、
+  // storage 落盘文件）只允许结构化类别/计数，不得回显任何 client 值。
+  // 任一命中即 fail —— 命中处就是真实的凭据泄漏生产者。
+  // KNOWN LEAK（rework4 评审确认，待 privacy-boundary 设计，不许悄悄修）：
+  // packages/adapters/src/mcp/index.ts:1938 `failConnection` 的 warn 日志
+  // context.error = 原始 displayMessage（error.message），stdio spawn ENOENT
+  // 时回显整条 client command 路径——sentinel 命中 1 条
+  // event="mcp.server.failed" 记录。stderr 面已由 sanitizeMcpStdioStderr
+  // 覆盖；其余四面无命中。修复决策权在 lead（脱敏边界设计）。
+  it("CMCP13 connect-failure diagnostics never echo client-supplied values", async () => {
+    const logs: Array<{
+      level: string;
+      message: string;
+      error?: string;
+      context?: unknown;
+    }> = [];
+    const makeCapturingLogger = (parent?: LogContext): Logger => {
+      const capture = (level: string, message: string, error?: Error, context?: LogContext) => {
+        logs.push({
+          level,
+          message,
+          ...(error ? { error: `${error.name}: ${error.message}` } : {}),
+          context: { ...parent, ...context },
+        });
+      };
+      return {
+        debug: (message, context) => capture("debug", message, undefined, context),
+        info: (message, context) => capture("info", message, undefined, context),
+        warn: (message, context) => capture("warn", message, undefined, context),
+        error: (message, error, context) => capture("error", message, error, context),
+        child: (context) => makeCapturingLogger({ ...parent, ...context }),
+      };
+    };
+    const loggerFactory: LoggerFactory = {
+      createLogger: () => makeCapturingLogger(),
+      withContext: (context) => makeCapturingLogger(context),
+      setLevel: () => undefined,
+    };
+    const fixture = await createAcpMcpCoreFixture({ loggerFactory });
+    const dir = await mkdtemp(join(tmpdir(), "cmcp13-"));
+    const client = await fixture.connectRawClient();
+    allowAllPermissions(client);
+    const notifications: string[] = [];
+    client.onNotification((message) => notifications.push(JSON.stringify(message)));
+    try {
+      // stdio command 指向不存在的 sentinel 路径：spawn ENOENT 文本里带路径；
+      // env 值同样埋 sentinel——两个 client 值都必须被脱敏层挡住。
+      const badCommand = join(dir, SENTINEL_CRED, "missing");
+      const sessionId = await createSession(client, fixture, {
+        mcpServers: [
+          {
+            name: "bad",
+            scope: "user",
+            command: badCommand,
+            args: [],
+            env: [
+              { name: "FAKE_AUTH", value: SENTINEL_CRED },
+              { name: "MCP_FIXTURE_PID_FILE", value: join(dir, "bad.pid") },
+            ],
+            isolation: "session",
+            protocolVersion: "legacy",
+          },
+        ],
+      });
+      const app = fixture.apps.get(sessionId)!;
+      // 等失败 settle：port 状态出现 bad=failed（或连接彻底缺席且 startup 完成）。
+      let settled = false;
+      for (let i = 0; i < 400 && !settled; i += 1) {
+        const statuses = (await app.runtime.getMcpPort()?.status()) ?? {};
+        const bad = (statuses as Record<string, { status?: string }>).bad;
+        if (bad?.status === "failed" || bad?.status === "error") settled = true;
+        else if (
+          logs.some(
+            (entry) =>
+              (entry.context as { event?: string })?.event === "mcp.apply.connect_failed" ||
+              (entry.context as { event?: string })?.event ===
+                "mcp.startup.connect_failed",
+          )
+        )
+          settled = true;
+        else await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(settled).toBe(true);
+
+      // 五个面一次收齐再断言——单次运行给出完整泄漏面（face:命中明细）。
+      const leaks: string[] = [];
+
+      // 面 1：产品 logger 全部记录。
+      for (const entry of logs) {
+        if (JSON.stringify(entry).includes(SENTINEL_CRED)) {
+          leaks.push(
+            `logger:${(entry.context as { event?: string })?.event ?? "unknown"}:${entry.level}`,
+          );
+        }
+      }
+
+      // 面 2：协议 notification 流。
+      for (const n of notifications) {
+        if (n.includes(SENTINEL_CRED)) {
+          leaks.push(`notification:${n.slice(0, 80)}`);
+        }
+      }
+
+      // 面 3：session/read 快照（消息/状态投影视图）。
+      const snapshot = await client.request(
+        zcodeProtocolMethods.sessionRead,
+        { sessionId },
+      );
+      if (JSON.stringify(snapshot).includes(SENTINEL_CRED)) leaks.push("sessionRead");
+
+      // 面 4：持久化 transcript（sessionStore 是真实 SQLite）。
+      const persisted = await fixture.sessionStore.messages({
+        sessionID: sessionId as SessionId,
+      });
+      if (JSON.stringify(persisted).includes(SENTINEL_CRED)) leaks.push("sessionStore");
+
+      // 面 5：storage/db/workspace 全部落盘文件。
+      for (const hit of await scanDirForNeedle(fixture.rootDir, SENTINEL_CRED)) {
+        leaks.push(`file:${hit}`);
+      }
+
+      expect(leaks).toEqual([]);
     } finally {
       client.close();
       await fixture.close();

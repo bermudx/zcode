@@ -7,6 +7,10 @@
 //   MCP_FIXTURE_LABEL    — harmless generation label (e.g. "v1"/"v2") stamped in
 //                          echo output; lets tests prove which connection answered.
 //   MCP_FIXTURE_HOLD_INITIALIZE=1 — never answer initialize (blocked handshake).
+//   MCP_FIXTURE_HOLD_CALL=1 — never answer tools/call (barrier for detach tests).
+//   MCP_FIXTURE_VERSION_ENV — name of an env var whose fake value is appended to
+//                          the label, so a credential-only config change yields
+//                          an observable generation change (fake constants only).
 // Tool results carry pid + label + echoed input only — env/credential values are
 // never read into or echoed back from results.
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -20,7 +24,11 @@ if (process.env.MCP_FIXTURE_PID_DIR) {
   writeFileSync(join(process.env.MCP_FIXTURE_PID_DIR, `${process.pid}.pid`), String(process.pid));
 }
 const holdInitialize = process.env.MCP_FIXTURE_HOLD_INITIALIZE === "1";
-const label = process.env.MCP_FIXTURE_LABEL ?? "unlabeled";
+const holdCall = process.env.MCP_FIXTURE_HOLD_CALL === "1";
+const baseLabel = process.env.MCP_FIXTURE_LABEL ?? "unlabeled";
+const versionEnv = process.env.MCP_FIXTURE_VERSION_ENV;
+// 版本只来自测试显式给的 fake env 值；真实 token 从不进 echo 输出。
+const label = versionEnv ? `${baseLabel}-${process.env[versionEnv] ?? "unset"}` : baseLabel;
 
 function respond(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -76,6 +84,7 @@ process.stdin.on("data", (chunk) => {
       continue;
     }
     if (message.method === "tools/call") {
+      if (holdCall) continue; // 工具调用被闸门挡住——detach 必须中止挂起调用
       respond({
         jsonrpc: "2.0",
         id: message.id,

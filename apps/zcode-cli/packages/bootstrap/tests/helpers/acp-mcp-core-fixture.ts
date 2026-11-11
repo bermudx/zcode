@@ -1,14 +1,16 @@
-// issue #31 / CMCP 矩阵共享基座：真实 ZCodeProtocolAgentServer + 真实 unix
-// socket（listenProtocolSocket + ZCodeProtocolNdjsonConnection，与生产
-// entrypoint 同一条 attach 接线），app 由 createRegistryBackedTestApp 提供
-// （真实 createZCodeApp + fake provider executor）。bootstrap 与 cli 测试共用；
-// 连接客户端由调用方用各自包的 transport 创建（socketPath 即可）。
+// issue #31 / CMCP 矩阵共享基座：与生产 entrypoint 同构——每接受一条 socket
+// 就起一个真实 ZCodeProtocolAgentServer（共享 disposable sessionStore /
+// providerRegistry / apps map），每条连接把 notificationSink /
+// post-response batch / markClientDetached 绑到自己的 server。
+// locateSessionOwner 扫描其他已 detach 且仍常驻该 session 的 server，
+// 走真实 claim/收养转移（context.adoptDetachedSession）。bootstrap 与 cli
+// 测试共用；连接客户端由调用方用各自包的 transport 创建（socketPath 即可）。
 // 全部状态落在独立 temp root：ZCODE_STORAGE_DIR 显式重定向，不写 operator HOME。
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect, type Socket } from "node:net";
-import type { SessionStorePort } from "@zcode/contracts";
+import type { LoggerFactory, SessionStorePort } from "@zcode/contracts";
 import { createSqliteSessionStore } from "@zcode/adapters/storage";
 import type { ZCodeApp } from "../../src/app/types.js";
 import { ZCodeProtocolAgentServer } from "../../src/zcode-protocol/server.js";
@@ -25,6 +27,8 @@ export interface AcpMcpCoreFixtureOptions {
   /** ACP core 语义默认 true；需要 plugin 行为时显式关闭。 */
   noPlugins?: boolean;
   version?: string;
+  /** 注入捕获式 loggerFactory（CMCP13 诊断/泄漏断言）；缺省走默认。 */
+  loggerFactory?: LoggerFactory;
 }
 
 export interface AcpMcpCoreFixture {
@@ -32,10 +36,13 @@ export interface AcpMcpCoreFixture {
   readonly rootDir: string;
   readonly workspace: string;
   readonly socketPath: string;
-  readonly server: ZCodeProtocolAgentServer;
   readonly sessionStore: SessionStorePort;
   /** 协议 create 出来的真实 app（按 sessionId）；仅用于观测与闸门编排。 */
   readonly apps: Map<string, ZCodeApp>;
+  /** 每条已接受 socket 一个 server（与生产 per-connection core 同构）。 */
+  readonly servers: Set<ZCodeProtocolAgentServer>;
+  /** 给定 sessionId 当前挂在哪个 server 的 resident 表上（owner 观测）。 */
+  ownerOf(sessionId: string): ZCodeProtocolAgentServer | undefined;
   /**
    * 真实 socket 上的最小 NDJSON client（bootstrap 侧测试用；cli 侧走
    * connectAttachClient/AcpCoreSessions）。每行入站 JSON 都先 parse——
@@ -73,38 +80,55 @@ export async function createAcpMcpCoreFixture(
   // app 侧 env 只带显式 fixture 变量：storage 重定向到 temp root，不读 operator 环境。
   const appEnv = { ZCODE_STORAGE_DIR: storageDir };
   const apps = new Map<string, ZCodeApp>();
-
+  const servers = new Set<ZCodeProtocolAgentServer>();
   const connections = new Set<ZCodeProtocolNdjsonConnection>();
-  const server = new ZCodeProtocolAgentServer({
-    cwd: workspace,
-    env: appEnv,
-    noPlugins,
-    sessionStore,
-    createZCodeApp: (appOptions) => {
-      const created = createRegistryBackedTestApp({
-        ...appOptions,
-        env: appEnv,
-        // runtime 也拿到同一 store：persistSession/目标续跑需要真实 session 行。
-        sessionStore,
-        skipUserConfig: true,
-        noPlugins,
-        providerRegistry,
-        ...(options.modelExecutor ? { modelExecutor: options.modelExecutor } : {}),
-      });
-      return Promise.resolve(created).then((app) => {
-        apps.set(String(app.sessionId), app);
-        return app;
-      });
-    },
-    // 与生产 entrypoint 同语义：只把 detached 且仍 resident 的 session 交收养。
-    locateSessionOwner: (sessionId) =>
-      server.isDetached() && server.hasResidentSession(sessionId) ? server : undefined,
-    version: options.version ?? "0.0.0-test",
-  });
+  const version = options.version ?? "0.0.0-test";
 
   const listener = await listenProtocolSocket({
     socketPath,
     onConnection: (socket: Socket) => {
+      // 每连接一个 server：sink/detach 标记只绑本连接，另一 socket 断开
+      // 不会误伤这里的 sessions；收养由 locateSessionOwner 跨 server 完成。
+      const server: ZCodeProtocolAgentServer = new ZCodeProtocolAgentServer({
+        cwd: workspace,
+        env: appEnv,
+        noPlugins,
+        sessionStore,
+        ...(options.loggerFactory ? { loggerFactory: options.loggerFactory } : {}),
+        createZCodeApp: (appOptions) => {
+          const created = createRegistryBackedTestApp({
+            ...appOptions,
+            env: appEnv,
+            // runtime 也拿到同一 store：persistSession/目标续跑需要真实 session 行。
+            sessionStore,
+            skipUserConfig: true,
+            noPlugins,
+            providerRegistry,
+            ...(options.loggerFactory ? { loggerFactory: options.loggerFactory } : {}),
+            ...(options.modelExecutor ? { modelExecutor: options.modelExecutor } : {}),
+          });
+          return Promise.resolve(created).then((app) => {
+            apps.set(String(app.sessionId), app);
+            return app;
+          });
+        },
+        // 与生产 entrypoint 同语义：只把「其他」detached 且仍 resident 的
+        // session 交收养；绝不返回自己（finishDetachedSessionAdoption 也会挡）。
+        locateSessionOwner: (sessionId): ZCodeProtocolAgentServer | undefined => {
+          for (const candidate of servers) {
+            if (
+              candidate !== server &&
+              candidate.isDetached() &&
+              candidate.hasResidentSession(sessionId)
+            ) {
+              return candidate;
+            }
+          }
+          return undefined;
+        },
+        version,
+      });
+      servers.add(server);
       const connection = new ZCodeProtocolNdjsonConnection({
         clearPostResponseMessages: () => server.clearPostResponseMessages(),
         handleMessage: (message) => server.handleMessage(message),
@@ -115,19 +139,31 @@ export async function createAcpMcpCoreFixture(
       });
       connections.add(connection);
       connection.start();
-      server.setNotificationSink((notification) => connection.send(notification));
+      server.setNotificationSink(
+        (
+          notification: Parameters<
+            Parameters<typeof server.setNotificationSink>[0]
+          >[0],
+        ) => connection.send(notification),
+      );
     },
   });
 
   const rawClients = new Set<Socket>();
 
-  return {
+  const fixture: AcpMcpCoreFixture = {
     rootDir,
     workspace,
     socketPath,
-    server,
     sessionStore,
     apps,
+    servers,
+    ownerOf(sessionId) {
+      for (const candidate of servers) {
+        if (candidate.hasResidentSession(sessionId)) return candidate;
+      }
+      return undefined;
+    },
     async connectRawClient() {
       const socket = connect(socketPath);
       rawClients.add(socket);
@@ -228,12 +264,36 @@ export async function createAcpMcpCoreFixture(
     },
     async close() {
       for (const socket of rawClients) socket.destroy();
-      // listener.close 先毁掉已接受的 socket——transport 关闭会触发
-      // markClientDetached 软 detach，再 shutdown 收 server 与 store。
-      await listener.close().catch(() => undefined);
-      await server.shutdown().catch(() => undefined);
-      sessionStore.close();
-      await rm(rootDir, { recursive: true, force: true });
+      // listener.close 先毁掉已接受的 socket——transport 关闭会触发各自
+      // server 的 markClientDetached 软 detach，再逐个 shutdown 收 server。
+      // 清理失败必须让 teardown 显式失败，不能用 catch 吞掉泄漏。
+      const cleanupErrors: unknown[] = [];
+      try {
+        await listener.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      for (const server of servers) {
+        try {
+          await server.shutdown();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      try {
+        sessionStore.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        await rm(rootDir, { recursive: true, force: true });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(cleanupErrors, "acp-mcp core fixture teardown failed");
+      }
     },
   };
+  return fixture;
 }

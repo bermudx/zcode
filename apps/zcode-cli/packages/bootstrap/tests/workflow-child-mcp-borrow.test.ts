@@ -58,7 +58,7 @@ describe("workflow child borrows parent's live MCP port and effective config", (
   let sessionStore: SessionStorePort | undefined;
 
   afterEach(async () => {
-    sessionStore?.close?.();
+    await (sessionStore as unknown as { close?: () => Promise<void> } | undefined)?.close?.();
     sessionStore = undefined;
     if (tempRoot) await rm(tempRoot, { recursive: true, force: true });
     tempRoot = "";
@@ -79,7 +79,9 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       },
     });
     const app = await createRegistryBackedTestApp({
-      env: {},
+      env: { ZCODE_STORAGE_DIR: join(tempRoot, "storage") },
+      noPlugins: true,
+      skipUserConfig: true,
       modelExecutor: {
         generateText: async (request) => {
           requests.push(request);
@@ -92,7 +94,6 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       },
       runtimeConfig: { workingDirectory: tempRoot },
       sessionId: createSessionId("wf-parent"),
-      workingDirectory: tempRoot,
     });
     const parent = app.runtime;
     const mcpEnv = (label: string) => ({
@@ -202,7 +203,264 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       });
       expect(JSON.stringify(echo2)).toContain("echo[v2@");
     } finally {
-      await app.close();
+      await app.close?.();
+    }
+  }, 60_000);
+
+  // 4(a)：正常 workflow facade runner（app.runWorkflow → expert 装配线 →
+  // createWorkflowChildRuntime）走的 borrowedMcpConfig 与 script 构造器同一条
+  // applied 快照；runWorkflow 自身可能因 fake 模型输出在 phase 层失败，但
+  // child 的 ModelRequest 已经真实发出，足够断言工具面。
+  it("normal workflow facade runner (runWorkflow): child ModelRequest sees the parent's APPLIED MCP face per generation", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "workflow-facade-mcp-"));
+    const requests: ModelRequest[] = [];
+    sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
+    const app = await createRegistryBackedTestApp({
+      env: { ZCODE_STORAGE_DIR: join(tempRoot, "storage") },
+      noPlugins: true,
+      skipUserConfig: true,
+      modelExecutor: {
+        generateText: async (request) => {
+          requests.push(request);
+          return {
+            finishReason: "stop",
+            text: "child done",
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          } as ModelResult;
+        },
+      },
+      runtimeConfig: { workingDirectory: tempRoot },
+      sessionId: createSessionId("wf-facade-parent"),
+      sessionStore,
+    });
+    const parent = app.runtime;
+    const stdioServer = (label: string) => ({
+      type: "stdio" as const,
+      command: process.execPath,
+      args: [FIXTURE],
+      env: {
+        MCP_FIXTURE_PID_FILE: join(tempRoot, `${label}.pid`),
+        MCP_FIXTURE_LABEL: label,
+      },
+      isolation: "session" as const,
+      protocolVersion: "legacy" as const,
+    });
+    const runFacadeChild = async (): Promise<ModelRequest[]> => {
+      const before = requests.length;
+      // expert workflow 可能跑多 phase 或因 fake 输出中断；断言只需要
+      // 每次 run 至少一个 child ModelRequest。
+      await app.runWorkflow?.({ task: "borrow check" }).catch(() => undefined);
+      const produced = requests.slice(before);
+      if (produced.length === 0)
+        throw new Error("runWorkflow produced no child model request");
+      return produced;
+    };
+    const hasMcpTool = (rs: ModelRequest[]): boolean =>
+      rs.some((r) => (r.tools ?? []).some((t) => t.name.startsWith("mcp__")));
+
+    try {
+      // 代 1：无 MCP——facade child 工具面无 mcp__。
+      expect(hasMcpTool(await runFacadeChild())).toBe(false);
+
+      // 代 2：注入——facade child 看见 mcp__s1__echo。
+      await parent.configureMcpServers({ s1: stdioServer("v1") });
+      const pid = await waitForFile(join(tempRoot, "v1.pid"));
+      const injected = await runFacadeChild();
+      expect(hasMcpTool(injected)).toBe(true);
+      expect(
+        injected.some((r) =>
+          (r.tools ?? []).some((t) => t.name === "mcp__s1__echo"),
+        ),
+      ).toBe(true);
+      // 父连接不受影响。
+      expect(processAlive(pid)).toBe(true);
+      const parentEcho = await parent.getMcpPort()?.callTool({
+        serverName: "s1",
+        toolName: "echo",
+        arguments: { text: "parent" },
+      });
+      expect(JSON.stringify(parentEcho)).toContain("echo[v1@");
+
+      // 代 3：清空——facade child 看不到 mcp 工具。
+      await parent.configureMcpServers({});
+      expect(hasMcpTool(await runFacadeChild())).toBe(false);
+
+      // 代 4：再注入——facade child 再看见新代工具。
+      await parent.configureMcpServers({ s1: stdioServer("v2") });
+      const pid2 = await waitForFile(join(tempRoot, "v2.pid"));
+      expect(hasMcpTool(await runFacadeChild())).toBe(true);
+      expect(processAlive(pid2)).toBe(true);
+    } finally {
+      await app.close?.();
+    }
+  }, 60_000);
+
+  // 4(a) 加强：facade child 与 script child 都只借 APPLIED 快照——父 turn
+  // 阻塞期间 staged 的配置（含 pending 注入）对两者均不可见。
+  it("active parent turn stages config: both child constructors see the OLD applied face, not the pending one", async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "workflow-staged-mcp-"));
+    const requests: ModelRequest[] = [];
+    let releaseParentTurn: (() => void) | undefined;
+    const parentGate = new Promise<void>((resolve) => {
+      releaseParentTurn = resolve;
+    });
+    sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
+    const modelFactory = createTestModelFactoryFromAdapter({
+      async generateText(request: ModelRequest) {
+        requests.push(request);
+        return {
+          finishReason: "stop",
+          text: "child done",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        } as ModelResult;
+      },
+    });
+    const app = await createRegistryBackedTestApp({
+      env: { ZCODE_STORAGE_DIR: join(tempRoot, "storage") },
+      noPlugins: true,
+      skipUserConfig: true,
+      modelExecutor: {
+        generateText: async (request) => {
+          requests.push(request);
+          if (requests.length === 1) await parentGate; // 阻塞父 turn 首个请求
+          return {
+            finishReason: "stop",
+            text: "done",
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          } as ModelResult;
+        },
+      },
+      runtimeConfig: { workingDirectory: tempRoot },
+      sessionId: createSessionId("wf-staged-parent"),
+      sessionStore,
+    });
+    const parent = app.runtime;
+    const stdioServer = (label: string) => ({
+      type: "stdio" as const,
+      command: process.execPath,
+      args: [FIXTURE],
+      env: {
+        MCP_FIXTURE_PID_FILE: join(tempRoot, `${label}.pid`),
+        MCP_FIXTURE_LABEL: label,
+      },
+      isolation: "session" as const,
+      protocolVersion: "legacy" as const,
+    });
+
+    try {
+      // 父 turn 挂起期间注入 s1——必须 staged，不进本轮。
+      const parentTurn = parent.executeTurn("parent turn");
+      for (let i = 0; i < 200 && requests.length === 0; i += 1) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(requests.length).toBe(1);
+      await parent.configureMcpServers({ s1: stdioServer("staged") });
+
+      // script child（构造器路径）：mid-turn 构造只看到 OLD applied（空）。
+      const scriptChild = createScriptWorkflowAgentRuntime({
+        childSessionId: createSessionId("wf-staged-script"),
+        deps: {
+          agentTelemetry: createModelTelemetry().agentExecution,
+          appOptions: { env: {} },
+          appVersion: "0.0.0-test",
+          configResult: {
+            config: {
+              features: { skill: false },
+              modelStream: { idleTimeoutMs: 0 },
+              network: {},
+              skillOverrides: {},
+              skills: { enabled: false, roots: [] },
+            },
+          },
+          fileSystemPort: createNodeFileSystemAdapter(),
+          imageProcessorPort: {},
+          logger: undefined,
+          modelFactory,
+          permissionService: new PermissionService(defaultPermissionConfig),
+          runtime: parent,
+          runtimeConfig: { workingDirectory: tempRoot },
+          sessionId: app.sessionId,
+          sessionStore,
+          storageRoot: tempRoot,
+          workingDirectory: tempRoot,
+        } as unknown as ScriptWorkflowAgentRuntimeDeps,
+        request: { opts: {} } as never,
+        traceContext: { traceId: "wf-staged-script" } as never,
+      });
+      const scriptBefore = requests.length;
+      try {
+        await scriptChild.executeTurn("script child turn");
+      } finally {
+        await scriptChild.close().catch(() => undefined);
+      }
+      const scriptRequest = requests[scriptBefore];
+      expect(scriptRequest).toBeTruthy();
+      expect(
+        (scriptRequest.tools ?? []).some((t) => t.name.startsWith("mcp__")),
+      ).toBe(false);
+
+      // facade child（runWorkflow 装配线）：同样只看 OLD applied。
+      const facadeBefore = requests.length;
+      await app.runWorkflow?.({ task: "staged borrow check" }).catch(() => undefined);
+      const facadeRequests = requests.slice(facadeBefore);
+      expect(facadeRequests.length).toBeGreaterThan(0);
+      expect(
+        facadeRequests.some((r) =>
+          (r.tools ?? []).some((t) => t.name.startsWith("mcp__")),
+        ),
+      ).toBe(false);
+
+      // 放行父 turn → 边界处 staged apply 落地，子进程真实拉起。
+      releaseParentTurn!();
+      await parentTurn;
+      const pid = await waitForFile(join(tempRoot, "staged.pid"));
+      expect(processAlive(pid)).toBe(true);
+
+      // 边界后的新 child（script 路径）看见新 applied 面。
+      const afterBefore = requests.length;
+      const afterChild = createScriptWorkflowAgentRuntime({
+        childSessionId: createSessionId("wf-staged-after"),
+        deps: {
+          agentTelemetry: createModelTelemetry().agentExecution,
+          appOptions: { env: {} },
+          appVersion: "0.0.0-test",
+          configResult: {
+            config: {
+              features: { skill: false },
+              modelStream: { idleTimeoutMs: 0 },
+              network: {},
+              skillOverrides: {},
+              skills: { enabled: false, roots: [] },
+            },
+          },
+          fileSystemPort: createNodeFileSystemAdapter(),
+          imageProcessorPort: {},
+          logger: undefined,
+          modelFactory,
+          permissionService: new PermissionService(defaultPermissionConfig),
+          runtime: parent,
+          runtimeConfig: { workingDirectory: tempRoot },
+          sessionId: app.sessionId,
+          sessionStore,
+          storageRoot: tempRoot,
+          workingDirectory: tempRoot,
+        } as unknown as ScriptWorkflowAgentRuntimeDeps,
+        request: { opts: {} } as never,
+        traceContext: { traceId: "wf-staged-after" } as never,
+      });
+      try {
+        await afterChild.executeTurn("after boundary child");
+      } finally {
+        await afterChild.close().catch(() => undefined);
+      }
+      const afterRequest = requests[afterBefore];
+      expect(afterRequest).toBeTruthy();
+      expect(
+        (afterRequest.tools ?? []).some((t) => t.name === "mcp__s1__echo"),
+      ).toBe(true);
+    } finally {
+      releaseParentTurn?.();
+      await app.close?.();
     }
   }, 60_000);
 });

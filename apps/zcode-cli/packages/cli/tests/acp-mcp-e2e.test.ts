@@ -34,6 +34,15 @@ const NODE = process.execPath;
 const HTTP_TOKEN = "fake-http-token-31ac";
 const SSE_TOKEN = "fake-sse-token-91bd";
 
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function waitForFile(path: string, attempts = 400): Promise<number> {
   for (let i = 0; i < attempts; i += 1) {
     try {
@@ -176,13 +185,13 @@ test("CMCP01+CMCP11 allow: ACP new forwards stdio+http+sse; permission allow run
   const clientConnection = testClient.connect(clientStream);
   try {
     const agent = clientConnection.agent;
-    const init = await agent.request(methods.agent.initialize, {
+    const init = await agent.request<{ agentCapabilities?: { mcpCapabilities?: { http?: boolean; sse?: boolean } } }>(methods.agent.initialize, {
       protocolVersion: 1,
     });
     assert.equal(init.agentCapabilities?.mcpCapabilities?.http, true);
     assert.equal(init.agentCapabilities?.mcpCapabilities?.sse, true);
 
-    const created = await agent.request(methods.agent.session.new, {
+    const created = await agent.request<{ sessionId: string }>(methods.agent.session.new, {
       cwd: fixture.workspace,
       mcpServers: [
         stdioAcpServer("stdio1", dir, "e2e-stdio"),
@@ -230,7 +239,7 @@ test("CMCP01+CMCP11 allow: ACP new forwards stdio+http+sse; permission allow run
 
     // prompt → fake model 调用 client 注入的工具 → ACP request_permission
     // allow_once → 真实 fixture 执行 → 结果回到第二个 ModelRequest。
-    const prompt = await agent.request(methods.agent.session.prompt, {
+    const prompt = await agent.request<{ stopReason: string }>(methods.agent.session.prompt, {
       prompt: [{ text: "call the echo tool", type: "text" }],
       sessionId,
     });
@@ -289,7 +298,7 @@ test("CMCP11 reject: denied permission never reaches the MCP fixture and returns
   try {
     const agent = clientConnection.agent;
     await agent.request(methods.agent.initialize, { protocolVersion: 1 });
-    const created = await agent.request(methods.agent.session.new, {
+    const created = await agent.request<{ sessionId: string }>(methods.agent.session.new, {
       cwd: fixture.workspace,
       mcpServers: [
         {
@@ -300,7 +309,7 @@ test("CMCP11 reject: denied permission never reaches the MCP fixture and returns
         },
       ],
     });
-    const prompt = await agent.request(methods.agent.session.prompt, {
+    const prompt = await agent.request<{ stopReason: string }>(methods.agent.session.prompt, {
       prompt: [{ text: "call the echo tool", type: "text" }],
       sessionId: created.sessionId,
     });
@@ -309,20 +318,19 @@ test("CMCP11 reject: denied permission never reaches the MCP fixture and returns
     // 拒掉后 fixture 的 tools/call 计数是零；产品语义是 permission_denied →
     // 回合直接完成（拒绝结果进持久化 transcript，不折返第二个模型请求）。
     assert.equal(http.acceptedToolCalls(), 0);
-    const raw = await fixture.connectRawClient();
-    try {
-      const snapshot = await raw.request<{ session?: { messages?: unknown } }>(
-        "session/read",
-        { sessionId: created.sessionId },
-      );
-      assert.match(
-        JSON.stringify(snapshot.session?.messages ?? snapshot),
-        /denied|reject|permission/i,
-        "rejected tool result missing from persisted session transcript",
-      );
-    } finally {
-      raw.close();
-    }
+    // 会话仍由 ACP lane 的 socket 持有——另一个 socket 的 server 不能
+    // session/read 别人的 live session（per-socket 所有者语义）。持久化
+    // transcript 直接读共享 sessionStore：拒绝的 tool 结果必须落库。
+    const persisted = await fixture.sessionStore.messages({
+      sessionID: created.sessionId as Parameters<
+        typeof fixture.sessionStore.messages
+      >[0]["sessionID"],
+    });
+    assert.match(
+      JSON.stringify(persisted),
+      /denied|reject|permission/i,
+      "rejected tool result missing from persisted session transcript",
+    );
   } finally {
     await sessions.closeAll().catch(() => undefined);
     clientConnection.close();
@@ -332,13 +340,101 @@ test("CMCP11 reject: denied permission never reaches the MCP fixture and returns
   }
 });
 
+test("CMCP12 ACP boundary: malformed/duplicate mcpServers fail with INVALID_PARAMS and never echo client values", async () => {
+  const FAKE_SECRET = "FAKE_SENTINEL_CRED_b7c3d1e9";
+  const fixture = await createAcpMcpCoreFixture();
+  const sessions = new AcpCoreSessions({
+    env: {},
+    ensureConnected: async () => ({ socketPath: fixture.socketPath }),
+  });
+  const app = createAcpAgentApp({ sessions, version: "1.2.3" });
+  const { agentStream, clientStream } = createGuardedAcpTransport();
+  const agentConnection = app.connect(agentStream);
+  const testClient = client({ name: "e2e-client" });
+  const clientConnection = testClient.connect(clientStream);
+  try {
+    const agent = clientConnection.agent;
+    await agent.request(methods.agent.initialize, { protocolVersion: 1 });
+    const expectInvalidParams = async (mcpServers: unknown[], needle: string) => {
+      const error = await agent
+        .request(methods.agent.session.new, {
+          cwd: fixture.workspace,
+          mcpServers,
+        })
+        .then(
+          () => ({ ok: true as const }),
+          (reason: unknown) => ({ ok: false as const, reason }),
+        );
+      assert.equal(error.ok, false, `expected INVALID_PARAMS, got ${JSON.stringify(error)}`);
+      const text = JSON.stringify((error as { reason: unknown }).reason);
+      assert.match(text, /-32602|invalid.?params|INVALID_PARAMS/i);
+      // 错误消息只给形状/索引，绝不回显 command/env/header/URL 值。
+      assert.ok(
+        !text.includes(needle),
+        `error echoed client-supplied value: ${text.slice(0, 400)}`,
+      );
+    };
+
+    // (a) 缺 command 的 stdio 形状，command 值里埋 sentinel → invalid_params，
+    // 报错不带 sentinel。
+    await expectInvalidParams(
+      [
+        {
+          name: "bad",
+          type: "stdio",
+          env: [{ name: "AUTH", value: FAKE_SECRET }],
+        },
+      ],
+      FAKE_SECRET,
+    );
+    // (b) 重复 name + sentinel env → duplicate 报错，同样不回显值。
+    await expectInvalidParams(
+      [
+        stdioAcpServer("dup", await mkdtemp(join(tmpdir(), "acp-dup-")), "x"),
+        stdioAcpServer("dup", await mkdtemp(join(tmpdir(), "acp-dup-")), "y"),
+        { name: "dup", command: FAKE_SECRET },
+      ],
+      FAKE_SECRET,
+    );
+    // (c) http 形状缺 url（header 里埋 sentinel）→ invalid_params。
+    await expectInvalidParams(
+      [
+        {
+          name: "h",
+          type: "http",
+          headers: [{ name: "Authorization", value: `Bearer ${FAKE_SECRET}` }],
+        },
+      ],
+      FAKE_SECRET,
+    );
+    // 边界拒绝不得留下半个 session。
+    const sessionsBefore = [...fixture.apps.keys()];
+    assert.equal(sessionsBefore.length, 0);
+  } finally {
+    await sessions.closeAll().catch(() => undefined);
+    clientConnection.close();
+    agentConnection.close();
+    await fixture.close();
+  }
+});
+
 test("CMCP04 bound resume forwards mcpServers to the warm session; unchanged entries keep their connection", async () => {
   const requests: ModelRequest[] = [];
+  let releasePrompt: (() => void) | undefined;
+  const promptGate = new Promise<void>((resolve) => {
+    releasePrompt = resolve;
+  });
   const fixture = await createAcpMcpCoreFixture({
     modelExecutor: {
       generateText: async (request) => {
         requests.push(request);
-        return { finishReason: "stop", text: "done" } as ModelResult;
+        // 首个 prompt 的请求挂起，制造跨 resume 的 in-flight waiter。
+        if (requests.length === 1) await promptGate;
+        return {
+          finishReason: "stop",
+          text: "done",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        } as ModelResult;
       },
     },
   });
@@ -353,15 +449,17 @@ test("CMCP04 bound resume forwards mcpServers to the warm session; unchanged ent
   const testClient = client({ name: "e2e-client" }).onRequest(
     methods.client.session.requestPermission,
     ({ params }) => ({
-      outcome: "selected" as const,
-      optionId: pickOptionByKind(params.options, "allow_once"),
+      outcome: {
+        outcome: "selected" as const,
+        optionId: pickOptionByKind(params.options, "allow_once"),
+      },
     }),
   );
   const clientConnection = testClient.connect(clientStream);
   try {
     const agent = clientConnection.agent;
     await agent.request(methods.agent.initialize, { protocolVersion: 1 });
-    const created = await agent.request(methods.agent.session.new, {
+    const created = await agent.request<{ sessionId: string }>(methods.agent.session.new, {
       cwd: fixture.workspace,
       mcpServers: [
         stdioAcpServer("keep", dir, "v1"),
@@ -369,9 +467,76 @@ test("CMCP04 bound resume forwards mcpServers to the warm session; unchanged ent
       ],
     });
     const sessionId = created.sessionId;
-    const keepPid = await waitForFile(join(dir, "keep.pid"));
-    const swapPid = await waitForFile(join(dir, "swap.pid"));
     const coreApp = fixture.apps.get(sessionId)!;
+    // pid 文件不能当连接身份判据——ACP wire 无 protocolVersion，adapter 的
+    // stdio probe 会拉一次性进程重写文件。真实身份 = echo 应答里那台进程的
+    // pid（`echo[label@pid]`）；应答 pid 不变才证明连接未被重建。
+    const echoPid = async (
+      serverName: string,
+      text: string,
+    ): Promise<{ pid: number; text: string }> => {
+      const result = await coreApp.runtime
+        .getMcpPort()!
+        .callTool({ arguments: { text }, serverName, toolName: "echo" });
+      const raw = JSON.stringify(result);
+      const pid = Number(/echo\[[^@\]]+@(\d+)\]/.exec(raw)?.[1]);
+      assert.ok(Number.isFinite(pid) && pid > 0, `bad echo payload: ${raw}`);
+      return { pid, text: raw };
+    };
+    // 首个 callTool 触发 startup connect；轮询到两台 server 都给出稳定应答。
+    let keepPid = 0;
+    let swapPid = 0;
+    for (let i = 0; i < 200; i += 1) {
+      try {
+        keepPid = (await echoPid("keep", "keep")).pid;
+        swapPid = (await echoPid("swap", "swap")).pid;
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+    assert.ok(keepPid > 0 && swapPid > 0, "MCP connections never came up");
+    // resume 前的真实 handle 对象引用——resume 后必须仍是同一对象。
+    const handleBefore = sessions.get(sessionId)?.handle;
+    assert.ok(handleBefore, "bound session handle missing before resume");
+
+    // in-flight waiter：prompt 请求挂在模型闸门里；期间 resume 携带
+    // UNCHANGED mcpServers——连接与 handle 都必须原样保留，waiter 正常完成。
+    const inflight = agent.request<{ stopReason: string }>(methods.agent.session.prompt, {
+      prompt: [{ text: "inflight", type: "text" }],
+      sessionId,
+    });
+    for (let i = 0; i < 200 && requests.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(requests.length, 1, "in-flight prompt never reached the model");
+    await agent.request(methods.agent.session.resume, {
+      cwd: fixture.workspace,
+      mcpServers: [
+        stdioAcpServer("swap", dir, "v1"),
+        stdioAcpServer("keep", dir, "v1"),
+      ],
+      sessionId,
+    });
+    releasePrompt!();
+    assert.equal((await inflight).stopReason, "end_turn");
+    assert.equal(
+      sessions.get(sessionId)?.handle,
+      handleBefore,
+      "bound resume replaced the session handle object",
+    );
+    assert.equal(fixture.apps.get(sessionId), coreApp);
+    // unchanged mcpServers ⇒ 连接不重建：应答进程仍是创建期那两台。
+    assert.equal(
+      (await echoPid("keep", "keep-again")).pid,
+      keepPid,
+      "unchanged resume restarted the keep connection",
+    );
+    assert.equal(
+      (await echoPid("swap", "swap-again")).pid,
+      swapPid,
+      "unchanged resume restarted the swap connection",
+    );
 
     // bound resume：同 sessionId、keep 声明不变（数组顺序换）、swap 换 label。
     await agent.request(methods.agent.session.resume, {
@@ -382,22 +547,23 @@ test("CMCP04 bound resume forwards mcpServers to the warm session; unchanged ent
       ],
       sessionId,
     });
-    // 同一 warm 会话——AcpCoreSessions 保留 handle，core 保留 app。
-    assert.equal(sessions.get(sessionId)?.handle.sessionId, sessionId);
+    // 同一 warm 会话——handle 对象仍是 resume 前那个，core 保留 app。
+    assert.equal(sessions.get(sessionId)?.handle, handleBefore);
     assert.equal(fixture.apps.get(sessionId), coreApp);
-    // 未变的 server 保活同 PID；变了 label 的重连出新 PID。
-    await waitForFile(join(dir, "swap.pid"));
-    const keepAlive = await coreApp.runtime
-      .getMcpPort()!
-      .callTool({ arguments: { text: "keep" }, serverName: "keep", toolName: "echo" });
-    assert.ok(JSON.stringify(keepAlive).includes("echo[v1@"));
-    const swapped = await coreApp.runtime
-      .getMcpPort()!
-      .callTool({ arguments: { text: "swap" }, serverName: "swap", toolName: "echo" });
-    assert.ok(JSON.stringify(swapped).includes("echo[v2@"));
-    assert.notEqual(swapPid, Number((await readFile(join(dir, "swap.pid"), "utf8")).trim()));
-    assert.ok(keepPid > 0);
+    // 未变的 server 仍是同一条连接——应答进程就是原 keepPid；变了的 swap
+    // 由新进程应答，旧连接被回收。
+    const keepAlive = await echoPid("keep", "keep");
+    assert.equal(keepAlive.pid, keepPid);
+    assert.ok(keepAlive.text.includes("echo[v1@"));
+    const swapped = await echoPid("swap", "swap");
+    assert.ok(swapped.text.includes("echo[v2@"));
+    assert.notEqual(swapped.pid, swapPid);
+    for (let i = 0; i < 100 && processAlive(swapPid); i += 1) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(!processAlive(swapPid), "old swap connection survived the label change");
   } finally {
+    releasePrompt?.();
     await sessions.closeAll().catch(() => undefined);
     clientConnection.close();
     agentConnection.close();
