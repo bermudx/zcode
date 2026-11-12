@@ -4,12 +4,19 @@ Status: implemented on `feat/acp-mcp-tools`. CMCP01–13 regression-tested throu
 disposable seams (protocol socket app, ACP SDK client, real stdio/http/sse
 fixtures). The CMCP13 logger leak found in rework 4 is repaired in rework 5 by
 bounded structural connection diagnostics on the session-owned client path.
-CMCP14 (real T3) remains operator-gated — not exercised. This file records
-only observed evidence.
+CMCP14 was exercised once on a real T3 isolated scripted lane and exposed a
+real gap: the surviving ACP process resumed the session internally after an
+isolated core restart but dropped `mcpServers`, so the post-restart prompt
+had no client tools. A client-side replay-snapshot resend repair and its
+regressions are now in tree; the post-repair live pass remains
+operator-gated. This file records only observed evidence.
 
 Historical detail: `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/rework5.md`
-(current round; supersedes rework4 and earlier notes, which record previous
-passes and are not restated here).
+(rework-5 pass; supersedes rework4 and earlier notes, which record previous
+passes and are not restated here),
+`/home/daniel/.local/state/piz-acp-mcp-009cbbe5/cmcp14-reconnect-discovery.md`
+and `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/cmcp14-reconnect-repair.md`
+(CMCP14 observation, seam analysis, and this repair round).
 
 ## CMCP regression matrix
 
@@ -28,11 +35,45 @@ passes and are not restated here).
 | CMCP11 permission allow and reject over the real ACP wire | PASS | cli e2e: allow → real fixture call + result; reject → zero calls, `end_turn`, denied result persisted. Options picked by kind; nested ACP outcome shape. |
 | CMCP12 malformed/duplicate input → sanitized errors at both boundaries | PASS | lifecycle CMCP12 (protocol) + cli e2e ACP-boundary test — duplicate case uses exactly two individually-valid same-name stdio configs (sentinel in env) so only the duplicate path can fire; malformed-shape cases kept separate; `INVALID_PARAMS`/`AcpMcpMapError`, no sentinel/credential echo in error messages. |
 | CMCP13 client-supplied values never leak into product diagnostics | PASS | lifecycle CMCP13 multi-surface scan (logger, protocol notifications, `session/read`, persisted transcript, storage files) after `app.close` flushes late diagnostics — zero sentinel hits. Rework-5 repair: `CreateMcpAdapterOptions.connectionDiagnostics` (`"standard"` default / `"structural"`) in `adapters/src/mcp/index.ts`; `failConnection` structural mode emits fixed message + typed `failureKind` only (no raw `displayMessage`, `recentStderr`, or `serverRequestId`); `attachStdioLogging` structural mode emits per-chunk event + byteCount only. Wired only into the lazy session-owned noPlugins pool in `create-app.ts`. Focused regressions: `adapters/tests/mcp-connection-diagnostics.test.ts` (structural ENOENT, real stderr sentinel, standard-mode control). Adapter HTTP/SSE diagnostic tests still pass (8/8 file set). |
-| CMCP14 real T3 key/restart behavior | OPERATOR-GATED | Not exercised by automation; pending operator decision. |
+| CMCP14 real T3 key/restart behavior | OBSERVED GAP → REPAIRED, POST-FIX PASS PENDING | Pre-repair live check on the isolated scripted lane: first prompt used the injected stdio tool; after `ctl.mts restart` (gen1→gen2 core, same ACP process/adapterPid), the same T3 thread sent only a second `session/prompt` — no client `session/resume` — and the tool was absent ("Approved T3 tool not offered"). Root cause: the adapter's internal cold recovery (`AttachRuntime.recoverSession` → `session/resume`) never carried `mcpServers`; no client-side layer retained the declaration. Repair (below) replays the last acknowledged snapshot on internal cold resume, covered by 4 new `cli/tests/acp-sessions.test.ts` regressions over a real socket/AttachRuntime fixture. The post-repair live T3 pass is still operator-gated and not claimed here. |
 
 ## Source fixes
 
-Rework 5 (current pass) — bounded privacy repair, two production files:
+CMCP14 reconnect repair (current pass) — cold-core-restart resend, two
+production files:
+
+- `cli/src/acp/acp-sessions.ts` — internal `BoundAcpSession` extends
+  `AcpSession` with `clientMcpServers?`: the ACP-side replay snapshot, an
+  independent `structuredClone` taken before each create/resume request and
+  stored only after the core acknowledges it. `resume` on a bound session
+  replaces the snapshot only on a successful forwarded request; omitted and
+  rejected resumes retain the prior declaration. `bindSession` accepts the
+  snapshot as metadata; `createLane` supplies a synchronous
+  `getSessionRecoveryMcpServers(sessionId)` hook that reads the live binding
+  and returns a fresh clone (absent binding/declaration → `undefined`;
+  explicit `[]` → `[]`). `closeSession`/`closeAll` discard the snapshot with
+  the binding. Nothing is logged, persisted, or serialized.
+- `cli/src/attach/attach-tui-options.ts` — new optional
+  `AttachRuntimeOptions.getSessionRecoveryMcpServers`. `recoverSession`
+  consults it only inside the existing `sessionUnavailable` cold-resume
+  branch and spreads `mcpServers` into that `session/resume` when defined —
+  preserving omit-vs-`[]` semantics. A successful warm `resubscribe` never
+  reaches the hook and emits no extra resume. TUI/attach callers do not set
+  the hook and behave identically.
+- `docs/design/v2/acp-frontend.md` — the "no second accepted configuration"
+  sentence now distinguishes the replay-only snapshot; adds the shared-core
+  restart order to the contract diagram and the observed CMCP14 pre-repair
+  baseline.
+- `cli/tests/acp-sessions.test.ts` — fixture gains a `resident` record set
+  (create/resume register, subscribe fails `sessionUnavailable` for unknown
+  ids, `evictSessions` simulates core-restart record loss) plus
+  `rejectResume`. Four new cases assert `session/resume.params` over the
+  real socket: declaration replay on cold recovery with `[]`/omitted
+  distinction and same-handle binding; zero extra resume on warm reconnect;
+  bound-resume success replacing, omit/failure retaining; caller-mutation
+  isolation, per-session isolation, closed-session exclusion.
+
+Rework 5 (still in tree) — bounded privacy repair, two production files:
 
 - `adapters/src/mcp/index.ts` — new optional
   `CreateMcpAdapterOptions.connectionDiagnostics?: "standard" | "structural"`
@@ -117,6 +158,21 @@ in `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/rework5-*`.
   (`mcp/index.ts` max-lines is a registered exception; the two
   `no-useless-fallback-in-spread` warnings pre-date this change).
 
+## Verify commands run (CMCP14 reconnect repair, uncommitted on 7ecd7c85)
+
+All via `mise exec --`; logs and exit codes under
+`/home/daniel/.local/state/piz-acp-mcp-009cbbe5/cmcp14-repair-*.log`.
+
+- `apps/zcode-cli/packages/cli`: `node --disable-warning=DEP0205 --import tsx
+  --test tests/acp-sessions.test.ts tests/attach-adapter.test.ts
+  tests/acp-mcp-e2e.test.ts` → 86/86 pass, exit 0.
+- `pnpm exec tsc --noEmit` (cli package) → exit 0; throwaway `tsc -p` over the
+  touched test file (`tsconfig` per `tsconfig-rework5-cli.json` shape,
+  include `tests/acp-sessions.test.ts`) → exit 0, zero inherited helper errors.
+- `pnpm exec oxlint` on the 3 changed source/test files → 0 errors, 0 warnings.
+- Repo root: `pnpm architecture:check --changed` → OK, 0 new violations
+  (1 baseline); `git diff --check` → clean.
+
 ## Disposable exercise
 
 ```bash
@@ -198,5 +254,9 @@ optional follow-up, not part of this change.
 - Package-level lint green and a clean throwaway typecheck of the whole test
   helper tree are not claimed; baseline helper type errors pre-date this
   change.
-- CMCP14 is explicitly operator-gated; nothing here asserts T3 resend or
-  restart behavior.
+- CMCP14's post-repair live pass is still operator-gated. The pre-repair
+  observation (tool present then absent across an isolated core restart,
+  no client `session/resume` on the ACP wire) and the regression-covered
+  resend do not claim the tool survives a real restart until lead reruns
+  the live check; whether T3 resends `mcpServers` on its own explicit
+  `session/resume` after an ACP process restart is separately untested.

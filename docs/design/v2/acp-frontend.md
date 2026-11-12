@@ -290,8 +290,11 @@ Status: approved contract; implementation and acceptance evidence pending.
   schemas, never an MCP SDK or a bootstrap/core runtime import.
 - `session/new.mcpServers` is a complete session override. `[]` means no
   servers, not fallback to workspace/user/plugin configuration. Omission on
-  resume retains the in-memory override, if one exists. Cold resume without
-  supplied servers cannot recover credentials and has no client MCP.
+  resume retains the in-memory override, if one exists. When the ACP adapter
+  survives a shared-core restart, its internal cold recovery resends the
+  session's last acknowledged declaration from memory; if the ACP process
+  itself is lost, credentials are unrecoverable unless the client supplies
+  them again.
 - ACP servers use explicit session isolation and the session's execution cwd
   for stdio. Client-provided servers are trusted configuration from the owning
   protocol client, not repository declarations. They cannot acquire builtin
@@ -300,6 +303,12 @@ Status: approved contract; implementation and acceptance evidence pending.
   for resume comparison and fork inheritance. The runtime owns effective
   configuration, pending replacement, transport state, and turn ordering.
   The adapter does not keep a second accepted configuration or update queue.
+  Its only client-MCP state is a replay snapshot — an independent copy of the
+  last declaration acknowledged by the core, updated only on successful
+  create/resume replies — used solely to populate `session/resume` when the
+  adapter's own transport reconnect finds the session record gone (shared
+  core restart, idle eviction). A successful warm resubscribe sends no
+  extra resume; a failed bound resume keeps the older snapshot.
 - No credentials, commands, environment values, header values, or full
   configuration are written to logs, events, session history, or disk caches.
   Diagnostics use session/trace identifiers, counts, and stable error kinds.
@@ -330,6 +339,11 @@ transport detach
   → disconnect and await session-owned stdio teardown
   → retain runtime/history and in-memory declaration for adoption
   → resume/adoption schedules suspended connections at the next turn boundary
+
+shared-core restart while this adapter lives
+  → resubscribe fails (no resident record)
+  → internal cold session/resume carries the adapter's replay snapshot
+  → resubscribe → session resumes with the same handle and client MCP
 ```
 
 - An idle runtime may apply immediately. Queued inputs, goal continuations, and
@@ -382,6 +396,14 @@ request payloads to perform it; record presence/count/transport and tool success
 only. Installed binaries, live-core restarts, promotion, and key rotation remain
 separate operator-controlled actions. Unreached live acceptance is reported as
 unverified, never inferred from source or disposable-server checks.
+
+Observed CMCP14 baseline (pre-repair, real T3 on an isolated scripted lane):
+the same ACP process survived an isolated core restart and sent only a second
+`session/prompt` — no client `session/resume`. The first prompt used the
+injected tool; the post-restart prompt had no client MCP tools because the
+adapter's internal cold recovery resumed without `mcpServers`. That gap
+motivates the replay-snapshot resend above; a post-repair live pass is
+reported separately and never inferred from this observation.
 
 ## Bundle cost
 

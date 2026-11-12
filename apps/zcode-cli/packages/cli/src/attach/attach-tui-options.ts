@@ -9,6 +9,7 @@ import {
   zcodeProtocolNotifications,
   zcodeSessionListResultSchema,
   zcodeUserInputRequestParamsSchema,
+  type ZCodeProtocolMcpServer,
   type ZCodeSessionRawEvent,
 } from "@zcode/shared";
 import { getZCodeCopy, type TuiCopy } from "@zcode/i18n";
@@ -78,6 +79,12 @@ export interface AttachRuntimeOptions {
   runtimePreferences?: Record<string, unknown>;
   /** session/resume 冷恢复所需的 workspace ref（core 重启后 session/subscribe 找不到 record）。 */
   workspace?: { workspacePath: string; workspaceKey: string; workspaceIdentity?: string };
+  /** 冷恢复分支读取该会话最后确认的 client MCP 声明（ACP issue #31 的
+   *  replay 快照；声明只活在 client 侧内存，core 冷物化需要原样带回）。
+   *  undefined=无声明可回放；[]=显式清空声明照旧回放。warm resubscribe 不查。 */
+  getSessionRecoveryMcpServers?: (
+    sessionId: string,
+  ) => ZCodeProtocolMcpServer[] | undefined;
 }
 
 export class AttachProtocolVersionError extends Error {
@@ -465,11 +472,15 @@ export class AttachRuntime {
       }
       try {
         const compactContextWindow = handle.getCompactContextWindow();
+        const mcpServers = this.options.getSessionRecoveryMcpServers?.(handle.sessionId);
         await this.client.request(zcodeProtocolMethods.sessionResume, {
           sessionId: handle.sessionId,
           workspace: this.options.workspace,
           // core 重启/空闲回收后冷恢复会丢掉内存里的上限，随 resume 带回当前模型对应的值。
           ...(compactContextWindow !== undefined ? { compactContextWindow } : {}),
+          // client MCP 声明仅存于本进程内存；core 侧 record 冷物化时随同一
+          // session/resume 回放。省略与显式 [] 语义不同，hook 回 undefined 才省略。
+          ...(mcpServers !== undefined ? { mcpServers } : {}),
         });
         await handle.resubscribe();
         return true;
