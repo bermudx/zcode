@@ -4,12 +4,14 @@ Status: implemented on `feat/acp-mcp-tools`. CMCP01–13 regression-tested throu
 disposable seams (protocol socket app, ACP SDK client, real stdio/http/sse
 fixtures). The CMCP13 logger leak found in rework 4 is repaired in rework 5 by
 bounded structural connection diagnostics on the session-owned client path.
-CMCP14 was exercised once on a real T3 isolated scripted lane and exposed a
-real gap: the surviving ACP process resumed the session internally after an
-isolated core restart but dropped `mcpServers`, so the post-restart prompt
-had no client tools. A client-side replay-snapshot resend repair and its
-regressions are now in tree; the post-repair live pass remains
-operator-gated. This file records only observed evidence.
+CMCP14 passed against real T3 on November 12, 2026, through an isolated
+source-runtime lane with a scripted executor. The first run exposed missing
+client declarations on internal cold recovery. Commit `943a9ff2` repairs that
+gap; a fresh adapter then called the real read-only T3 capabilities tool
+successfully before and after an isolated core restart, without another
+client declaration. An independent reconnect re-check returned `PASS+NOTES`.
+Nothing is installed, pushed, or promoted. This file records only observed
+evidence.
 
 Historical detail: `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/rework5.md`
 (rework-5 pass; supersedes rework4 and earlier notes, which record previous
@@ -35,7 +37,7 @@ and `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/cmcp14-reconnect-repair.md`
 | CMCP11 permission allow and reject over the real ACP wire | PASS | cli e2e: allow → real fixture call + result; reject → zero calls, `end_turn`, denied result persisted. Options picked by kind; nested ACP outcome shape. |
 | CMCP12 malformed/duplicate input → sanitized errors at both boundaries | PASS | lifecycle CMCP12 (protocol) + cli e2e ACP-boundary test — duplicate case uses exactly two individually-valid same-name stdio configs (sentinel in env) so only the duplicate path can fire; malformed-shape cases kept separate; `INVALID_PARAMS`/`AcpMcpMapError`, no sentinel/credential echo in error messages. |
 | CMCP13 client-supplied values never leak into product diagnostics | PASS | lifecycle CMCP13 multi-surface scan (logger, protocol notifications, `session/read`, persisted transcript, storage files) after `app.close` flushes late diagnostics — zero sentinel hits. Rework-5 repair: `CreateMcpAdapterOptions.connectionDiagnostics` (`"standard"` default / `"structural"`) in `adapters/src/mcp/index.ts`; `failConnection` structural mode emits fixed message + typed `failureKind` only (no raw `displayMessage`, `recentStderr`, or `serverRequestId`); `attachStdioLogging` structural mode emits per-chunk event + byteCount only. Wired only into the lazy session-owned noPlugins pool in `create-app.ts`. Focused regressions: `adapters/tests/mcp-connection-diagnostics.test.ts` (structural ENOENT, real stderr sentinel, standard-mode control). Adapter HTTP/SSE diagnostic tests still pass (8/8 file set). |
-| CMCP14 real T3 key/restart behavior | OBSERVED GAP → REPAIRED, POST-FIX PASS PENDING | Pre-repair live check on the isolated scripted lane: first prompt used the injected stdio tool; after `ctl.mts restart` (gen1→gen2 core, same ACP process/adapterPid), the same T3 thread sent only a second `session/prompt` — no client `session/resume` — and the tool was absent ("Approved T3 tool not offered"). Root cause: the adapter's internal cold recovery (`AttachRuntime.recoverSession` → `session/resume`) never carried `mcpServers`; no client-side layer retained the declaration. Repair (below) replays the last acknowledged snapshot on internal cold resume, covered by 4 new `cli/tests/acp-sessions.test.ts` regressions over a real socket/AttachRuntime fixture. The post-repair live T3 pass is still operator-gated and not claimed here. |
+| CMCP14 real T3 key/restart behavior | PASS — exercised source-runtime route | After operator-confirmed credential rotation: T3 supplied one stdio server, and the real read-only `orchestrator_capabilities` call succeeded. After repair `943a9ff2`, the same adapter/session repeated that call successfully after the isolated worker changed from generation 2 to 3. T3 sent only another prompt, not `session/new`/`session/resume`/`session/load`; internal recovery replayed the memory-only declaration. ACP-process replacement and installed-pair behavior remain unverified. |
 
 ## Source fixes
 
@@ -52,7 +54,8 @@ production files:
   `getSessionRecoveryMcpServers(sessionId)` hook that reads the live binding
   and returns a fresh clone (absent binding/declaration → `undefined`;
   explicit `[]` → `[]`). `closeSession`/`closeAll` discard the snapshot with
-  the binding. Nothing is logged, persisted, or serialized.
+  the binding. The replay copy is not logged or persisted; serialization is
+  limited to the existing protocol requests that carry it to the core.
 - `cli/src/attach/attach-tui-options.ts` — new optional
   `AttachRuntimeOptions.getSessionRecoveryMcpServers`. `recoverSession`
   consults it only inside the existing `sessionUnavailable` cold-resume
@@ -158,7 +161,7 @@ in `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/rework5-*`.
   (`mcp/index.ts` max-lines is a registered exception; the two
   `no-useless-fallback-in-spread` warnings pre-date this change).
 
-## Verify commands run (CMCP14 reconnect repair, uncommitted on 7ecd7c85)
+## Verify commands run (CMCP14 reconnect repair, committed as 943a9ff2)
 
 All via `mise exec --`; logs and exit codes under
 `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/cmcp14-repair-*.log`.
@@ -203,10 +206,9 @@ provides no feature verdict.
 
 Lead disposition of the notes:
 
-- **Real T3 remains unverified (CMCP14).** Credential rotation and authorization
-  are still required. An isolated matched candidate is sufficient for that
-  check; installing over the operator's current pair is not a prerequisite.
-  Do not restart a live core or promote this branch to obtain the evidence.
+- **The original CMCP14 note is superseded by the real-T3 check below.**
+  The operator confirmed credential rotation and authorized the isolated
+  scripted lane. No installed pair or normal live core was changed.
 - **Model and signing limits accepted.** The driver uses a scripted executor.
   Neither its tool calls nor these tests prove real model behavior, signing,
   extra-usage eligibility, or account metering.
@@ -232,10 +234,75 @@ Lead disposition of the notes:
 - **CI unavailable.** This is a local, unpushed branch. No PR verdict comment,
   push, merge, install, or promotion has been performed.
 
-The verifier found no proved product defect. This accepts the disposable
-verification stage with the stated limits, not the still-gated real T3 stage.
+The original verifier found no proved product defect. Its disposable
+verification stage remains accepted with the stated limits. Real T3 and the
+new reconnect delta have the separate evidence below.
 There is no repository `verify-*` skill; `/create-verification-skill` is an
 optional follow-up, not part of this change.
+
+## Real T3 check and independent reconnect re-check — November 12, 2026
+
+The operator created a temporary local ACP provider using the prepared
+`acp-launch.sh`. It runs production `runAcpCommand` from source against an
+isolated protocol/app assembly, SQLite store, and scripted model executor.
+The executor requests only the uniquely offered read-only
+`orchestrator_capabilities` tool with `{}`. No real model request or account
+credential-store access was needed for this transport check.
+
+The lead observed the following after repair `943a9ff2`:
+
+- A fresh adapter received `session/new` with one stdio MCP server.
+- Its first real T3 tool call succeeded in worker generation 2.
+- The owned controller stopped that worker (expected exit 0) and started
+  generation 3 with a different PID.
+- The same T3 thread and adapter process received only another
+  `session/prompt`, without new declarations or an ACP resume/load request.
+- The second real T3 tool call succeeded in generation 3. The surviving
+  adapter restored the declaration through its internal cold recovery.
+
+Evidence collection retained only method/presence/count/transport, numeric
+process facts, byte counts, and tool-success booleans. No raw MCP declaration,
+authorization value, environment dump, tool-response content, or persisted
+transcript was inspected. The adapter's recorded generation is its startup
+snapshot; the worker's actual PID transition and executor generation establish
+the restart.
+
+Lead-run evidence:
+`/home/daniel/.local/state/piz-acp-mcp-009cbbe5/cmcp14-real-t3-result.md`,
+with stream paths and exact timestamps. This is not an independent verdict.
+
+Fresh independent verifier verdict for the reconnect delta, verbatim:
+
+```text
+PASS+NOTES
+```
+
+Report:
+`/home/daniel/.local/state/piz-acp-mcp-009cbbe5/verification-reconnect.md`.
+Its final structured results and driver log record 20 checks, zero failed,
+over the production ACP adapter and disposable fake MCP. It independently
+observed a successful tool call after a core restart using only a prompt on
+the original session/process, an unchanged warm resume retaining the same
+MCP child, and explicit `[]` remaining empty after another core restart.
+
+Lead disposition of every note:
+
+- **Reconnect interval:** the empty-session scenario sent prompts before
+  transport recovery finished; two returned `attach client is not connected`.
+  The next prompt was correct without redeclaring servers. This accepts
+  eventual tool restoration, not seamless prompt admission during a socket
+  outage. The main tool-restoration scenario succeeded on its first attempt.
+- **CI unavailable:** no push or CI run was authorized. A draft PR/verdict
+  comment and CI remain pending; no merge, install, or promotion is authorized.
+- **Fixture limits:** the independent re-check used fake MCP, not real T3.
+  Real T3 has the separate lead-run evidence above. Neither check proves
+  installed-pair, real-model, signing, or allowance behavior.
+- **Driver development errors:** malformed fake input and an incorrect
+  update-field assertion were driver mistakes, not product findings. Final
+  acceptance uses the recorded 20 successful checks, not earlier iterations.
+- **Scope and cleanup:** unchanged CMCP01–13 suites were not rerun. The
+  verifier stopped its own clients/children, preserved the checkout and
+  existing test clients, and left the isolated controller ready.
 
 ## Not claimed
 
@@ -248,15 +315,13 @@ optional follow-up, not part of this change.
 - A source-only audit of *default* (non-noPlugins) app storage exposure for
   client-supplied MCP config was not performed in rework 4 or 5 — that surface
   is unexamined, not verified clean.
-- No live T3 behavior, no real credentials, no install/promotion/build of the
-  application bundle, no full-suite `pnpm test` run (scope bounded to the
-  packages listed above).
+- No installed-pair verification, real model request, account credential-store
+  access, install/promotion/build of the application bundle, or full-suite
+  `pnpm test` run (scope bounded to the packages listed above). Real T3 tool
+  access was exercised only through the isolated source-runtime route above.
 - Package-level lint green and a clean throwaway typecheck of the whole test
   helper tree are not claimed; baseline helper type errors pre-date this
   change.
-- CMCP14's post-repair live pass is still operator-gated. The pre-repair
-  observation (tool present then absent across an isolated core restart,
-  no client `session/resume` on the ACP wire) and the regression-covered
-  resend do not claim the tool survives a real restart until lead reruns
-  the live check; whether T3 resends `mcpServers` on its own explicit
-  `session/resume` after an ACP process restart is separately untested.
+- Whether T3 resends `mcpServers` after the ACP process itself is replaced is
+  separately untested. The exercised restart kept that process alive; its
+  memory-only replay declaration cannot survive loss of both client and core.

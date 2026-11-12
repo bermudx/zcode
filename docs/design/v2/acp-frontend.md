@@ -280,7 +280,8 @@ explicit error/decline instead of a silent success.
 
 ## Client MCP extension — issue #31
 
-Status: approved contract; implementation and acceptance evidence pending.
+Status: implemented; disposable and isolated real-T3 source-runtime evidence
+recorded in [the fork report](../../fork/reports/acp-mcp-tools.md). Not installed.
 `additionalDirectories` forwarding is not part of this extension.
 
 ### Admission and ownership
@@ -404,6 +405,14 @@ injected tool; the post-restart prompt had no client MCP tools because the
 adapter's internal cold recovery resumed without `mcpServers`. That gap
 motivates the replay-snapshot resend above; a post-repair live pass is
 reported separately and never inferred from this observation.
+
+On November 12, 2026, the post-repair real-T3 check passed: the same adapter
+called the read-only capabilities tool before and after an isolated core
+restart. T3 sent only another prompt; the adapter restored MCP through its
+internal cold recovery. An independent reconnect re-check returned
+`PASS+NOTES`, including unchanged warm connection identity and explicit-empty
+replay. This uses a source-runtime assembly and scripted executor, not an
+installed pair or real model. ACP-process replacement is separately untested.
 
 ## Bundle cost
 
