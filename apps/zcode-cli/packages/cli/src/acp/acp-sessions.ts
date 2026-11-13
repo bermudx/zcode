@@ -14,6 +14,10 @@ import { ensureServer } from "../app-server-spawn.js";
 import { connectAttachClient, type AttachClient } from "../attach/attach-client.js";
 import { AttachSessionHandle } from "../attach/attach-session.js";
 import { AttachRuntime } from "../attach/attach-tui-options.js";
+import { listAttachCommandCatalog } from "../attach/attach-commands.js";
+import { listAttachSkillCatalog } from "../attach/attach-skills.js";
+import { toSkillCatalogEntries } from "../skill-suggestions.js";
+import type { AcpSlashCatalog } from "./acp-commands.js";
 
 export interface AcpWorkspaceRef {
   workspaceIdentity?: string;
@@ -50,6 +54,8 @@ export interface AcpCorePort {
     sessionId: string;
     mcpServers?: ZCodeProtocolMcpServer[];
   }): Promise<AcpSession>;
+  /** 会话的 `/` 目录：core 现扫的自定义命令 + 会话冻结快照里的技能。 */
+  slashCatalog(sessionId: string): Promise<AcpSlashCatalog>;
 }
 
 export interface AcpCoreSessionsOptions {
@@ -133,6 +139,32 @@ export class AcpCoreSessions implements AcpCorePort {
       ...(replay !== undefined ? { mcpServers: replay } : {}),
     });
     return await this.bindSession(lane, asSnapshot(resumed), replay);
+  }
+
+  async slashCatalog(sessionId: string): Promise<AcpSlashCatalog> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Unknown ACP session: ${sessionId}`);
+    const lane = await this.laneFor(session.cwd);
+    const request = <T>(method: string, params?: unknown) =>
+      lane.runtime.currentClient().request<T>(method, params);
+    const [commands, skills] = await Promise.all([
+      listAttachCommandCatalog({ request, workspace: lane.ref }),
+      listAttachSkillCatalog({ request, sessionId, workspace: lane.ref }),
+    ]);
+    return {
+      // disableNonInteractive 透传不过滤：那是「仅交互式」标记，只为 app-server
+      // /headless 目录服务；ACP 是交互式客户端，/name 原文转发后 core facade
+      // 展开不查该标记。滤掉既漏报广告，又让同名技能借「无同名命令」裁定抢走
+      // facade 展开（issue #22）。
+      commands: commands.commands.map((entry) => ({
+        description: entry.description,
+        name: entry.name,
+        ...(entry.argumentHint ? { argumentHint: entry.argumentHint } : {}),
+      })),
+      // 裸名与 qualifiedName 都留住：路由裁定与 Skill 工具 resolver 同口径，
+      // 按两者命中（issue #24）；展示名由 acp-commands 取 qualifiedName ?? name。
+      skills: toSkillCatalogEntries(skills.skills),
+    };
   }
 
   /** ACP close = 真停止：先停当前回合，再让 core 释放 runtime（历史仍留存）。 */

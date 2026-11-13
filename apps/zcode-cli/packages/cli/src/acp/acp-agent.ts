@@ -45,19 +45,16 @@ import {
 import type { AcpCorePort, AcpSession } from "./acp-sessions.js";
 import { AcpMcpMapError, mapAcpMcpServers } from "./acp-mcp.js";
 import {
-  localSlashCommandsUpdate,
   newGoalInputId,
   parseLocalSlashCommand,
+  resolveSkillInvocation,
+  slashCommandsUpdate,
   runDwfCommand,
   runGoalCommand,
   watchTurnSettlement,
   type AcpLocalCommand,
+  type AcpSlashCatalog,
 } from "./acp-commands.js";
-import {
-  buildManualSkillPrompt,
-  manualSkillCommandUsage,
-  parseSlashCommand,
-} from "../command-center/slash-commands.js";
 import type { SendInputOptions } from "../attach/attach-steer.js";
 
 const INVALID_PARAMS = -32602;
@@ -92,6 +89,11 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   const projectors = new Map<string, AcpEventProjector>();
   const unsubscribers = new Map<string, () => void>();
   const activeTurns = new Map<string, ActiveTurn>();
+  // 最近一次广告的 `/` 目录：prompt 路由按它改写技能直达名，保证广告与执行同源。
+  const slashCatalogs = new Map<string, AcpSlashCatalog>();
+  // 每会话目录拉取的递增序号：同一绑定的重复 resume 各起一次拉取，handle 核对
+  // 无法区分，只有序号最新的一次回包可以写目录/投广告（issue #23）。
+  const slashCatalogFetches = new Map<string, number>();
   // 本连接自己发起的 set_config_option 在途计数：其结果由请求回包携带，不再重复推送。
   const ownConfigChanges = new Map<string, number>();
   const log = options.logger;
@@ -213,6 +215,8 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     unsubscribers.get(sessionId)?.();
     unsubscribers.delete(sessionId);
     projectors.delete(sessionId);
+    slashCatalogs.delete(sessionId);
+    slashCatalogFetches.delete(sessionId);
   };
 
   const requireSession = (sessionId: string): AcpSession => {
@@ -230,14 +234,60 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   });
 
   /**
-   * 会话建立后广播本地命令面。必须让 session/new|resume 的响应先落线再发这条
-   * update（客户端此刻才认识 sessionId），故推迟一个宏任务；更新队列本身的写入
-   * 是异步 drain，顺序由这里保证。
+   * 会话建立后广播命令面。必须让 session/new|resume 的响应先落线再发这条
+   * update（客户端此刻才认识 sessionId），故推迟一个宏任务；core 目录拉取失败
+   * 只丢自定义命令/技能行，本地命令照常广告，路由目录也同步清掉——广告面与
+   * 改写面必须一致（issue #20）。目录拉取期间会话可能已被 session/close 释放、
+   * 甚至同 id 重新 resume 成另一条绑定：迟到的回包属于旧绑定，不得复活
+   * slashCatalogs 条目、不得把旧目录广告/写入新绑定，也不得把这条正常竞态的
+   * rejection 告警成目录故障——归属一律按绑定（handle）核对，不是按 id（issue #21）。
+   * 同一绑定的重复 resume 也会并发两次拉取，handle 核对区分不了：目录每次
+   * 现扫、后到回包是更旧的观测，只有序号最新的一次允许生效，被取代的回包
+   * （含迟到 rejection）与 released 竞态同款静默丢弃（issue #23）。延迟槽
+   * 触发时连接已关闭/失败则直接返回：slashCatalog 会经 laneFor 为死连接
+   * 重建 lane（甚至拉起 core），而产出已无处投递；同理在途拉取于连接死亡
+   * 后到达的 rejection 是 teardown 伴随症状，记 debug 不告警（issue #25）。
    */
-  const advertiseLocalCommands = (client: AgentContext, session: AcpSession): void => {
+  const advertiseCommands = (client: AgentContext, session: AcpSession): void => {
+    const sessionId = session.handle.sessionId;
+    const stillBound = (): boolean =>
+      options.sessions.get(sessionId)?.handle === session.handle;
+    const fetchSeq = (slashCatalogFetches.get(sessionId) ?? 0) + 1;
+    slashCatalogFetches.set(sessionId, fetchSeq);
+    const isNewestFetch = (): boolean => slashCatalogFetches.get(sessionId) === fetchSeq;
     setTimeout(() => {
       if (connectionFailure || connectionClosed) return;
-      notifyUpdate(client, session.handle.sessionId, localSlashCommandsUpdate());
+      void options.sessions.slashCatalog(sessionId).then(
+        (catalog) => catalog,
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          if (connectionFailure || connectionClosed) {
+            log?.debug?.("acp slash catalog dropped with the closed connection", {
+              error: message,
+              sessionId,
+            });
+          } else if (stillBound() && isNewestFetch()) {
+            log?.warn?.("acp slash catalog failed", { error: message, sessionId });
+          } else {
+            log?.debug?.(
+              stillBound()
+                ? "acp slash catalog superseded by a newer fetch"
+                : "acp slash catalog dropped with the released session",
+              { error: message, sessionId },
+            );
+          }
+          return undefined;
+        },
+      ).then((catalog) => {
+        if (connectionFailure || connectionClosed) return;
+        if (!stillBound() || !isNewestFetch()) return;
+        if (catalog) {
+          slashCatalogs.set(sessionId, catalog);
+        } else {
+          slashCatalogs.delete(sessionId);
+        }
+        notifyUpdate(client, sessionId, slashCommandsUpdate(catalog));
+      });
     }, 0);
   };
 
@@ -272,7 +322,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     }
     const session = await options.sessions.open(params.cwd, mcpServers);
     bindSession(client, session);
-    advertiseLocalCommands(client, session);
+    advertiseCommands(client, session);
     return sharedOptions(session);
   });
 
@@ -292,7 +342,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
       ...(mcpServers !== undefined ? { mcpServers } : {}),
     });
     bindSession(client, session);
-    advertiseLocalCommands(client, session);
+    advertiseCommands(client, session);
     const response: ResumeSessionResponse = {
       configOptions: configOptionsFor(session),
       modes: buildModeState(session.handle.getMode()),
@@ -490,7 +540,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
         "A prompt turn is already running for this ACP session",
       );
     }
-    let text = promptBlocksToText(params.prompt);
+    const text = promptBlocksToText(params.prompt);
     if (text.length === 0) {
       throw new RequestError(INVALID_PARAMS, "Prompt contains no usable content");
     }
@@ -500,26 +550,22 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     if (localCommand) {
       return await runLocalCommand(client, session, localCommand);
     }
-    // /skill 走 TUI command-center 同一条手动调用契约：core 不认识 `/skill`
-    // 原文，<name> [task] 必须改写成 buildManualSkillPrompt 再进普通 prompt
-    // 路径；裸 /skill 不进模型，只回 usage。技能名不在 ACP 侧校验——缺失/歧义
-    // 由 core 的 Skill 工具按实时技能集裁定，与 TUI 从不查目录同口径。
-    const slashCommand = parseSlashCommand(text);
-    if (slashCommand?.type === "known" && slashCommand.name === "skill") {
-      if (slashCommand.skillName.length === 0) {
-        const emit = emitterFor(client, session);
-        emit([
-          {
-            content: { text: manualSkillCommandUsage(), type: "text" },
-            sessionUpdate: "agent_message_chunk",
-          },
-        ]);
-        await pendingDrain;
-        if (connectionFailure) throw connectionFailure;
-        return { stopReason: "end_turn" } satisfies PromptResponse;
-      }
-      text = buildManualSkillPrompt(slashCommand.skillName, slashCommand.task);
+    // `/skill` 系输入由本层裁定（core 不认识该命令词）：prompt 改写为手动技能提示，
+    // message 以 agent_message_chunk 本地回执（裸 /skill 列表），forward 维持 P005。
+    const skillResolution = resolveSkillInvocation(text, slashCatalogs.get(params.sessionId));
+    if (skillResolution.kind === "message") {
+      const emit = emitterFor(client, session);
+      emit([
+        {
+          content: { text: skillResolution.text, type: "text" },
+          sessionUpdate: "agent_message_chunk",
+        },
+      ]);
+      await pendingDrain;
+      if (connectionFailure) throw connectionFailure;
+      return { stopReason: "end_turn" } satisfies PromptResponse;
     }
+    const promptText = skillResolution.kind === "prompt" ? skillResolution.text : text;
     const controller = new AbortController();
     const turn: ActiveTurn = {
       cancel: () => {
@@ -533,7 +579,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     session.cancel = turn.cancel;
     try {
       await session.handle.submitPrompt(
-        text,
+        promptText,
         {
           abortSignal: controller.signal,
           requestPermission: (request: PermissionBrokerRequest, extra?: { signal?: AbortSignal }) =>

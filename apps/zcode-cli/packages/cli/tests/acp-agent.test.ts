@@ -242,7 +242,10 @@ class FakeCore implements AcpCorePort {
   }
 
   async resume(input: { cwd: string; sessionId: string }): Promise<AcpSession> {
-    this.sessions.set(input.sessionId, fakeSession(input.sessionId));
+    // 与真实 AcpCoreSessions 同规：已绑定会话的重复 resume 回原句柄，不换绑定。
+    if (!this.sessions.has(input.sessionId)) {
+      this.sessions.set(input.sessionId, fakeSession(input.sessionId));
+    }
     return this.get(input.sessionId)!;
   }
 
@@ -252,6 +255,13 @@ class FakeCore implements AcpCorePort {
 
   async closeAll(): Promise<void> {
     this.sessions.clear();
+  }
+
+  catalog: Awaited<ReturnType<AcpCorePort["slashCatalog"]>> | Error = { commands: [], skills: [] };
+
+  async slashCatalog(_sessionId: string) {
+    if (this.catalog instanceof Error) throw this.catalog;
+    return this.catalog;
   }
 }
 
@@ -1145,7 +1155,439 @@ test("acp agent: available_commands_update advertises goal and dwf after new/res
         ? update.availableCommands.map((command) => command.name)
         : [],
     );
-    assert.deepEqual(commands.sort(), ["dwf", "dwf", "goal", "goal"]);
+    assert.deepEqual(commands.sort(), ["dwf", "dwf", "goal", "goal", "skill", "skill"]);
+  });
+});
+
+test("acp agent: advertised skill names route to the manual skill prompt; catalog failure keeps local commands", async () => {
+  const core = new FakeCore();
+  core.catalog = {
+    commands: [{ description: "Review", name: "review" }],
+    skills: [{ description: "Review a diff", name: "diff-review" }],
+  };
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+    await settle(20);
+    const names = updates.flatMap((update) =>
+      update.sessionUpdate === "available_commands_update"
+        ? update.availableCommands.map((command) => command.name)
+        : [],
+    );
+    assert.deepEqual(names, ["goal", "dwf", "skill", "review", "diff-review"]);
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/diff-review main", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.match(session.text ?? "", /name `diff-review`[\s\S]*main/);
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/review now", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, "/review now", "custom commands stay raw for core expansion");
+
+    core.catalog = new Error("core down");
+    updates.length = 0;
+    await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+    await settle(20);
+    const fallback = updates.flatMap((update) =>
+      update.sessionUpdate === "available_commands_update"
+        ? update.availableCommands.map((command) => command.name)
+        : [],
+    );
+    assert.deepEqual(fallback, ["goal", "dwf", "skill"]);
+  });
+});
+
+test("acp agent: bare /skill answers locally; catalog misses still reach the model", async () => {
+  // core 不认识 /skill（command-center 本地命令兼 facade 保留名）：裸命令以
+  // agent_message_chunk 本地收口列技能；/skill <name> 恒改写进模型轮——目录
+  // 是展示投影不是 resolver 全集，缺失由 Skill 工具报出（issue #27）。
+  const core = new FakeCore();
+  core.catalog = {
+    commands: [],
+    skills: [{ description: "Review a diff", name: "diff-review" }],
+  };
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    await settle(20);
+    const session = core.sessions.get(created.sessionId)!;
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/skill", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(session.text, undefined, "the list outcome must not reach submitPrompt");
+    const chunks = updates
+      .filter((update) => update.sessionUpdate === "agent_message_chunk")
+      .map((update) => (update.content.type === "text" ? update.content.text : ""));
+    assert.match(chunks[0] ?? "", /Available skills \(1\):/);
+    assert.match(chunks[0] ?? "", /- diff-review: Review a diff/);
+    // 目录缺的名不本地拒：改写为手动技能提示交给 Skill 工具裁定。
+    const prompted = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/skill nope go", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(prompted.stopReason, "end_turn");
+    assert.match(session.text ?? "", /name `nope`[\s\S]*go/);
+  });
+});
+
+test("acp agent: closing a session mid-catalog-fetch suppresses the deferred ad", async () => {
+  // session/close 先于目录回包：迟到的广告不得复活 slashCatalogs 条目，
+  // 也不得向已关闭的 session 发 available_commands_update。
+  const core = new FakeCore();
+  let releaseCatalog: (() => void) | undefined;
+  core.slashCatalog = () =>
+    new Promise((resolve) => {
+      releaseCatalog = () => resolve({ commands: [], skills: [] });
+    });
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    await waitFor(() => releaseCatalog !== undefined);
+    await ctx.request(methods.agent.session.close, { sessionId: created.sessionId });
+    releaseCatalog?.();
+    await settle(20);
+    assert.equal(
+      updates.filter((update) => update.sessionUpdate === "available_commands_update").length,
+      0,
+      "closed sessions must not receive the deferred command ad",
+    );
+  });
+});
+
+test("acp agent: a failed catalog refetch drops the stale routing catalog", async () => {
+  // 重复 resume 已绑定会话会重跑广告链：refetch 失败时广告面回落本地命令，
+  // 路由目录必须同步作废——否则客户端看不到技能行，/<name> 却仍被改写（issue #20）。
+  const core = new FakeCore();
+  core.catalog = {
+    commands: [],
+    skills: [{ description: "Review a diff", name: "diff-review" }],
+  };
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    await settle(20);
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/diff-review go", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.match(session.text ?? "", /name `diff-review`/, "catalog hit rewrites");
+
+    core.catalog = new Error("core down");
+    updates.length = 0;
+    await ctx.request(methods.agent.session.resume, {
+      cwd: "/workspace",
+      sessionId: created.sessionId,
+    });
+    await settle(20);
+    const names = updates.flatMap((update) =>
+      update.sessionUpdate === "available_commands_update"
+        ? update.availableCommands.map((command) => command.name)
+        : [],
+    );
+    assert.deepEqual(names, ["goal", "dwf", "skill"], "failed refetch advertises locals only");
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/diff-review go", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, "/diff-review go", "unadvertised name must forward verbatim");
+  });
+});
+
+test("acp agent: a catalog fetch lost to session close logs debug, not warn", async () => {
+  // 正常 close 打在途拉取上的 rejection 是文档化竞态，不是目录故障（issue #21）：
+  // 与真实 AcpCoreSessions 同款，会话释放后 slashCatalog 拒绝。
+  const core = new FakeCore();
+  const warnings: string[] = [];
+  const debugs: string[] = [];
+  core.slashCatalog = async (sessionId) => {
+    await settle(10);
+    if (!core.get(sessionId)) throw new Error(`Unknown ACP session: ${sessionId}`);
+    return { commands: [], skills: [] };
+  };
+  const app = createAcpAgentApp({
+    logger: {
+      debug: (message) => debugs.push(message),
+      warn: (message) => warnings.push(message),
+    },
+    sessions: core,
+    version: "1.2.3",
+  });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    await ctx.request(methods.agent.session.close, { sessionId: created.sessionId });
+    await settle(30);
+    assert.deepEqual(warnings, [], "close race must not warn");
+    assert.ok(debugs.some((message) => message.includes("slash catalog")));
+  });
+});
+
+test("acp agent: a late catalog reply never lands on a re-bound session", async () => {
+  // close + 同 id 再 resume 回来的是另一条绑定（新 handle）：旧拉取的迟到回包
+  // 不得投递广告、不得把旧目录写进新绑定的路由表（issue #21）。
+  const core = new FakeCore();
+  type Catalog = Awaited<ReturnType<AcpCorePort["slashCatalog"]>>;
+  const releases: Array<(catalog: Catalog) => void> = [];
+  core.slashCatalog = () => new Promise<Catalog>((resolve) => releases.push(resolve));
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    await waitFor(() => releases.length === 1);
+    await ctx.request(methods.agent.session.close, { sessionId: created.sessionId });
+    await ctx.request(methods.agent.session.resume, {
+      cwd: "/workspace",
+      sessionId: created.sessionId,
+    });
+    await waitFor(() => releases.length === 2);
+    releases[0]!({ commands: [], skills: [{ description: "stale", name: "stale-skill" }] });
+    releases[1]!({ commands: [], skills: [{ description: "fresh", name: "fresh-skill" }] });
+    await settle(20);
+    const advertised = updates.flatMap((update) =>
+      update.sessionUpdate === "available_commands_update"
+        ? update.availableCommands.map((command) => command.name)
+        : [],
+    );
+    assert.ok(advertised.includes("fresh-skill"));
+    assert.ok(!advertised.includes("stale-skill"), "released binding's ad must not be delivered");
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/stale-skill go", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(
+      session.text,
+      "/stale-skill go",
+      "released binding's catalog must not rewrite the new session",
+    );
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/fresh-skill go", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.match(session.text ?? "", /name `fresh-skill`/);
+  });
+});
+
+test("acp agent: a superseded catalog fetch cannot overwrite the newer result", async () => {
+  // 同一绑定的重复 resume 各起一次目录拉取（issue #23）：后到回包不得用旧目录
+  // 覆盖新目录，也不得在新广告之后再投一条旧广告——只有最新一次拉取生效。
+  const core = new FakeCore();
+  type Catalog = Awaited<ReturnType<AcpCorePort["slashCatalog"]>>;
+  const releases: Array<(catalog: Catalog) => void> = [];
+  core.slashCatalog = () => new Promise<Catalog>((resolve) => releases.push(resolve));
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    await waitFor(() => releases.length === 1);
+    await ctx.request(methods.agent.session.resume, {
+      cwd: "/workspace",
+      sessionId: created.sessionId,
+    });
+    await waitFor(() => releases.length === 2);
+    // 新拉取先回、旧拉取后回：目录是现扫的，后到回包是更旧的观测。
+    releases[1]!({ commands: [], skills: [{ description: "fresh", name: "fresh-skill" }] });
+    releases[0]!({ commands: [], skills: [{ description: "stale", name: "stale-skill" }] });
+    await settle(20);
+    const ads = updates.filter(
+      (update) => update.sessionUpdate === "available_commands_update",
+    );
+    assert.equal(ads.length, 1, "superseded fetch must not deliver a second ad");
+    assert.deepEqual(
+      ads[0]!.sessionUpdate === "available_commands_update"
+        ? ads[0]!.availableCommands.map((command) => command.name)
+        : [],
+      ["goal", "dwf", "skill", "fresh-skill"],
+    );
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/fresh-skill go", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.match(session.text ?? "", /name `fresh-skill`/);
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/stale-skill go", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, "/stale-skill go", "stale catalog must not reach routing");
+  });
+});
+
+test("acp agent: a superseded catalog failure keeps the newer catalog and stays quiet", async () => {
+  // 被取代的旧拉取若迟到 rejection（issue #23）：不得清掉新目录、不得再投回落
+  // 广告，也不告警——supersede 与 close race 同属正常竞态。
+  const core = new FakeCore();
+  type Catalog = Awaited<ReturnType<AcpCorePort["slashCatalog"]>>;
+  const pending: Array<{
+    resolve: (catalog: Catalog) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  core.slashCatalog = () =>
+    new Promise<Catalog>((resolve, reject) => pending.push({ resolve, reject }));
+  const warnings: string[] = [];
+  const app = createAcpAgentApp({
+    logger: { warn: (message) => warnings.push(message) },
+    sessions: core,
+    version: "1.2.3",
+  });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    await waitFor(() => pending.length === 1);
+    await ctx.request(methods.agent.session.resume, {
+      cwd: "/workspace",
+      sessionId: created.sessionId,
+    });
+    await waitFor(() => pending.length === 2);
+    pending[1]!.resolve({
+      commands: [],
+      skills: [{ description: "fresh", name: "fresh-skill" }],
+    });
+    await waitFor(() =>
+      updates.some((update) => update.sessionUpdate === "available_commands_update"),
+    );
+    pending[0]!.reject(new Error("stale fetch failed late"));
+    await settle(20);
+    assert.deepEqual(warnings, [], "a superseded failure is a normal race, not an outage");
+    assert.equal(
+      updates.filter((update) => update.sessionUpdate === "available_commands_update").length,
+      1,
+      "superseded rejection must not re-advertise the fallback",
+    );
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/fresh-skill go", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.match(session.text ?? "", /name `fresh-skill`/, "newer catalog survives the stale rejection");
+  });
+});
+
+test("acp agent: a catalog fetch deferred past connection close never starts", async () => {
+  // connectWith 回调返回即关连接（abort → connectionClosed）：延迟槽触发时不得
+  // 再发起 slashCatalog——它会为死连接重建 lane 甚至拉起 core（issue #25）。
+  const core = new FakeCore();
+  let catalogCalls = 0;
+  core.slashCatalog = async () => {
+    catalogCalls += 1;
+    return { commands: [], skills: [] };
+  };
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+  });
+  await settle(20);
+  assert.equal(catalogCalls, 0, "closed connection must not start the deferred catalog fetch");
+});
+
+test("acp agent: a catalog rejection landing after connection close is not a warning", async () => {
+  // 在途拉取的迟到 rejection 落在死连接上：与 released/superseded 竞态同类——
+  // 连接 teardown 的伴随症状，不是目录故障，记 debug 不告警（issue #25）。
+  const core = new FakeCore();
+  type Catalog = Awaited<ReturnType<AcpCorePort["slashCatalog"]>>;
+  const pending: Array<{
+    resolve: (catalog: Catalog) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  core.slashCatalog = () =>
+    new Promise<Catalog>((resolve, reject) => pending.push({ resolve, reject }));
+  const warnings: string[] = [];
+  const debugs: string[] = [];
+  const app = createAcpAgentApp({
+    logger: {
+      debug: (message) => debugs.push(message),
+      warn: (message) => warnings.push(message),
+    },
+    sessions: core,
+    version: "1.2.3",
+  });
+  const { app: client } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+    await waitFor(() => pending.length === 1);
+  });
+  pending[0]!.reject(new Error("lane torn down"));
+  await settle(20);
+  assert.deepEqual(warnings, [], "teardown rejection must not warn");
+  assert.ok(debugs.some((message) => message.includes("slash catalog")));
+});
+
+test("acp agent: a skill named like a builtin cannot shadow it", async () => {
+  // /init 由 core facade 内置展开——技能同名行既不广告也不改写（issue #17）；
+  // 显式 /skill init 仍走技能命名空间（命令词已消歧，同 TUI 语义）。
+  const core = new FakeCore();
+  core.catalog = {
+    commands: [],
+    skills: [{ description: "Shadow init", name: "init" }],
+  };
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    await settle(20);
+    const advertised = updates.flatMap((update) =>
+      update.sessionUpdate === "available_commands_update"
+        ? update.availableCommands.map((command) => command.name)
+        : [],
+    );
+    assert.ok(!advertised.includes("init"), "reserved names are never advertised");
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/init", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, "/init", "builtin name forwards verbatim for core expansion");
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/skill init note", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.match(session.text ?? "", /name `init`[\s\S]*note/, "explicit /skill still loads the skill");
   });
 });
 
@@ -1206,31 +1648,6 @@ test("acp agent: /skill <name> [task] reaches the core as the manual skill promp
     });
     assert.equal(result.stopReason, "end_turn");
     assert.equal(session.text, buildManualSkillPrompt("diff-review", ""));
-  });
-});
-
-test("acp agent: bare /skill replies usage locally and never reaches the core", async () => {
-  const core = new FakeCore();
-  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
-  const { app: client, updates } = collectUpdates(() => "");
-  await client.connectWith(app, async (ctx) => {
-    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
-    const created = await ctx.request(methods.agent.session.new, {
-      cwd: "/workspace",
-      mcpServers: [],
-    });
-    const session = core.sessions.get(created.sessionId)!;
-    const result = await ctx.request(methods.agent.session.prompt, {
-      prompt: [{ text: "/skill", type: "text" }],
-      sessionId: created.sessionId,
-    });
-    assert.equal(result.stopReason, "end_turn");
-    assert.equal(session.text, undefined, "bare /skill must not reach submitPrompt");
-    assert.ok(updates.some((update) =>
-      update.sessionUpdate === "agent_message_chunk" &&
-      update.content.type === "text" &&
-      update.content.text.includes("Usage: /skill"),
-    ));
   });
 });
 
