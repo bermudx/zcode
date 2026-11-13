@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+  COREPACK_ENABLE_PROJECT_SPEC: "0"
+
+jobs:
+  check:
+    name: check + build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # merge-base needed by --changed checks and fork-tests selection
+      - uses: jdx/mise-action@v2 # toolchain pins live in root mise.toml
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-
+      # Root workspace covers apps/zcode-cli/packages/* too, so this one
+      # install provides every CLI dep (see root pnpm-workspace.yaml). The
+      # nested apps/zcode-cli workspace cannot install standalone: its
+      # packages declare workspace:* deps on root packages.
+      - name: Install workspace
+        run: mise exec -- pnpm install --frozen-lockfile
+      # CLI packages import root shared packages' built declarations; emit
+      # them before the CLI build (same surface as scripts/fork-typecheck.mjs).
+      - name: Build root shared surface
+        run: mise exec -- node_modules/.bin/tsc -b packages/shared/tsconfig.testing.json packages/rpc packages/provider packages/provider-node packages/shared packages/model-option-map
+      # pnpm --dir apps/zcode-cli build fails: turbo's bin only exists in root
+      # node_modules/.bin (docs/fork/verification.md PATH gap). Root binary,
+      # cli cwd — same shape fork-typecheck.mjs uses.
+      - name: Build CLI workspace (turbo)
+        run: cd apps/zcode-cli && mise exec -- ../../node_modules/.bin/turbo run build
+      - name: Build model-option-map
+        run: mise exec -- pnpm --filter @zcode/model-option-map build
+      - name: Typecheck (piz gate)
+        run: mise exec -- pnpm typecheck:piz
+      - name: Lint (root)
+        run: mise exec -- pnpm lint
+      # run-cli-lint.mjs spawns `node "$npm_execpath" exec oxlint`; under mise
+      # npm_execpath is the ELF shim and no pnpm.cjs exists (docs/fork/
+      # verification.md). Install the npm-packaged pnpm for its JS entry.
+      - name: Lint (CLI workspace)
+        run: |
+          mise exec -- npm install --global pnpm@10.33.2
+          PNPM_CJS="$(mise exec -- npm root --global)/pnpm/bin/pnpm.cjs"
+          [ -f "$PNPM_CJS" ] || { echo "pnpm.cjs missing at $PNPM_CJS" >&2; exit 1; }
+          npm_execpath="$PNPM_CJS" mise exec -- node scripts/run-cli-lint.mjs
+      - name: Architecture check (changed)
+        run: mise exec -- pnpm architecture:check --changed
+      # --max-workers 2: test results are load-sensitive (docs/fork/verification.md).
+      # --base origin/main: actions/checkout creates no local `main` branch.
+      # Root .bin on PATH: bins like tsx live only there, not in package or
+      # inner-workspace .bin dirs, and package-script tests spawn bare shells.
+      - name: Fork tests (selected)
+        run: PATH="$PWD/node_modules/.bin:$PATH" mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --base origin/main --max-workers 2
+      - name: Fork tests (full)
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        run: PATH="$PWD/node_modules/.bin:$PATH" mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs --full --max-workers 2
+      # Per-package logs live on the ephemeral runner; surface their tails
+      # here or a failing package is undebuggable.
+      - name: Dump fork-test logs on failure
+        if: failure()
+        # Only the fork-tests run dirs — a bare `find /tmp /dev/shm` scans
+        # systemd-private dirs and logs permission-denied noise.
+        run: |
+          shopt -s nullglob
+          for dir in /tmp/piz-fork-tests-run-* /dev/shm/piz-fork-tests-run-*; do
+            for log in "$dir"/_zcode_*.log; do
+              echo "===== $log"
+              tail -150 "$log"
+            done
+          done
+      # Runs only after every check above is green: an uploaded artifact is
+      # proof the sha passed this workflow's tiers.
+      - name: Assemble dist-runtime
+        run: sh apps/zcode-cli/scripts/assemble-dist-runtime.sh "$PWD" "$PWD/apps/zcode-cli/packages/cli/dist-runtime"
+      - name: Upload dist-runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-runtime-${{ github.sha }}
+          path: apps/zcode-cli/packages/cli/dist-runtime
+          retention-days: 14

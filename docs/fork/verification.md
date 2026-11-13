@@ -4,6 +4,35 @@ These commands were inspected in the imported source. **They have not been run
 in this new checkout.** No dependencies or dist artifacts were copied. This is a
 verification plan, not a working-install claim.
 
+## CI (Blacksmith, added 2026-11-08, issue #11)
+
+`.github/workflows/ci.yml` runs on every branch push and manual dispatch on
+`blacksmith-4vcpu-ubuntu-2404` (free tier: 3000 x64 2vCPU-min/month; the 4vCPU
+tag consumes at 2x rate): mise toolchain from `mise.toml` → root install (the
+root workspace also covers `apps/zcode-cli/packages/*`; the nested CLI
+workspace cannot install standalone — its `workspace:*` deps point at root
+packages) → shared `tsc -b` → `turbo run build` → `typecheck:piz` → root and
+CLI lint → `architecture:check --changed` → `fork-tests.mjs --max-workers 2`
+(selected). On `main` pushes and manual dispatches it additionally runs
+`--full`. Only when every step is green it assembles and uploads
+`dist-runtime-<sha>` via `assemble-dist-runtime.sh` — the artifact's existence
+is the gate evidence.
+
+`sh apps/zcode-cli/scripts/promote-piz-from-ci.sh [run-id]` installs that
+artifact for the current clean `main` HEAD — same branch/cleanliness gates,
+atomic swap and `PROMOTED_FROM` semantics as `promote-piz.sh`. Artifacts for
+non-main shas exist but can never install (sha ≠ main HEAD).
+
+`.github/workflows/allowance-build.yml` is manual-only: it builds a chosen
+allowance ref (default `feat/allowance-herdr`, must be pushed to origin),
+smokes `dist/zcode.cjs --version`, and uploads `zcode-allowance-dist-<sha>.tar.gz`.
+Untar it over the allowance checkout's `apps/zcode-cli/packages/cli/dist/` to
+refresh what PATH `zcode` execs.
+
+Runner caveat: Blacksmith runs jobs only in repos where its GitHub App is
+installed (installed on bermudx/zcode 2026-11-08); other repos with
+`runs-on: blacksmith-*` in this org can steal the provisioned capacity.
+
 ## Tooling and boundaries
 
 Use Node/pnpm pinned in root `mise.toml` (`mise exec -- ...`). Read the existing

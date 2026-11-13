@@ -1,0 +1,48 @@
+name: allowance-build
+
+# Manual builder for the standalone `zcode` allowance client (the build PATH
+# `zcode` execs from the archive checkout). Produces a dist/ tarball to untar
+# over the allowance checkout's apps/zcode-cli/packages/cli/dist/.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Ref to build the allowance client from
+        required: true
+        default: feat/allowance-herdr
+
+env:
+  ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+  COREPACK_ENABLE_PROJECT_SPEC: "0"
+
+jobs:
+  build:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: jdx/mise-action@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-allowance-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-allowance-
+      # Root workspace covers apps/zcode-cli/packages/* too; no separate CLI
+      # install (the nested workspace can't resolve its workspace:* deps).
+      - name: Install workspace
+        run: mise exec -- pnpm install --frozen-lockfile
+      - name: Build CLI workspace (turbo)
+        run: cd apps/zcode-cli && mise exec -- ../../node_modules/.bin/turbo run build
+      - name: Smoke check
+        run: |
+          node apps/zcode-cli/packages/cli/dist/zcode.cjs --version
+          echo "built_sha=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Pack dist
+        run: tar -czf zcode-allowance-dist.tar.gz -C apps/zcode-cli/packages/cli dist
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zcode-allowance-dist-${{ env.built_sha }}
+          path: zcode-allowance-dist.tar.gz
+          retention-days: 30

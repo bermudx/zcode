@@ -102,16 +102,28 @@ test("queryTerminalColorsAtStartup: 应答迟到跨 chunk 也能解析", async (
   assert.deepEqual(colors.background, { r: 255, g: 255, b: 255 });
 });
 
-test("queryTerminalColorsAtStartup: 终端不应答时按超时兜底", async () => {
+test("queryTerminalColorsAtStartup: 终端不应答时按超时兜底", async (t) => {
+  // 用 mock timers 断言「到点才兜底」：墙钟（Date.now()）与调度器在高负载
+  // CI 上不保证 80ms 下限（42570818345 flake），要验证的是超时路径本身。
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const stdin = new PassThrough();
   const stdout = new Writable({ write(_c, _e, cb) { cb(); } }) as unknown as NodeJS.WriteStream;
-  const started = Date.now();
-  const colors = await queryTerminalColorsAtStartup({
+  const timeoutMs = 80;
+  let settled = false;
+  const promise = queryTerminalColorsAtStartup({
     stdin: stdin as unknown as NodeJS.ReadStream,
     stdout,
-    timeoutMs: 80,
+    timeoutMs,
+  }).then((colors) => {
+    settled = true;
+    return colors;
   });
-  assert.ok(Date.now() - started >= 80);
+  t.mock.timers.tick(timeoutMs - 1);
+  await Promise.resolve();
+  assert.equal(settled, false, "query must remain pending before timeout");
+  t.mock.timers.tick(1);
+  const colors = await promise;
+  assert.equal(settled, true);
   assert.equal(colors.foreground, undefined);
 });
 
