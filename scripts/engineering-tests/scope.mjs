@@ -30,10 +30,31 @@ async function resolvePushBase(root, head, remote) {
   return (await git(root, ["merge-base", remote, head])).toString().trim();
 }
 
+async function hasCommit(root, ref) {
+  const check = await run("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
+    cwd: root,
+    allowFailure: true,
+  });
+  return check.code === 0;
+}
+
 async function firstPushBase(root, head) {
-  // 首次推送没有 remote SHA；只使用已确认的集成分支，缺失时严格报错，不猜测其他分支。
-  const staging = await commit(root, "origin/staging");
-  return (await git(root, ["merge-base", staging, head])).toString().trim();
+  // 首次推送没有 remote SHA；只使用远端集成分支（origin/staging，其次 origin/HEAD、origin/main）。
+  // 修复原因：fork 没有 staging 分支，旧逻辑让每个新分支首次 push 都失败；不回退到本地分支。
+  const originHead = await run(
+    "git",
+    ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+    { cwd: root, allowFailure: true },
+  );
+  const candidates = ["origin/staging"];
+  if (originHead.code === 0) candidates.push(originHead.stdout.toString().trim());
+  candidates.push("origin/main");
+  for (const ref of candidates) {
+    if (await hasCommit(root, ref)) {
+      return (await git(root, ["merge-base", await commit(root, ref), head])).toString().trim();
+    }
+  }
+  throw new Error(`无法解析首次推送基线：${candidates.join("、")} 均不存在`);
 }
 
 /** 只解析比较基线；改动文件与关联测试全部由 Vitest 官方选择。 */
