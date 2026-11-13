@@ -7,8 +7,14 @@
 1.8-2.2GB。pi-tui 前端已把主进程降到 ~470MB、空闲 CPU 0%，但子进程与
 每会话一份 runtime 的结构成本不变。
 
-目标：**一个 workspace 一个共享无头 core（app-server），N 个 pi-tui 瘦客户
+目标：**一台机器一个共享无头 core（app-server），N 个 pi-tui 瘦客户
 端进程 attach；此模式下不启动任何 MCP/office 插件/node-repl 子进程。**
+
+2026-11-08 目标修正：原"每 workspace 一个 core"是 launcher 实现把 socket
+路径挂到 workspace 身份的副产物，不是产品目标。operator 明确：**one core,
+period**——跨所有 workspace、session、terminal `piz` 与 `piz acp`。
+workspace 身份只活在会话级协议参数与 core 内部路由/权限边界，不参与
+core 进程的选择与生命周期。
 
 非目标：desktop/web/remote 链路改动；opentui 前端改动；插件系统重构。
 
@@ -35,7 +41,7 @@ session/create → live runtime（尚未持久化）
 ## 架构
 
 ```
-herdr pane 1..N                    每 workspace 一个
+herdr pane 1..N / piz acp 1..N     每数据根一个共享 user core
 ┌──────────────┐                  ┌────────────────────────┐
 │ zcode attach │  unix socket     │ zcode app-server       │
 │ (pi-tui 渲染  │ ───────────────▶ │ --socket <path>        │
@@ -50,31 +56,54 @@ herdr pane 1..N                    每 workspace 一个
   host 构建，传输从 stdio 增加 Unix socket listener，支持多客户端并发
   连接（每连接一个协议会话；session 归属与 owner/lease 语义沿用现有
   Host 实现，不新增状态所有者）。
-- socket 路径约定：`~/.zcode/v2/sockets/core-<hash>.sock`，其中
-  `<hash> = sha256(workspaceIdentity).slice(0,16)`；workspaceIdentity
-  统一用现有构造工具（`workspaceIdentity?.trim() || workspacePath`），
-  不手写格式。同目录写 `<path>.pid` 与 `<path>.info`（JSON：版本、
-  workspaceIdentity、启动时间）。
+- socket 路径约定（2026-11-08 单一 core 收口）：
+  `<dataBaseDir>/.zcode/v2/sockets/core.sock`——固定文件名，数据根 =
+  `options.dataBaseDir ?? ZCODE_DATA_BASE_DIR ?? homedir()`，Unix 上必须
+  绝对路径。路径不含 workspace/frontend/provider 标识：workspace 身份
+  只在会话级请求参数里（`session/create|resume|list`），不参与传输选择。
+  Windows named pipe 分支（未实测）按数据根 hash：
+  `\\.\pipe\zcode-core-<sha256(dataBaseDir)[:16]>`。
+  同目录写 `<path>.pid` 与 `<path>.info`（JSON：版本、scope:`"user"`、
+  socketPath、启动时间——scope 只记录数据/共享范围，不断言监督关系，
+  见「core 自登记」节）。
 - **插件全关**：socket 模式下服务端以「零插件」配置构建 runtime——
   office 插件、node-repl/browser-use 宿主、marketplace MCP 一律不注
   册、不 spawn。入口在 `bootstrap/src/plugins.ts` / adapters config
   （`pluginsEnabled`）增加显式禁用参数；CLI 侧落为
   `zcode app-server --socket <path> --no-plugins`。
-- 生命周期 v1：首个客户端发现无 socket 时负责 detached 启动服务端
-  （setsid，stdio 全断开），原子锁（`O_CREAT|O_EXCL` lock 文件）防双
-  启动；等待 socket 就绪超时 60s。停止：`kill $(cat <path>.pid)`，
-  写入文档；不做 idle 自动退出。锁等待与就绪等待各占独立预算：
-  就绪窗口从新 spawn 完成起算，等锁耗掉的预算不压缩 core 启动
-  （2026-10-25 实测：herdr 开机恢复并发拉起十余个 agent 时 core 的
-  spawn→listen 超过旧 10s 上限，客户端超时误杀正常启动中的 core，
-  piz --resume 全灭；上限提至 60s 并把锁/就绪预算拆开）。
+- 生命周期 v2（2026-11-08 单一 core 收口）：core 的生命周期归 **user
+  服务管理器**，不归任何客户端 scope——客户端 scope（如 T3 的 ACP
+  runtime scope）退役不能带走共享 core。首个发现 socket 缺席的客户端
+  经原子锁（`O_CREAT|O_EXCL` lock 文件）赢得唯一拉起权后，调用
+  `systemd-run --user --quiet --collect --service-type=exec
+  --expand-environment=no --unit=piz-core-<sha256(socketPath)[:16]>
+  --property=WorkingDirectory=<数据根> --property=StandardInput=null
+  --property=StandardOutput=null --property=StandardError=journal`
+  启动瞬时 user service：manager 把服务放在客户端 cgroup 之外。
+  要求 systemd ≥ 254（`--expand-environment=no` 自 v254 起；本地
+  man systemd-run(1)）。`systemd-run` exit 0 只代表服务被受理，
+  不代表 core 就绪——客户端继续
+  探测 socket 到 60s 上限；非零退出报 manager/启动失败（stderr 有界
+  收集进错误），报错前再探一次 socket 容忍竞态。停止：
+  `systemctl --user stop piz-core-<hash>` 或 `kill $(cat <path>.pid)`；
+  不做 idle 自动退出（排空退出见下文「core 排空退出」）。锁等待与就绪
+  等待各占独立预算：就绪窗口从拉起器进程 OS spawn 完成起算（'spawn'
+  事件之后、manager 受理结果返回之前），等锁耗掉的预算不压缩
+  core 启动（2026-10-25 实测：herdr 开机恢复并发拉起十余个 agent 时
+  core 的 spawn→listen 超过旧 10s 上限，客户端超时误杀正常启动中的
+  core，piz --resume 全灭；上限提至 60s 并把锁/就绪预算拆开）。
+  **无 user service manager 的平台**（非 Linux Unix，含 darwin）：已
+  监听 socket 仍可复用；socket 缺席时不自动拉起，显式报「需要独立
+  supervisor」错误并给出 `zcode app-server --socket ...` 手动命令——
+  不回落 detached/double-fork spawn（那会把 core 生命周期绑回客户端
+  scope）。win32 仍不支持 spawn。
 
 ### 2. 客户端：`zcode attach`
 
 - 新命令 `zcode attach`（等价 `zcode tui --tui-frontend=pi --attach`，
   取一个即可，实现取后者 flag、前者别名）。行为：
-  1. 解析当前 workspace 的 socket 路径；connect 失败 → 按上节规则
-     spawn 服务端并等待；
+  1. 解析数据根的 socket 路径（单一 core，与 workspace 无关）；
+     connect 失败 → 按上节规则经服务管理器拉起并等待；
   2. 协议握手校验 `ZCODE_PROTOCOL_VERSION`，不匹配 → 明确报错退出；
   3. 以协议客户端实现 `TuiOptions` 全部端口，动态 import
      `@zcode/tui-pi` 的 `runTui`（沿用 tui-pi-runtime-loader）。
@@ -151,8 +180,12 @@ herdr pane 1..N                    每 workspace 一个
   `ensureServer` 在原 spawn/就绪等待错误中原样抛出。烟测
   `tests/attach-binary.smoke.test.ts` 覆盖。
 - `ensureServer`：确定性 socket 路径
-  `<dataBaseDir>/.zcode/v2/sockets/core-<sha256(workspace-key).slice(0,16)>.sock`，
-  原子锁 + detached spawn + `.pid`/`.info` 元数据 + 就绪等待。
+  `<dataBaseDir>/.zcode/v2/sockets/core.sock`（单一 core，不含 workspace
+  标识），原子锁 + `systemd-run --user` 瞬时 service 拉起 + 就绪等待，
+  返回 `{socketPath, started}`；`serviceRunner` 测试缝可替换
+  systemd-run 做 hermetic 启动器测试（fixture-only，不证明 cgroup/
+  生命周期）。`.pid`/`.info` 由 server 自写、仅作操作者元数据，
+  `ensureServer` 不读不写（见「core 自登记」节）。
 - 协议新增：`session/rawEvent` 通知、`eventFormat: "raw"`（subscribe/
   events）、`session/recallPreviousInput`、`session/recordInputHistory`。
 - 断线 UX：socket 断开 → pi-tui 状态行显示断线提示；重连并按 `sequenceNumber`
@@ -164,11 +197,17 @@ herdr pane 1..N                    每 workspace 一个
 
 ### 服务端生命周期
 
-- 起：首个 attach 客户端 `ensureServer` 自动 spawn（detached、
-  `--no-plugins`、`ZCODE_WORKSPACE_IDENTITY` 透传）。
-- 停：`kill $(cat <socket>.pid)`；SIGTERM 下 `.sock` 文件随监听关闭
-  移除，`.pid`/`.info` 由下一次 `ensureServer` 的死 pid 探测回收。
-- 客户端退出只断开本连接：core 与其会话照常存活。
+- 起：首个 attach 客户端 `ensureServer` 经 `systemd-run --user` 瞬时
+  service 拉起（`--no-plugins`；service env 不带
+  `ZCODE_WORKSPACE_IDENTITY`/`HERDR_*`/`T3CODE_*`/service-instance
+  变量——workspace 身份不再是进程级事实）。非 Linux Unix 显式报错，
+  win32 不支持。
+- 停：`systemctl --user stop piz-core-<hash>` 或
+  `kill $(cat <socket>.pid)`；SIGTERM 下 `.sock` 文件随监听关闭
+  移除，`.pid`/`.info` 残留为陈旧元数据，由下一次 bind 成功的
+  server 自写覆盖——`ensureServer` 不消费也不清理登记文件。
+- 客户端退出只断开本连接：core 与其会话照常存活；客户端 scope 退役
+  （如 T3 回收 ACP runtime scope）同样只断连接，不影响 service/core。
 
 ### 实测资源（`measure-attach.sh`，稳态 15s）
 
@@ -198,7 +237,9 @@ herdr pane 1..N                    每 workspace 一个
 | server   | 406     | 0        |
 | 合计     | 1219    |          |
 
-\* detached server 在拉起它的客户端退出前仍挂在其进程树下。
+\* 测量时（旧 detached spawn）server 在拉起它的客户端退出前仍挂在其进程
+树下；2026-11-08 起 core 由 user 服务管理器持有，不再属于任何客户端
+进程树/scope。
 
 对照验收线：`zcode-attach` 客户端 160–166MB < 200MB、server
 406MB < 1.2GB、N=5 合计 1219MB < 3GB 全部达标。monolith
@@ -315,12 +356,23 @@ markdown 命令在 attach 模式分两段：**目录走协议，展开留 core**
   刻意不接 `loadCustomCommand`。决策记录：
   [docs/fork/attach-custom-commands-design.md](../../../../../docs/fork/attach-custom-commands-design.md)。
 
+### ACP 前端的 `/skill` 手动调用（2026-11-09）
+
+`piz acp` 客户端同样没有 command-center：`session/prompt` 在 `/goal`、
+`/dwf` 本地路由之后再过一遍 TUI 同款 `parseSlashCommand`，只对 `/skill`
+特判——`/<name> [task]` 改写为 `buildManualSkillPrompt` 后走普通 prompt
+路径（core 不认识 `/skill` 原文，原文转发会把命令词喂给模型）；裸
+`/skill` 不进 core，直接回一条 `agent_message_chunk` usage
+（`manualSkillCommandUsage`）并以 `end_turn` 收口。技能名不在 ACP 侧
+校验：缺失/歧义由 core 的 Skill 工具按实时技能集裁定，与 TUI 从不查
+目录同口径；其余 slash 输入维持 P005 原文转发。
+
 ### core 死亡与重连恢复
 
 socket close → 状态行 "reconnecting" + transcript 内 `session_notice`
 横幅 → 指数退避重连（1s 起，封顶 30s）。每轮重连先重跑
-`ensureServer`：stale pid/socket 由原子 reclaim 清理并 detached
-respawn 新 core（同一确定性 socketPath）。连接恢复后逐会话
+`ensureServer`：stale 锁经原子 reclaim 清理、socket 探测失败后由服务
+管理器重新拉起新 core（同一确定性 socketPath）。连接恢复后逐会话
 `session/subscribe(afterSeq)` 补放缺口；core 重启丢 registry 时先经
 `session/resume` 冷物化再重试。composer 草稿本地保留，恢复后可继续
 输入。
@@ -481,12 +533,21 @@ permission mode，二者在 plan 会话中刻意不同。attach 的 `initialMode
 ### core 自登记（.pid/.info 所有权）
 
 `.pid/.info` 由 **bind 成功的 server 进程**在 listen 后自写
-（`zcode-protocol-entrypoint`）。客户端侧 `ensureServer` 只负责
-锁/spawn/等就绪，不写登记：双 spawn 竞争下客户端写入会把先退出的
-进程登记成 owner（实测 `.pid` 指向死进程、真 listener 无登记），
-`probeSocket` 只能证明"有人在听"，证明不了"我的 child 在听"。
-失败路径同样不清理登记文件——所有权在 server，客户端删别人的
-登记才是破坏。
+（`zcode-protocol-entrypoint`），单一 core 下无条件登记——不再
+依赖 spawn env 的 workspace 身份。`.info` 形状为 `{version,
+scope:"user", socketPath, startedAt}`：`scope:"user"` 只记录
+数据/共享范围（一个 core 服务整个用户的全部 workspace），**不
+断言监督关系**——任何 socket 模式 bind 都写同一个值，手动
+`zcode app-server --socket` 启动的进程登记内容与经服务管理器拉起
+的完全相同。进程真实归谁管只能由 cgroup/service manager 事实证明
+（`systemctl --user status piz-core-<hash>`），元数据字段证明不了。
+客户端侧 `ensureServer` 只负责锁/拉起请求/等就绪，不读不写登记：
+`.pid`/`.info` 可能滞后或陈旧（上次 core 的残留直到下一次 bind 才
+被覆盖），永不作就绪、归属或清理依据。双 spawn 竞争下客户端写入
+还会把先退出的进程登记成 owner（实测 `.pid` 指向死进程、真
+listener 无登记），`probeSocket` 只能证明"有人在听"，证明不了
+"我的 service 在听"。失败路径同样不清理登记文件——所有权在
+server，客户端删别人的登记才是破坏。
 
 ### resume 目标的"最近"定义
 
@@ -544,7 +605,7 @@ busy 事实——前台执行 / background task / finalization / model-only turn
 **core 排空退出**：同一趟 30s sweep 在回收后检查 `attachedConnections`
 与 `detachedConnections` 全空（且没有 accepted-未登记的建链在途）→
 `lifecycle.requestShutdown()` 走正常关闭路径，core 进程退出——否则
-socket core 只剩空壳监听却常驻成僵尸（每 workspace 一个）。下一个
+socket core 只剩空壳监听却常驻成僵尸。下一个
 attach 客户端 `ensureServer` 探测到死 socket 后走原子 reclaim 重拉新
 core，用户无感。detached session 仍在收养窗口内时池非空，core 照常活。
 
@@ -684,15 +745,17 @@ resume 命令指向 `zcode --resume`。
    `zcode attach`/`tui --shared-core` 不启用（进程是 `zcode`，
    herdr 侧仍按 ZCode 处理）。
 
-2. **core env 标记**：`ensureServer` spawn core 时写
+2. **core env 标记**：`ensureServer` 拉起 core 时经 service env 写
    `ZCODE_ATTACH_CORE=1`。语义：「这个 core 为 attach 客户端服务，
    env 烘焙的 pane 归属无效」。`~/.zcode/herdr-hook.sh` 见到该标记
-   直接 no-op，从根上停掉共享 core 的 zcode 误报。
+   直接 no-op，从根上停掉共享 core 的 zcode 误报。2026-11-08 单一
+   core 收口后服务 env 不再透传 `HERDR_*`/`T3CODE_*`——core 连
+   "首个 pane" 归属都拿不到，钩子只剩误报一条路，标记抑制更彻底。
 
-   - 优先级/生效面：标记由客户端在 spawn 时无条件写入，不是用户配
+   - 优先级/生效面：标记由客户端在拉起时无条件写入，不是用户配
      置；in-process core（desktop/monolith tui）不经 ensureServer，
      不受影响；zcode attach（monolith）客户端同样受益——共享 core
-     的钩子对任何非首个 pane 都是错的。
+     的钩子对任何 pane 都是错的。
    - 失败行为：标记缺失（旧 core 仍在跑）时钩子照旧误报，但 herdr
      侧 `zcode-attach`→`piz` 的进程识别会让 `--agent zcode` 的钩子
      上报与该 pane 的检测 agent 冲突被拒；客户端 reporter 的真实

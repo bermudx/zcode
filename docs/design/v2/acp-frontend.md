@@ -15,8 +15,9 @@ Electron path.
 ACP client (T3 Code)                    piz acp                         shared core
 ────────────────────                    ───────                         ───────────
 initialize             ──►  capabilities: v1, resume{}, close{},       (no core call)
-                            no loadSession, no image/audio, no MCP
-session/new {cwd}      ──►  one lazy lane per cwd ─────────────────────► session/create
+                            no loadSession, no image/audio; HTTP/SSE MCP
+session/new {cwd,
+ mcpServers}           ──►  one lazy lane per cwd ─────────────────────► session/create
                             └─ subscribe, compact cap for GLM
 session/prompt         ──►  v4 sendText ──────────────────────────────► turn
                             (/goal, /dwf routed locally: session/goal, dwf wire ops)
@@ -30,8 +31,18 @@ session/close          ──►  v4 stop + session/close ───────�
 ```
 
 `piz acp` reuses `AttachSessionHandle` for sessions, turns, mode/model mutation and
-permission callbacks; it does not re-implement the share-core client. `session/new`
-ignores `mcpServers` and logs the count — core owns its MCP configuration.
+permission callbacks; it does not re-implement the share-core client. Client MCP
+forwarding and lifecycle follow the approved extension below. This is a source
+contract, not a claim that the installed matched pair has been updated.
+
+Core ownership: since 2026-11-08 there is exactly one shared core per data root.
+When the socket is absent the adapter asks `ensureServer` for it without a
+workspace; on Linux `ensureServer` starts the core as a transient `systemd --user`
+service (`piz-core-<sha256(socketPath)[:16]>`) so the core's lifetime is owned by
+the user service manager, not by this adapter's process or any client scope (T3
+runtime scope retirement cannot kill it). The launch requires systemd ≥ 254
+(`--expand-environment=no`; local man systemd-run(1)). Platforms without a user
+service manager fail explicitly — no detached-spawn fallback.
 
 ## Use with T3 Code
 
@@ -226,7 +237,7 @@ not hand-copied per call site.
 | Sessions | `session/new`, `session/resume`, `session/close` (real stop); no `session/load`, so history is never replayed |
 | Turns | `session/prompt` (text + resource blocks only; images/audio rejected with a message), `session/cancel`, `session/update` |
 | Local commands | `/goal` (+`/target`) and `/dwf` intercepted in `session/prompt`, routed through core ops, response emitted as an `agent_message_chunk`; advertised via `available_commands_update` (see the section above) |
-| Workspaces | one lazy `AttachRuntime` + socket client per `cwd`; sessions are per-cwd but share that lane |
+| Workspaces | one lazy `AttachRuntime` + socket client per `cwd`; sessions are per-cwd but share that lane. All lanes converge on the single shared core: the socket endpoint is derived from the data root only, never from `cwd`/workspace identity (2026-11-08 single-core consolidation); workspace refs still travel in every `session/create`/`session/resume`/`session/list` so per-session isolation is unchanged |
 | Permissions | `session/request_permission`; `allow_once` / `allow_always` (only when core suggests permission updates) / `reject_once`; answer is the core option's `response` |
 | `AskUserQuestion` | form elicitation: one string property per question, single-select as `enum`, multi-select as comma-separated text; answers are keyed by question text |
 | `ExitPlanMode` | form elicitation with an explicit `approve` / `reject` enum; Auto/Full cannot silently approve a plan because the client must return a decision |
@@ -234,7 +245,7 @@ not hand-copied per call site.
 | Models | `session/set_config_option` with `configId: "model"`, values `provider/model`; `config_option_update` on model change |
 | Reasoning effort | `session/set_config_option` with `configId: "thought_level"`, category `thought_level`; select choices come from the **current model's** `reasoning.levels` in `settings.model.available` (never the unioned `thoughtLevel.available`); `currentValue` falls back `thoughtLevel.current` → `thoughtLevel.defaultLevel` → model `reasoning.defaultLevel` → first level. The option is omitted when effort is disabled or the current model advertises no levels. The setter response returns the full `configOptions`; a model switch reprojects effort choices through the existing `config_option_update` lane. Effort changes made by other clients reach the handle through `state.updated` → `applyStatePatch`, which emits `model_selected` when the model selection **or** `thoughtLevel.current` changes; the agent then pushes `config_option_update` rebuilt from the live snapshot. Changes this connection made itself (in-flight `session/set_config_option`) are not pushed again: the response already carries the confirmed options. After a model switch the attach client sends the target model's `reasoning.defaultLevel`, and the core snapshot drops any `thoughtLevel.current` not listed for the current model, so no stale level is kept |
 | Compact cap | applied on create/resume/model change via `syncCompactContextWindow` (GLM → 262K) |
-| MCP from the ACP client | ignored and logged; core keeps its own MCP configuration |
+| MCP from the ACP client | stdio/HTTP/SSE, forwarded to the core as a complete session override; see the client MCP extension below |
 | Files/terminals | core executes them; `fs/*` and `terminal/*` are neither advertised nor used |
 | Auth | outside ACP: existing `piz login`; no `authMethods` advertised |
 | Disconnect | detach — core sessions survive; the ACP connection only unregisters its sinks |
@@ -247,8 +258,8 @@ Verified:
   provider → Show more → Local ACP command` (executable + literal args), ACP v2
   preferred with v1 negotiation, and plan/build modes following T3's toggle.
 - T3 appends its own `t3-code` MCP server to every agent session plus system-prompt
-  instructions. It accepts agents that do not consume it; this adapter ignores and
-  logs `mcpServers` instead of forwarding them.
+  instructions. It accepts agents that do not consume it; the original adapter
+  ignored and logged `mcpServers`. Issue #31 replaces that behavior.
 - T3 answers permission requests by thread mode: Supervised shows them, Auto-accept
   edits approves edits, Auto and Full access approve automatically. That is why plan
   approval is an elicitation form with an explicit answer rather than a permission
@@ -266,6 +277,158 @@ Not verified (no T3 provider instance / GLM credentials were configured here):
 These are acceptance items, not claims. The adapter fails closed where it can: an
 unknown session, an in-flight second prompt, or an unrenderable interaction returns an
 explicit error/decline instead of a silent success.
+
+## Client MCP extension — issue #31
+
+Status: implemented; disposable and isolated real-T3 source-runtime evidence
+recorded in [the fork report](../../fork/reports/acp-mcp-tools.md). Not installed.
+`additionalDirectories` forwarding is not part of this extension.
+
+### Admission and ownership
+
+- `initialize` advertises HTTP and SSE MCP support; stdio is ACP's baseline.
+  The thin adapter translates ACP server descriptions using shared protocol
+  schemas, never an MCP SDK or a bootstrap/core runtime import.
+- `session/new.mcpServers` is a complete session override. `[]` means no
+  servers, not fallback to workspace/user/plugin configuration. Omission on
+  resume retains the in-memory override, if one exists. When the ACP adapter
+  survives a shared-core restart, its internal cold recovery resends the
+  session's last acknowledged declaration from memory; if the ACP process
+  itself is lost, credentials are unrecoverable unless the client supplies
+  them again.
+- ACP servers use explicit session isolation and the session's execution cwd
+  for stdio. Client-provided servers are trusted configuration from the owning
+  protocol client, not repository declarations. They cannot acquire builtin
+  plugin provenance or bypass normal MCP tool-call permissions.
+- The protocol record retains the accepted client declaration only in memory,
+  for resume comparison and fork inheritance. The runtime owns effective
+  configuration, pending replacement, transport state, and turn ordering.
+  The adapter does not keep a second accepted configuration or update queue.
+  Its only client-MCP state is a replay snapshot — an independent copy of the
+  last declaration acknowledged by the core, updated only on successful
+  create/resume replies — used solely to populate `session/resume` when the
+  adapter's own transport reconnect finds the session record gone (shared
+  core restart, idle eviction). A successful warm resubscribe sends no
+  extra resume; a failed bound resume keeps the older snapshot.
+- No credentials, commands, environment values, header values, or full
+  configuration are written to logs, events, session history, or disk caches.
+  Diagnostics use session/trace identifiers, counts, and stable error kinds.
+
+### Lazy resources and the no-plugins boundary
+
+`--no-plugins` continues to prohibit automatic plugin, builtin MCP, and
+workspace/user-file MCP loading. The sole exception is an explicit session
+override. An empty session must not create an MCP pool, adapter, settings lease,
+broker, telemetry timer, connection, or child process. The explicit session
+creates its owned MCP adapter/lease lazily, including when servers are first
+provided on warm resume. This does not start another core or change the socket
+identity. Closing or removing the final client server releases its resources.
+
+### Replacement, detach, and fork order
+
+```text
+validated ACP declaration
+  → session/create or session/resume
+  → protocol record accepts an in-memory, independent declaration
+  → runtime stages the latest replacement
+  → current turn finishes
+  → next turn boundary applies transports and invalidates MCP tool registration
+  → next turn discovers the confirmed tool set
+
+transport detach
+  → synchronously suspend client MCP admission and fence late connection work,
+    including sessions whose app factory is still materializing (attachment
+    signal is captured before the factory await, not found by a later scan)
+  → disconnect and await session-owned stdio teardown
+  → retain runtime/history and in-memory declaration for adoption
+  → resume/adoption schedules suspended connections at the next turn boundary
+
+shared-core restart while this adapter lives
+  → resubscribe fails (no resident record)
+  → internal cold session/resume carries the adapter's replay snapshot
+  → resubscribe → session resumes with the same handle and client MCP
+```
+
+- An idle runtime may apply immediately. Queued inputs, goal continuations, and
+  other runtime turn entry points must cross the same boundary. A model-request
+  boundary inside a running turn is not sufficient.
+- Semantically equal declarations, including credentials, are a no-op on live
+  or still-connecting connections. Server/object ordering alone does not force
+  a reconnect. Declaration equality is not connection health: an identical
+  create/resume declaration still retries desired servers whose live status is
+  failed, disconnected, or missing — one bounded retry per explicit
+  configure/resume, never a per-turn retry loop. Servers mid-handshake or
+  explicitly disabled/untrusted are left alone; live entries keep the same
+  connections and PIDs. Removed or changed servers retire their old session
+  connections; unaffected servers keep theirs.
+- Applying, suspending, and closing are serialized and fenced against stale
+  asynchronous completion. Close is terminal. Detach cannot be undone by a
+  late connect result or an old owner's callback after adoption.
+- Detach terminates session stdio children promptly, not after the pool's
+  workspace idle-grace period. An in-flight MCP call may fail when its child
+  exits; this must not abort the whole turn or destroy the runtime. File/plugin
+  MCP in other app-server modes keeps its existing lifecycle.
+- Warm/adopted resume must not replace the ACP handle or its in-flight waiter.
+  Identical live settings remain connected; changed settings wait for the
+  current turn to finish. No restart or cancellation is used for refresh.
+- Workflow children borrow the parent's MCP surface through an asynchronous
+  readiness dependency, not a constructor-time snapshot: a child waits for the
+  parent's already-scheduled startup/boundary apply to settle, then discovers
+  the applied tool set on the parent's port. Discovery is generation-fenced:
+  if the parent's attachment, apply, port, or applied configuration changes
+  while the status/tool reads are in flight, the stale read is discarded and
+  discovery retries against the new generation — a borrower never receives a
+  mixed-generation snapshot. Borrowers never own, connect,
+  disconnect, or cancel the parent's transports, and never apply the parent's
+  pending staged configuration during an active parent turn.
+- Fork copies the most recently accepted client declaration, including a
+  pending replacement, in memory. The child gets independent session-owned
+  connections; closing/detaching either session cannot kill the other's tools.
+  Fork persistence does not copy credentials.
+- MCP tools retain the existing registry, ToolSearch, permission, result,
+  cancellation, and trace paths. Re-registration is explicitly invalidated on
+  replacement; it must not depend on adapter revision sums being distinct.
+
+### Acceptance cases
+
+| Case | Required observation |
+| --- | --- |
+| CMCP01 | New ACP sessions forward stdio/HTTP/SSE definitions correctly; protocol stdout stays JSON-only |
+| CMCP02 | Empty/omitted no-plugins sessions allocate no MCP resources and cannot load file/plugin servers |
+| CMCP03 | Concurrent sessions, including the same cwd/server name, cannot see or close each other's tools |
+| CMCP04 | Unchanged/reordered resume settings preserve connection identity and stdio PID |
+| CMCP05 | Changed credentials during a running multi-step turn take effect only after that turn; the next queued/goal turn uses the new tools |
+| CMCP06 | Explicit `[]` removes client servers and tools without falling back to file config |
+| CMCP07 | Late first injection after an empty session discovers and registers tools correctly |
+| CMCP08 | Close and idle/active detach terminate real disposable stdio children; adoption reconnects without replacing the session |
+| CMCP09 | Fork inherits client tools, including pending settings, with independent connections and credential-free persistence |
+| CMCP10 | Close/detach during a pending connect cannot leak or resurrect children; detach/adoption ordering is fenced |
+| CMCP11 | MCP allow/reject follows the existing ACP permission callback and tool-result path |
+| CMCP12 | Invalid/duplicate server definitions fail at the boundary without echoing sensitive fields |
+| CMCP13 | Disposable HTTP/SSE tool discovery and execution use fake authorization only; diagnostics/persistence contain no fake secret sentinel |
+| CMCP14 | A real T3 check, after credential rotation, establishes whether resume resends `mcpServers`, including after an isolated core restart |
+
+CMCP14 cannot be proved by fixtures. Do not inspect environment values or print
+request payloads to perform it; record presence/count/transport and tool success
+only. Installed binaries, live-core restarts, promotion, and key rotation remain
+separate operator-controlled actions. Unreached live acceptance is reported as
+unverified, never inferred from source or disposable-server checks.
+
+Observed CMCP14 baseline (pre-repair, real T3 on an isolated scripted lane):
+the same ACP process survived an isolated core restart and sent only a second
+`session/prompt` — no client `session/resume`. The first prompt used the
+injected tool; the post-restart prompt had no client MCP tools because the
+adapter's internal cold recovery resumed without `mcpServers`. That gap
+motivates the replay-snapshot resend above; a post-repair live pass is
+reported separately and never inferred from this observation.
+
+On November 12, 2026, the post-repair real-T3 check passed: the same adapter
+called the read-only capabilities tool before and after an isolated core
+restart. T3 sent only another prompt; the adapter restored MCP through its
+internal cold recovery. An independent reconnect re-check returned
+`PASS+NOTES`, including unchanged warm connection identity and explicit-empty
+replay. This uses a source-runtime assembly and scripted executor, not an
+installed pair or real model. ACP-process replacement is separately untested.
 
 ## Bundle cost
 

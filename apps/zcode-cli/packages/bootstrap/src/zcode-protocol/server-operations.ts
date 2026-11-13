@@ -132,7 +132,10 @@ import { createProtocolOffPeakPort } from "./offpeak-port.js";
 import { createProtocolTopicResourcePort } from "./topic-resource-port.js";
 import { createProtocolBrowserControlBroker } from "./browser-control-broker.js";
 import { mapComputerUseOperationEvent } from "./computer-use-operation-event.js";
-import { protocolMcpServersToRuntimeMcpConfig } from "./protocol-mcp-config.js";
+import {
+  cloneClientMcpServers,
+  protocolMcpServersToRuntimeMcpConfig,
+} from "./protocol-mcp-config.js";
 import { projectIdFromDirectory } from "../app/paths.js";
 import {
   collectSubagentChildSessionIds,
@@ -1520,6 +1523,7 @@ export async function activateSessionForResume(
     // 不校验就会成为该校验的旁路，且不匹配的请求不能先写 cap。
     await validateSessionActivationWorkspace(context, params.sessionId, params.workspace);
     applyResumeCompactContextWindow(existing, params);
+    await applyResumeClientMcpServers(existing, params);
     return { record: existing };
   }
   let activated: ActivatedSessionForResume | undefined;
@@ -1553,6 +1557,7 @@ export async function activateSessionRuntime(
   const existing = context.sessions.get(params.sessionId);
   if (existing) {
     applyResumeCompactContextWindow(existing, params);
+    await applyResumeClientMcpServers(existing, params);
     return { record: existing };
   }
   // 客户端断线后重连：session 常驻在 detached owner 上时收养到本连接，
@@ -1566,6 +1571,7 @@ export async function activateSessionRuntime(
         sessionId: params.sessionId,
       });
       applyResumeCompactContextWindow(adopted, params);
+      await applyResumeClientMcpServers(adopted, params);
       return { record: adopted };
     }
   }
@@ -2703,6 +2709,11 @@ async function registerForkedSessionRuntime(
       ...(fork.parentSessionId ? { parentSessionId: fork.parentSessionId } : {}),
       taskType: forkedSession.taskType,
       workspace: record.workspace,
+      // fork 继承最新 accepted client MCP 声明（含未落地的 pending 版本，issue #31
+      // CMCP09）：子会话自建 session 隔离连接，凭据只走内存 clone，不进持久化。
+      ...(record.clientMcpServers !== undefined
+        ? { mcpServers: cloneClientMcpServers(record.clientMcpServers) }
+        : {}),
     },
     fork.forkedSessionId as SessionId,
     true,
@@ -3132,6 +3143,26 @@ function applyResumeCompactContextWindow(
 ): void {
   if (params.compactContextWindow === undefined) return;
   record.app.runtime.setCompactContextWindowCap(params.compactContextWindow);
+}
+
+/**
+ * client 注入 MCP（issue #31 CMCP04-07）：所有 warm / adopted resume 路径的唯一生效点。
+ * 显式声明（含 []）先更新内存 provenance（fork 继承的是最新 accepted clone），再经
+ * runtime 的整轮边界落地；省略时保留声明，detach suspend 过的连接由 attach 标记补连。
+ * 调用方必须先完成 workspace / ownership 校验。
+ */
+async function applyResumeClientMcpServers(
+  record: ZCodeProtocolSessionRecord,
+  params: Pick<ZCodeSessionResumeParams, "mcpServers">,
+): Promise<void> {
+  if (params.mcpServers !== undefined) {
+    record.clientMcpServers = cloneClientMcpServers(params.mcpServers);
+  }
+  if (record.clientMcpServers === undefined) return;
+  // adoption 补连：attach 闸门等挂起 teardown 收尾；重连在下一回合边界发生。
+  await record.app.runtime.setMcpClientAttached(true);
+  const runtimeMcp = protocolMcpServersToRuntimeMcpConfig(record.clientMcpServers);
+  await record.app.runtime.configureMcpServers(runtimeMcp?.servers ?? {});
 }
 
 /**
@@ -3840,6 +3871,11 @@ async function createRecord(
   // automation-port 需要读取「本会话」的实时 model/mode/thought；record 在 app 之后才建。
   // 用可变持有者做惰性绑定：CronCreate 在 turn 中调用 create() 时 record 早已就绪。
   let ownSessionRecord: ZCodeProtocolSessionRecord | undefined;
+  // client 显式 MCP 会话在准备 factory 调用时就取走当前 attachment 信号：
+  // factory await 横跨 detach 时 record 尚未登记、detach 扫描看不到它——
+  // runtime 靠本信号落下 admission 闸门，迟到登记再由下方 reconcile 复核（评审 R1）。
+  const mcpClientDetachSignal =
+    params.mcpServers !== undefined ? context.getClientDetachSignal?.() : undefined;
   const app = await createWorkspaceZCodeApp(context, workspace, {
     env: context.deps.env,
     eventStore,
@@ -3947,10 +3983,16 @@ async function createRecord(
     traceContext,
     version: context.deps.version,
     modelIoFullRetentionEnabled: context.appRuntimePreferences.modelIoFullRetentionEnabled,
+    ...(mcpClientDetachSignal !== undefined ? { mcpClientDetachSignal } : {}),
   });
   const now = Date.now();
   const record: ZCodeProtocolSessionRecord = {
     app,
+    // client 注入 MCP 的内存 provenance（issue #31）：undefined=未声明，[]=显式清空。
+    // 只进内存 record，绝不进持久化快照/事件（凭据不落盘）。
+    ...(params.mcpServers !== undefined
+      ? { clientMcpServers: cloneClientMcpServers(params.mcpServers) }
+      : {}),
     createdAt: now,
     eventStore,
     ownerContext: context,
@@ -3972,6 +4014,22 @@ async function createRecord(
   // app 一旦物化就交给生命周期执行面持有。订阅接线抛错时也必须能找到并释放它。
   context.sessions.set(sessionId, record);
   context.assertServing?.();
+  // 登记后立刻按当前 owner attachment 对账（评审 R1）：物化窗口内的 detach
+  // 已由信号先行落下（此处 setMcpClientAttached(false) 是幂等复核）；中途又
+  // 恢复 attached 时把它拉回 adoption 语义，补连在下一回合边界发生。
+  // 不复活旧 owner——isClientAttached 读的是本 context 的当前 attachment。
+  if (record.clientMcpServers !== undefined && context.isClientAttached !== undefined) {
+    void record.app.runtime
+      .setMcpClientAttached(context.isClientAttached())
+      .catch((reconcileError: unknown) => {
+        context.logger?.warn("Client MCP attach reconcile failed", {
+          errorKind:
+            reconcileError instanceof Error ? reconcileError.name : typeof reconcileError,
+          event: "zcode_protocol.session.mcp_attach_reconcile_failed",
+          sessionId: record.app.sessionId,
+        });
+      });
+  }
   let subscribed = true;
   let unsubscribeSessionEvents = () => {};
   record.unsubscribe = () => {

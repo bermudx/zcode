@@ -770,7 +770,7 @@ describe("resolveAppRuntimeConfig：dynamicWorkflowEnabled 透传", () => {
       ).toBe(false);
     });
 
-    it("drops plugin/built-in/client MCP servers and keeps mcp disabled", () => {
+    it("drops plugin/built-in MCP servers but keeps client-injected servers (issue #31)", () => {
       const resolved = resolveAppRuntimeConfig({
         builtInMcpServers: {
           node_repl: { type: "stdio", command: process.execPath, args: ["/runtime/node-repl.js"] },
@@ -799,10 +799,26 @@ describe("resolveAppRuntimeConfig：dynamicWorkflowEnabled 透传", () => {
         workingDirectory,
       });
 
-      expect(resolved.configuredMcpServers).toEqual({});
+      // issue #31：noPlugins 唯一例外是客户端显式注入的 servers——context7 保留并
+      // 被标成 user 出处；plugin/builtin 名字仍然一律不加载。
+      expect(resolved.configuredMcpServers).toEqual({
+        context7: {
+          type: "stdio",
+          command: "npx",
+          args: ["-y", "@upstash/context7-mcp"],
+          source: { kind: "user" },
+        },
+      });
       expect(resolved.runtimeConfig.mcp).toEqual({
-        enabled: false,
-        servers: {},
+        enabled: true,
+        servers: {
+          context7: {
+            type: "stdio",
+            command: "npx",
+            args: ["-y", "@upstash/context7-mcp"],
+            source: { kind: "user" },
+          },
+        },
         trustedOfficialCuaServerNames: [],
       });
     });

@@ -4,8 +4,13 @@ import type { ZCodeProtocolMcpServer } from "@zcode/shared";
 export function protocolMcpServersToRuntimeMcpConfig(
   servers: ZCodeProtocolMcpServer[] | undefined,
 ): { enabled: true; servers: Record<string, McpServerConfig> } | undefined {
-  if (!servers || servers.length === 0) {
+  // undefined = 客户端没有 override（沿用现有配置面）；[] = 显式空 override——
+  // 「客户端声明没有任何 MCP server」，必须压制 file/plugin 回落，不能折叠成 undefined。
+  if (servers === undefined) {
     return undefined;
+  }
+  if (servers.length === 0) {
+    return { enabled: true, servers: {} };
   }
 
   const runtimeServers: Record<string, McpServerConfig> = {};
@@ -44,4 +49,15 @@ export function protocolMcpServersToRuntimeMcpConfig(
   }
 
   return { enabled: true, servers: runtimeServers };
+}
+
+/**
+ * record 持有的 client MCP 声明是 in-memory 来源事实（resume 比对 / fork 继承），
+ * 与传入数组解除引用：客户端之后再改同一数组不能穿透 record。
+ * 该字段永不进入持久化、事件或诊断——凭据只能留在内存里。
+ */
+export function cloneClientMcpServers(
+  servers: ZCodeProtocolMcpServer[] | undefined,
+): ZCodeProtocolMcpServer[] | undefined {
+  return servers === undefined ? undefined : structuredClone(servers);
 }

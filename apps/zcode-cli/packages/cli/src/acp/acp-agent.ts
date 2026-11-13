@@ -43,6 +43,7 @@ import {
   type AcpPermissionResult,
 } from "./acp-project.js";
 import type { AcpCorePort, AcpSession } from "./acp-sessions.js";
+import { AcpMcpMapError, mapAcpMcpServers } from "./acp-mcp.js";
 import {
   localSlashCommandsUpdate,
   newGoalInputId,
@@ -52,6 +53,11 @@ import {
   watchTurnSettlement,
   type AcpLocalCommand,
 } from "./acp-commands.js";
+import {
+  buildManualSkillPrompt,
+  manualSkillCommandUsage,
+  parseSlashCommand,
+} from "../command-center/slash-commands.js";
 import type { SendInputOptions } from "../attach/attach-steer.js";
 
 const INVALID_PARAMS = -32602;
@@ -240,7 +246,9 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
       agentCapabilities: {
         // 不实现 session/load：ACP 的 resume 不重放历史，与 attach 语义一致。
         loadSession: false,
-        mcpCapabilities: { http: false, sse: false },
+        // client 注入 MCP（issue #31 CMCP01）：stdio/http/sse 三种声明都接，
+        // stdio 无独立能力位——ACP 里它始终可用。
+        mcpCapabilities: { http: true, sse: true },
         promptCapabilities: { audio: false, embeddedContext: true, image: false },
         sessionCapabilities: { close: {}, resume: {} },
       },
@@ -251,23 +259,37 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   });
 
   app.onRequest(methods.agent.session.new, async ({ client, params }) => {
-    if (params.mcpServers.length > 0) {
-      // core 的 MCP 由自己的 workspace 配置装配；T3 注入的 MCP 不转发。
-      log?.warn?.("acp ignored client MCP servers", {
-        count: params.mcpServers.length,
-        cwd: params.cwd,
-      });
+    // client 注入 MCP（issue #31 CMCP01/12）：边界转换 + 脱敏报错，
+    // env/header/URL/command 值不进错误消息与日志。
+    let mcpServers;
+    try {
+      mcpServers = mapAcpMcpServers(params.mcpServers, params.cwd);
+    } catch (error) {
+      if (error instanceof AcpMcpMapError) {
+        throw new RequestError(INVALID_PARAMS, error.message);
+      }
+      throw error;
     }
-    const session = await options.sessions.open(params.cwd);
+    const session = await options.sessions.open(params.cwd, mcpServers);
     bindSession(client, session);
     advertiseLocalCommands(client, session);
     return sharedOptions(session);
   });
 
   app.onRequest(methods.agent.session.resume, async ({ client, params }) => {
+    let mcpServers;
+    try {
+      mcpServers = mapAcpMcpServers(params.mcpServers, params.cwd);
+    } catch (error) {
+      if (error instanceof AcpMcpMapError) {
+        throw new RequestError(INVALID_PARAMS, error.message);
+      }
+      throw error;
+    }
     const session = await options.sessions.resume({
       cwd: params.cwd,
       sessionId: params.sessionId,
+      ...(mcpServers !== undefined ? { mcpServers } : {}),
     });
     bindSession(client, session);
     advertiseLocalCommands(client, session);
@@ -468,7 +490,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
         "A prompt turn is already running for this ACP session",
       );
     }
-    const text = promptBlocksToText(params.prompt);
+    let text = promptBlocksToText(params.prompt);
     if (text.length === 0) {
       throw new RequestError(INVALID_PARAMS, "Prompt contains no usable content");
     }
@@ -477,6 +499,26 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     const localCommand = parseLocalSlashCommand(text);
     if (localCommand) {
       return await runLocalCommand(client, session, localCommand);
+    }
+    // /skill 走 TUI command-center 同一条手动调用契约：core 不认识 `/skill`
+    // 原文，<name> [task] 必须改写成 buildManualSkillPrompt 再进普通 prompt
+    // 路径；裸 /skill 不进模型，只回 usage。技能名不在 ACP 侧校验——缺失/歧义
+    // 由 core 的 Skill 工具按实时技能集裁定，与 TUI 从不查目录同口径。
+    const slashCommand = parseSlashCommand(text);
+    if (slashCommand?.type === "known" && slashCommand.name === "skill") {
+      if (slashCommand.skillName.length === 0) {
+        const emit = emitterFor(client, session);
+        emit([
+          {
+            content: { text: manualSkillCommandUsage(), type: "text" },
+            sessionUpdate: "agent_message_chunk",
+          },
+        ]);
+        await pendingDrain;
+        if (connectionFailure) throw connectionFailure;
+        return { stopReason: "end_turn" } satisfies PromptResponse;
+      }
+      text = buildManualSkillPrompt(slashCommand.skillName, slashCommand.task);
     }
     const controller = new AbortController();
     const turn: ActiveTurn = {

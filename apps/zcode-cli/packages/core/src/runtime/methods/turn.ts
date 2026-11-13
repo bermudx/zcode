@@ -194,6 +194,22 @@ export async function executeTurnCommand(
   this.currentTurnFileChanges = new Map();
   if (!startReservation) this.reserveTurnStart(turnId, turnTraceContext, "regular");
 
+  // client MCP 的整轮边界（issue #31 / 评审 R4）：必须在 admission 冻结与
+  // turn start 预留之后——apply 期间的切模/样式变更不能改变本轮已承认的事实；
+  // 也必须在工具表/上下文构建之前——本轮工具按最新声明构建。apply 失败
+  // （连接欠账）不杀回合：诊断落 stderr，本轮按现有工具面继续。
+  try {
+    await this.applyPendingMcpServers();
+  } catch (error) {
+    this.logger?.warn("MCP apply at turn boundary failed", {
+      errorKind: error instanceof Error ? error.name : typeof error,
+      event: "mcp.apply.turn_boundary_failed",
+      module: "core.runtime",
+      status: "failed",
+      turnId,
+    });
+  }
+
   const turnAbortScope = createTurnAbortScope(options?.abortSignal);
   const turnAbortSignal = turnAbortScope.signal;
   let activeTurn: ActiveTurnSteeringState | undefined;

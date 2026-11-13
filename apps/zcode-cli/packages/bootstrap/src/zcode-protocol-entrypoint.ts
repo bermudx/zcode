@@ -653,29 +653,32 @@ export async function runZCodeProtocolAgent(
       });
       // 自登记：bind 成功的进程才是 socket 的唯一 owner，.pid/.info 只能由它在
       // listen 后写入；客户端侧写入在并发恢复/双 spawn 竞争下会把死进程登记成
-      // owner（实测踩坑：.pid 指向已退出进程，真 listener 无登记）。
-      const selfIdentity = process.env[ZCODE_WORKSPACE_IDENTITY_ENV]?.trim();
-      if (selfIdentity) {
-        try {
-          await writeFile(`${socketPath}.pid`, `${process.pid}\n`, "utf8");
-          await writeFile(
-            `${socketPath}.info`,
-            `${JSON.stringify(
-              appServerInfoSchema.parse({
-                version: "0.0.0",
-                workspaceIdentity: selfIdentity,
-                startedAt: new Date().toISOString(),
-              }),
-            )}\n`,
-            "utf8",
-          );
-        } catch (error) {
-          logger.warn("ZCode Protocol socket self-registration failed", {
-            errorType: error instanceof Error ? error.name : typeof error,
-            event: "zcode_protocol.socket.self_register.failed",
-            module: "bootstrap.zcode_protocol",
-          });
-        }
+      // owner（实测踩坑：.pid 指向已退出进程，真 listener 无登记）。单一 core
+      // 下无条件登记：任何 socket 模式 bind（服务管理器拉起或手动
+      // `zcode app-server --socket`）都写 scope:"user"——它只记录数据/共享
+      // 范围（一个 core 服务整个用户），不断言监督关系；进程归谁管只能由
+      // cgroup/service manager 事实证明，操作者读登记文件时同理对待。
+      // workspace 身份只在会话级协议参数里，不再从 spawn env 取（env 里本来也没有）。
+      try {
+        await writeFile(`${socketPath}.pid`, `${process.pid}\n`, "utf8");
+        await writeFile(
+          `${socketPath}.info`,
+          `${JSON.stringify(
+            appServerInfoSchema.parse({
+              version: options.version ?? "0.0.0",
+              scope: "user",
+              socketPath,
+              startedAt: new Date().toISOString(),
+            }),
+          )}\n`,
+          "utf8",
+        );
+      } catch (error) {
+        logger.warn("ZCode Protocol socket self-registration failed", {
+          errorType: error instanceof Error ? error.name : typeof error,
+          event: "zcode_protocol.socket.self_register.failed",
+          module: "bootstrap.zcode_protocol",
+        });
       }
       startupTimer.complete("ZCode Protocol agent startup completed", {
         context: { socketPath },

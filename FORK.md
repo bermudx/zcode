@@ -40,7 +40,7 @@ It starts at `1473554cf6fcbce50f3cff5aa562a6089898959c` from the old
 | `feat/allowance-herdr` | Preserved standalone allowance branch; parked |
 | `sync/<date>-<short-sha>` | Future upstream integration candidates |
 | `patch/<topic>` | Future isolated product changes |
-| `origin` | Configured 2026-11 (observed 2026-11-07, by or before the `c2d393f7` push): `git@github.com:bermudi/piz.git`, fetch and push both enabled — supersedes the earlier "not configured" state; push policy below still applies |
+| `origin` | Configured 2026-11 (observed 2026-11-07, by or before the `c2d393f7` push) as `git@github.com:bermudi/piz.git`; repo transferred to `bermudx/zcode` 2026-11-08, local remote updated same day to `git@github.com:bermudx/zcode.git` (GitHub still redirects the old URL). Fetch and push both enabled; push policy below still applies |
 
 `archive-source` points at the old local clone, not a hosted backup. Its refs
 include old `main`, allowance, lucky-field and rapid-cloud tips. They are not
@@ -52,7 +52,8 @@ reference-library clone. Existing refs are preserved here; this is not yet an
 off-machine backup.
 
 Pushes are guarded locally: `push.default=nothing`, and `upstream`/`archive-source`
-have `pushurl=DISABLED`. As of 2026-11-07 `origin` (bermudi/piz.git) has push
+have `pushurl=DISABLED`. As of 2026-11-07 `origin` (bermudi/piz.git; renamed to
+bermudx/zcode.git 2026-11-08) has push
 **enabled** and `origin/main` sits behind local `main` at `c2d393f7` — this
 differs from the guard state this file recorded before; pushes still require the
 operator's explicit go-ahead.
@@ -75,9 +76,25 @@ Repository-local rerere is enabled; review every replayed resolution.
   that runtime fallback behavior has already been changed. Verify
   actual eligibility/metering with observable service/account evidence when
   available, and label it unverified otherwise.
-- Reuse shared cores across CLI invocations/sessions rather than creating a
-  heavy runtime for each client. Sharing does not remove session/workspace
-  isolation requirements or imply one global core across all workspaces.
+- One shared core process serves all workspaces, sessions and clients.
+  The operator explicitly confirmed this requirement on 2026-11-08; it is not
+  one core per workspace, provider or frontend. Workspace identity
+  belongs to session routing and isolation inside the core, not to selecting
+  a separate core process. Preserve workspace configuration, permission and
+  session boundaries while sharing the process.
+- Single-core transport/ownership (implemented on
+  `fix/edit-from-here-last-message`, source review and isolated live verification
+  accepted; not installed): the attach socket
+  derives from the data root only (`<dataBaseDir>/.zcode/v2/sockets/core.sock`),
+  never from workspace/provider/frontend. On Linux, clients auto-start the
+  core as a transient `systemd --user` service
+  (`piz-core-<sha256(socketPath)[:16]>`); requires systemd >= 254
+  (`--expand-environment=no`). The user service manager owns its
+  lifetime, so retiring any client scope (e.g. T3 ACP runtime) cannot kill it.
+  Other Unix platforms reuse an already-listening socket but fail explicitly
+  (no detached-spawn fallback) when the core is absent; win32 spawn stays
+  unsupported. Session workspace refs, adoption/orphan/drain accounting and
+  the no-plugins gate are unchanged.
 - Client and shared core must be built and installed as a matched pair. No
   cross-version protocol compatibility promise exists yet.
 - Preserve schema validation, workspace identity and path distinctions, session

@@ -1,6 +1,6 @@
 // `zcode attach` / `tui --shared-core` 入口：解析 socket → ensureServer 拉起
-// 共享 core（无则 spawn，detached + --no-plugins）→ 连接握手（协议版本校验）
-// → 建 AttachSessionHandle + TuiPromptHandler → runTui。
+// 共享 core（无则经 user 服务管理器瞬时 service 拉起，--no-plugins）→ 连接
+// 握手（协议版本校验）→ 建 AttachSessionHandle + TuiPromptHandler → runTui。
 // 客户端不持有业务状态；退出只断连接，core 端 session 照常存活。
 import {
   ZCODE_PROTOCOL_VERSION,
@@ -108,7 +108,8 @@ export const runAttachCommand = async (
       workspacePath: workspaceDirectory,
     };
     // session/create 需要完整 ref：workspaceKey = 解析出的身份
-    // （workspaceIdentity || workspacePath），与 resolveSocketPath 同一 helper。
+    // （workspaceIdentity || workspacePath）。单一 core 下它只进入会话级请求，
+    // 不再参与 socket 路径派生。
     const workspaceRef = {
       workspacePath: workspace.workspacePath,
       workspaceIdentity: workspace.workspaceIdentity,
@@ -139,7 +140,10 @@ export const runAttachCommand = async (
           })
         : undefined;
     oscStatusReporter = oscReporter;
-    const { socketPath } = await ensureServer({ env, version, workspace });
+    // 单一 core：socket 只由数据根派生，不传 workspace——workspace 只在
+    // 会话级请求里（workspaceRef）。启动/复用诊断一行一条走 stderr。
+    const coreSpawnLog = (line: string) => ctx.stderr.write(`${line}\n`);
+    const { socketPath } = await ensureServer({ env, log: coreSpawnLog });
     // 传输诊断（丢畸形行/socket 错误等）经节流 stderr logger 接进客户端连接
     // 与 runtime 自身；不传则传输层全部 optional-chain 成静默 no-op。
     const transportLogger = createAttachTransportLogger(ctx.stderr);
@@ -147,10 +151,10 @@ export const runAttachCommand = async (
       interactionStatus: oscReporter,
       socketPath,
       workspace: workspaceRef,
-      // core 死亡后的重连必须重跑 ensureServer：pid/socket 已 stale，原子
-      // reclaim 会 detached respawn 新 core 到同一确定性 socketPath。
+      // core 死亡后的重连必须重跑 ensureServer：socket 已死，探测失败后走
+      // 原子锁 → 服务管理器重拉新 core 到同一确定性 socketPath。
       ensureConnected: async () => ({
-        socketPath: (await ensureServer({ env, version, workspace })).socketPath,
+        socketPath: (await ensureServer({ env, log: coreSpawnLog })).socketPath,
       }),
       connect: (path) => connectAttachClient(path, { logger: transportLogger }),
       logger: transportLogger,

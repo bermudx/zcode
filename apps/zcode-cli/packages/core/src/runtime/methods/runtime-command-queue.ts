@@ -90,7 +90,22 @@ export async function drainRuntimeCommandQueue(this: AgentRuntimeInternal): Prom
   }
   // 空闲沿：队列排空，且没有任何在跑 / 排着 / 预留的回合（持着晋升租约、或 prompt 已预留未入队时不算，
   // 那一轮自己排空时会再走到这里）。「run 还欠着决定」的提醒钟从这里起算。
-  if (!hasActiveOrQueuedTurnWork.call(this)) this.workflowBlockedReminder?.sessionIdle();
+  if (!hasActiveOrQueuedTurnWork.call(this)) {
+    // client MCP 收尾 drain（issue #31）：回合结束后没有下一条命令也要把 stage 的
+    // 声明落地，保证 detach suspend 与显式清空在空闲时生效。drain 多为 fire-and-forget
+    // 调用，apply 失败只能落诊断——欠账保留，下一边界重试，不能形成 unhandled rejection。
+    try {
+      await this.applyPendingMcpServers();
+    } catch (error) {
+      this.logger?.warn("MCP apply at idle drain failed", {
+        errorKind: error instanceof Error ? error.name : typeof error,
+        event: "mcp.apply.idle_drain_failed",
+        module: "core.runtime",
+        status: "failed",
+      });
+    }
+    this.workflowBlockedReminder?.sessionIdle();
+  }
 }
 
 function dequeueNextRunnableBatch(this: AgentRuntimeInternal): readonly RuntimeCommand[] {

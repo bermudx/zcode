@@ -129,10 +129,7 @@ async function startHarness(
   const dir = await mkdtemp(join(tmpdir(), "attach-resume-"));
   const workspace = join(dir, "workspace");
   const { resolveSocketPath } = await import("../src/app-server-spawn.js");
-  const socketPath = resolveSocketPath(
-    { workspacePath: workspace },
-    { env: { ZCODE_DATA_BASE_DIR: dir } },
-  );
+  const socketPath = resolveSocketPath({ env: { ZCODE_DATA_BASE_DIR: dir } });
   await mkdir(dirname(socketPath), { recursive: true });
   const core = await startFakeCore(socketPath, responder);
   const runAttach = (resume: { continueSession?: boolean; resumeSessionId?: string }) => {

@@ -58,13 +58,13 @@ npm_execpath="$HOME/.local/share/pnpm/.tools/pnpm/10.33.2/node_modules/pnpm/bin/
 
 Interactive shells inside a piz/core-managed session can inherit
 `ZCODE_WORKSPACE_IDENTITY` (and `ZCODE_SERVER_BIN`/`ZCODE_ATTACH_CORE`).
-`runAttachCommand` derives the socket path hash from that identity, so
-attach tests that fake a core on a `resolveSocketPath`-derived path resolve
-a *different* socket inside `runAttachCommand`, fail the reuse probe, and
-spawn a real core ("app-server exited before accepting"). 2026-10-24: the
-whole attach suite requires `env -u ZCODE_WORKSPACE_IDENTITY`; it is an
-environment gap, not a regression (22/22 adapter + 48/48 attach set pass
-with it unset).
+Since 2026-11-08 the socket path derives from the data root only, so the
+identity no longer redirects the attach socket — but it still changes the
+session `workspaceRef`/`workspaceKey` sent to the core, and it is
+deliberately excluded from the spawned service env. Keep stripping it for
+attach tests (`env -u ZCODE_WORKSPACE_IDENTITY`, also handled by
+`fork-tests.mjs` STRIPPED_ENV): ambient identity otherwise produces a
+different workspace key than the fake-core fixtures assume.
 
 Rebuild changed dependency packages before consumer typechecks when checks use
 dist declarations. Do not suppress missing-export errors; determine whether
@@ -1212,3 +1212,53 @@ NOT exercised live (unverified): a real model turn on the resolved model
 against the provider. Full acceptance gate (signing, allowance evidence,
 Ctrl-C signal path, memory matrix) unchanged. `99e5646d` (ACP reasoning
 effort) is merged nowhere and not promoted.
+
+## 2026-11-08 — merge + promotion of 18b39eca (one shared core across all clients)
+
+`main` merged `--no-ff` `fix/edit-from-here-last-message` as `18b39eca`
+(`Closes #10`): the shared core is now ONE process per data root
+(`<dataBaseDir>/.zcode/v2/sockets/core.sock`), started on Linux as a transient
+`systemd --user` service `piz-core-<sha256(socket)[:16]>.service` via
+`ensureServer` (no detached client-owned spawn; non-Linux Unix reuse-only with
+explicit error; win32 unsupported). Workspace identity is session-scoped only.
+Isolated source-integration verification (real service manager, ACP X/Y/Z +
+terminal attach, original-scope retirement with unchanged MainPID/InvocationID,
+adoption, list isolation, loopback-only core namespace):
+`docs/fork/reports/2026-11-08-single-core-live-verification.md` (2/2 runs,
+102 assertions each). Promotion battery on merged main:
+
+- Build: CLI graph 12/12 + `build:attach` + root `@zcode/model-option-map`.
+  Freshness greps ×1 each in `dist/zcode-attach.cjs`: `piz-core-`, `core.sock`,
+  `expand-environment=no`, `UnsetEnvironment`, `service-type=exec`; ×6
+  `scope: "user"` in `dist/zcode.cjs`.
+- `fork-tests.mjs --promote-gate --max-workers 2` (base `4caa31d5` from
+  PROMOTED_FROM): **13,350 vitest results, 0 new failures**, 2 known
+  (v4-gateway oversize, telemetry-lifecycle), 5 flaky (all green isolated
+  rerun — the documented load class). cli/tui/tui-pi package scripts pass.
+- `typecheck:piz` passed; `architecture:check --changed` 1 violation =
+  baseline, 0 new; root lint 0 errors / 84 warnings (baseline 83; the extra
+  warning is not in any file this merge touched); CLI lint 0 errors /
+  74 warnings / 7 accepted (exact baseline). Gate log:
+  `/tmp/piz-promote-18b39eca/gate.log`, run dir `/tmp/piz-fork-tests-run-SP5JE0`.
+- `promote-piz.sh` from clean `main` at `18b39eca`; identical greps on frozen
+  `dist-runtime`; `PROMOTED_FROM=18b39eca`.
+- Installed-pair smoke (real `piz`, pty, scratch git ws + isolated
+  `ZCODE_DATA_BASE_DIR`): TUI boots (banner, footer pwd row + `quota !`
+  degraded cluster, no credentials in the isolated env); the core came up as
+  transient `piz-core-7abf2a3308b6c443.service` — `.info` = new schema
+  `{"version":"0.17.2","scope":"user",socketPath,startedAt}`, `.pid` ==
+  MainPID, `--cwd` = neutral data root — and SURVIVED the client's death
+  (client killed externally; core still active 2+ min later, detached-session
+  adoption window by design). Scratch service stopped after identity check
+  (MainPID == `.pid`, cwd == scratch root); socket removed on close.
+- Also observed post-promotion: a real client outside this session had
+  already started the operator's real shared core
+  (`piz-core-07359b7ae1597acd.service` on `~/.zcode/v2/sockets/core.sock`,
+  dist-runtime pair) — the fix operating in production; not touched.
+
+NOT exercised live (unverified): the TUI double-Ctrl-C/resume-hint exit path
+in this smoke (the pty injection missed; unchanged by this merge and covered
+by previous promotions), a real model turn, live signing/allowance evidence,
+Ctrl-C signal path, memory matrix. Old per-workspace `core-<hash>.sock` cores
+keep running until their clients drain them; do not restart live cores.
+Full acceptance gate unchanged.

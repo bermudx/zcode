@@ -3,13 +3,8 @@ import { createHash } from "node:crypto";
 import { link, lstat, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { connect } from "node:net";
-import { dirname, join } from "node:path";
-import {
-  appServerAttachWorkspaceSchema,
-  resolveWorkspaceKey,
-  ZCODE_WORKSPACE_IDENTITY_ENV,
-  type AppServerAttachWorkspace,
-} from "@zcode/shared";
+import { dirname, isAbsolute, join } from "node:path";
+import { ZCODE_WORKSPACE_IDENTITY_ENV } from "@zcode/shared";
 
 /** socket 就绪等待上限：60s。10s 曾在开机风暴下误杀仍在正常启动的 core：
  *  2026-10-25 实测 herdr 开机恢复同时拉起十余个 agent 进程，core 从 spawn 到
@@ -24,94 +19,242 @@ const APP_SERVER_LOCK_STALE_MS = APP_SERVER_READY_TIMEOUT_MS * 2;
 const APP_SERVER_HASH_ALGORITHM = "sha256";
 const APP_SERVER_HASH_LENGTH = 16;
 const WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\zcode-core-";
+/** systemd-run 的 stderr 只用于失败诊断，有界收集防异常洪泛。 */
+const SERVICE_RUNNER_STDERR_LIMIT = 4_096;
+const SERVICE_RUNNER_STDERR_MESSAGE_LIMIT = 2_000;
+
+const CORE_SERVICE_UNIT_PREFIX = "piz-core-";
+const CORE_SERVICE_UNIT_SUFFIX = ".service";
+/** 默认拉起器：Linux user service manager 的前端。 */
+const DEFAULT_SERVICE_RUNNER = "systemd-run";
 
 /** attach 共享 core 的 herdr 抑制标记：core env 烘焙的 pane 归属对
  *  spawn 之后 attach 进来的其他客户端无效，`~/.zcode/herdr-hook.sh`
  *  见此标记即 no-op（docs/design/v2/tui-attach-shared-core.md）。 */
 export const ZCODE_ATTACH_CORE_ENV = "ZCODE_ATTACH_CORE";
 
-/** 子进程形态：默认 PATH 上的 `zcode`；测试可注入 node + 假 server 脚本。 */
-export interface AppServerSpawnSpec {
+/** 可执行体形态：`file` + 可选前置参数（如 node + 脚本路径）。 */
+export interface AppServerLaunchSpec {
   file: string;
   argsPrefix?: readonly string[];
 }
 
+/** core 可执行体：默认 PATH 上的 `zcode`；测试可注入 node + 假 server 脚本。 */
+export interface AppServerSpawnSpec extends AppServerLaunchSpec {
+  /** 测试注入：替换 systemd-run 启动器（fixture-only，不代表 cgroup/
+   *  生命周期证据——fixture 只模拟「受理→exec」语义）。 */
+  serviceRunner?: AppServerLaunchSpec;
+}
+
 export interface EnsureAppServerOptions {
-  workspace: AppServerAttachWorkspace;
-  /** 显式 socket 路径（调试用）；默认按 workspace 身份派生。 */
+  /** 显式 socket 路径（测试/调试覆盖）；默认按数据根派生单一 core.sock。 */
   socketPath?: string;
   env?: NodeJS.ProcessEnv;
   /** 与 provider-runtime-env 同一约定：<dataBaseDir>/.zcode/v2/sockets。 */
   dataBaseDir?: string;
-  /** 写入 .info 的 zcode 版本。 */
-  version?: string;
   spawnSpec?: AppServerSpawnSpec;
   waitForSocketMs?: number;
   pollIntervalMs?: number;
   now?: () => number;
   platform?: NodeJS.Platform | string;
+  /** 启动/复用诊断（stderr 约定：一行一条，不带换行）；缺省静默。 */
+  log?: (line: string) => void;
 }
 
 export interface EnsureAppServerResult {
   socketPath: string;
   /** true = 本次调用拉起了新 server；false = 复用了已在监听的 server。 */
   started: boolean;
-  pid?: number;
 }
 
-/**
- * 派生共享 core 的 socket 路径：`<dataBaseDir>/.zcode/v2/sockets/core-<hash>.sock`，
- * hash = sha256(resolveWorkspaceKey(workspace)).slice(0,16)，与 project-root 同一摘要约定。
- * Windows 下 Unix socket 文件不可用，按 Node 约定退到 named pipe。
- */
-export function resolveSocketPath(
-  workspace: AppServerAttachWorkspace,
-  options: Pick<EnsureAppServerOptions, "dataBaseDir" | "env" | "platform"> = {},
+/** service-instance 变量属于「管理器↔服务」通道：客户端 env 同名值一律不透传。 */
+const SERVICE_INSTANCE_ENV_NAMES = new Set([
+  "INVOCATION_ID",
+  "JOURNAL_STREAM",
+  "LISTEN_FDS",
+  "LISTEN_FDNAMES",
+  "LISTEN_PID",
+  "NOTIFY_SOCKET",
+  "WATCHDOG_PID",
+  "WATCHDOG_USEC",
+]);
+/** 客户端归属变量前缀：pane/thread 归属是拉起方私有事实，泄漏进共享 core
+ *  会让后来客户端读到错位的归属（herdr 误报正是这类事故）。 */
+const CLIENT_OWNERSHIP_ENV_PREFIXES = ["HERDR_", "T3CODE_"];
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** 不进 service env 的名字：workspace 身份、客户端归属、service-instance 变量。 */
+function isCoreEnvExcluded(name: string): boolean {
+  return (
+    name === ZCODE_WORKSPACE_IDENTITY_ENV ||
+    SERVICE_INSTANCE_ENV_NAMES.has(name) ||
+    CLIENT_OWNERSHIP_ENV_PREFIXES.some((prefix) => name.startsWith(prefix))
+  );
+}
+
+/** 解析数据根：option > ZCODE_DATA_BASE_DIR > homedir；去空白后必须非空。 */
+function resolveDataBaseDir(
+  options: Pick<EnsureAppServerOptions, "dataBaseDir">,
+  env: NodeJS.ProcessEnv,
 ): string {
-  const parsed = appServerAttachWorkspaceSchema.parse(workspace);
-  const hash = createHash(APP_SERVER_HASH_ALGORITHM)
-    .update(resolveWorkspaceKey(parsed))
-    .digest("hex")
-    .slice(0, APP_SERVER_HASH_LENGTH);
-  const platform = options.platform ?? process.platform;
-  if (platform === "win32") {
-    return `${WINDOWS_PIPE_PREFIX}${hash}`;
-  }
-  const env = options.env ?? process.env;
   const dataBaseDir =
     options.dataBaseDir ?? env.ZCODE_DATA_BASE_DIR?.trim() ?? homedir();
-  return join(dataBaseDir, ".zcode", "v2", "sockets", `core-${hash}.sock`);
+  if (dataBaseDir.trim().length === 0) {
+    throw new Error("app-server data root must be a non-blank path");
+  }
+  return dataBaseDir;
 }
 
 /**
- * 幂等拉起共享 core：先探测已有 socket；不存在时经 O_CREAT|O_EXCL 原子锁保证
- * 并发调用者中只有一人 spawn `zcode app-server --socket <path> --no-plugins`
- * （detached + setsid + stdio ignore + unref），写出 .pid/.info 后等待 socket 就绪。
+ * 派生共享 core 的 socket 路径：`<dataBaseDir>/.zcode/v2/sockets/core.sock`。
+ * 单一 core：路径只由数据根决定，不含 workspace/frontend/provider 标识；
+ * workspace 身份只出现在会话级协议参数里。Windows 下 Unix socket 文件不可
+ * 用，按 Node 约定退到 named pipe（按数据根 hash，未实测）。
+ */
+export function resolveSocketPath(
+  options: Pick<EnsureAppServerOptions, "dataBaseDir" | "env" | "platform"> = {},
+): string {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const dataBaseDir = resolveDataBaseDir(options, env);
+  if (platform === "win32") {
+    const hash = createHash(APP_SERVER_HASH_ALGORITHM)
+      .update(dataBaseDir)
+      .digest("hex")
+      .slice(0, APP_SERVER_HASH_LENGTH);
+    return `${WINDOWS_PIPE_PREFIX}${hash}`;
+  }
+  if (!isAbsolute(dataBaseDir)) {
+    throw new Error(`app-server data root must be an absolute path: ${dataBaseDir}`);
+  }
+  return join(dataBaseDir, ".zcode", "v2", "sockets", "core.sock");
+}
+
+/** service unit 名：只由 socket 路径派生——稳定，绝不含 cwd/provider/
+ *  version/frontend。不同数据根自然得到不同 unit。 */
+function resolveServiceUnitName(socketPath: string): string {
+  const hash = createHash(APP_SERVER_HASH_ALGORITHM)
+    .update(socketPath)
+    .digest("hex")
+    .slice(0, APP_SERVER_HASH_LENGTH);
+  return `${CORE_SERVICE_UNIT_PREFIX}${hash}${CORE_SERVICE_UNIT_SUFFIX}`;
+}
+
+/**
+ * 组装 service env 与拉起 argv（纯函数，便于审查）：
+ * - service env = 客户端 env 过滤后转发；`--setenv=NAME` 只带变量名，
+ *   值由 systemd-run 从自己的 env 解析——值/secret 绝不进 argv。
+ * - `UnsetEnvironment=` 防 manager 侧同名变量漏进服务：workspace 身份与
+ *   service-instance 名恒入列，客户端归属名按调用方 env 实到补列。
+ */
+function buildServiceRunnerArgs(input: {
+  unitName: string;
+  dataBaseDir: string;
+  socketPath: string;
+  spec: AppServerLaunchSpec;
+  runnerArgsPrefix: readonly string[];
+  forwardedEnvNames: readonly string[];
+  unsetEnvNames: readonly string[];
+}): string[] {
+  return [
+    ...input.runnerArgsPrefix,
+    "--user",
+    "--quiet",
+    "--collect",
+    "--service-type=exec",
+    "--expand-environment=no",
+    `--unit=${input.unitName}`,
+    `--property=WorkingDirectory=${input.dataBaseDir}`,
+    "--property=StandardInput=null",
+    "--property=StandardOutput=null",
+    "--property=StandardError=journal",
+    ...input.unsetEnvNames.map((name) => `--property=UnsetEnvironment=${name}`),
+    ...input.forwardedEnvNames.map((name) => `--setenv=${name}`),
+    "--",
+    "/usr/bin/env",
+    "--",
+    input.spec.file,
+    ...(input.spec.argsPrefix ?? []),
+    "app-server",
+    "--socket",
+    input.socketPath,
+    "--no-plugins",
+    "--cwd",
+    input.dataBaseDir,
+  ];
+}
+
+/** systemd-run stderr → 有界、去控制字节的单行失败上下文（不回显 env/argv；
+ *  含换行的原文会破坏一行一条的 stderr 诊断约定）。 */
+function sanitizeRunnerStderr(raw: string): string {
+  return [...raw]
+    .filter((char) => {
+      const code = char.codePointAt(0) ?? 0;
+      return code >= 0x20 && code !== 0x7f;
+    })
+    .join("")
+    .trim()
+    .slice(0, SERVICE_RUNNER_STDERR_MESSAGE_LIMIT);
+}
+
+/**
+ * 幂等确保共享 core 可用：先探测已有 socket；不存在时经 O_CREAT|O_EXCL
+ * 原子锁保证并发调用者中只有一人请求拉起。Linux 拉起路径是
+ * `systemd-run --user` 瞬时 service（piz-core-<sha256(socketPath)[:16]>）：
+ * core 生命周期归 user 服务管理器，客户端 scope 退役杀不死它。
+ * systemd-run exit 0 只代表受理——继续探测 socket 到就绪上限。
+ * 无 service manager 的平台显式报错，绝不回落 detached spawn。
  */
 export async function ensureServer(
   options: EnsureAppServerOptions,
 ): Promise<EnsureAppServerResult> {
-  const workspace = appServerAttachWorkspaceSchema.parse(options.workspace);
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
   // Unix-only：spawn 不走 shell，任何文件系统/探测之前先拒绝。
   if (platform === "win32") {
     throw new Error("ensureServer does not support spawning app-server on win32");
   }
-  if (options.socketPath !== undefined && options.socketPath.trim().length === 0) {
-    throw new Error("socketPath must be a non-empty path when provided");
+  if (options.socketPath !== undefined) {
+    if (options.socketPath.trim().length === 0) {
+      throw new Error("socketPath must be a non-empty path when provided");
+    }
+    if (!isAbsolute(options.socketPath)) {
+      throw new Error(`socketPath must be an absolute path: ${options.socketPath}`);
+    }
   }
-  const socketPath = options.socketPath ?? resolveSocketPath(workspace, options);
+  const socketPath = options.socketPath ?? resolveSocketPath(options);
   const waitForSocketMs = options.waitForSocketMs ?? APP_SERVER_READY_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? APP_SERVER_PROBE_INTERVAL_MS;
   const now = options.now ?? Date.now;
   const deadline = now() + waitForSocketMs;
 
   if (await probeSocket(socketPath)) {
+    options.log?.(`app-server: reusing shared core at ${socketPath}`);
     return { socketPath, started: false };
   }
 
+  // 非 Linux Unix（含 darwin）：已监听 socket 上面已复用；socket 缺席时显式
+  // 失败——不回落 detached/double-fork spawn，那会把 core 生命周期绑回客户
+  // 端 scope（T3 scope 退役杀 core 的事故正是这么来的）。
+  if (platform !== "linux") {
+    throw new Error(
+      `app-server auto-start requires a user service manager (Linux systemd --user); ` +
+        `on ${platform} start the shared core under an independent supervisor, e.g. ` +
+        `\`zcode app-server --socket '${socketPath}' --no-plugins\`, then retry`,
+    );
+  }
+
+  // service WorkingDirectory 与 --cwd 用中性数据根：core 进程 cwd 只做
+  // 「客户端漏传 workspace」的兜底，绝不能继承首个拉起者的 workspace。
+  const dataBaseDir = resolveDataBaseDir(options, env);
+  if (!isAbsolute(dataBaseDir)) {
+    throw new Error(`app-server data root must be an absolute path: ${dataBaseDir}`);
+  }
+
+  // socket 目录与数据根都要存在：数据根是 service WorkingDirectory/--cwd，
+  // 不存在会让 manager 受理失败（显式 socketPath 时数据根在 socket 目录之外）。
   await mkdir(dirname(socketPath), { recursive: true });
+  await mkdir(dataBaseDir, { recursive: true });
   const lockPath = `${socketPath}.lock`;
 
   let lockHeld = false;
@@ -140,37 +283,75 @@ export async function ensureServer(
   let child: ChildProcess | undefined;
   let childExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   let childError: Error | undefined;
+  let runnerStderr = "";
   try {
     // 抢到锁 ≠ 独享 socket：上一个持锁者可能在就绪后才放锁，再探一次，
-    // 复用已有 server 而不是重复 spawn/误删它的 socket。
+    // 复用已有 server 而不是重复拉起/误删它的 socket。
     if (await probeSocket(socketPath)) return { socketPath, started: false };
 
     // spawnSpec（测试注入）> ZCODE_SERVER_BIN（瘦客户端/探针指定 core 入口）> PATH zcode。
     const spec = options.spawnSpec ?? { file: env?.ZCODE_SERVER_BIN?.trim() || "zcode" };
-    const args = [
-      ...(spec.argsPrefix ?? []),
-      "app-server",
-      "--socket",
-      socketPath,
-      "--no-plugins",
-      "--cwd",
-      workspace.workspacePath,
-    ];
-    const childEnv = { ...env };
-    // 显式 dataBaseDir 必须传进子进程，否则 server 端按 homedir 另解一份数据根。
-    if (options.dataBaseDir) childEnv.ZCODE_DATA_BASE_DIR = options.dataBaseDir;
-    const identityKey = resolveWorkspaceKey(workspace);
-    if (identityKey) childEnv[ZCODE_WORKSPACE_IDENTITY_ENV] = identityKey;
+    const runner = spec.serviceRunner ?? { file: DEFAULT_SERVICE_RUNNER };
+    const unitName = resolveServiceUnitName(socketPath);
+
+    // service env：过滤后的客户端 env + 固定项。--setenv 只传变量名，值经
+    // systemd-run 自己的 env（= childEnv）解析——argv/日志里没有 secret。
+    const childEnv: Record<string, string> = {};
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) continue;
+      if (!ENV_NAME_PATTERN.test(name)) continue;
+      if (isCoreEnvExcluded(name)) continue;
+      childEnv[name] = value;
+    }
+    // 显式数据根必须传进服务进程，否则 server 端按 homedir 另解一份数据根。
+    childEnv.ZCODE_DATA_BASE_DIR = dataBaseDir;
+    // 中性 PWD 与 WorkingDirectory/--cwd 对齐：服务 env 不残留拉起者目录。
+    childEnv.PWD = dataBaseDir;
     // attach 共享 core 标记：core 由本客户端（zcode attach / zcode-attach/piz）
-    // spawn 且可被多客户端复用，spawn env 里烘焙的 HERDR_PANE_ID 只对首个
-    // 客户端成立。~/.zcode/herdr-hook.sh 见此标记即 no-op，由客户端侧
-    // herdr-reporter 上报真实 pane 归属（docs/design/v2/tui-attach-shared-core.md）。
+    // 拉起且可被多客户端复用，任何 spawn env 里的 HERDR_PANE_ID 都不可能是
+    // 全部客户端的真实 pane。~/.zcode/herdr-hook.sh 见此标记即 no-op，由
+    // 客户端侧 herdr-reporter 上报真实 pane 归属
+    // （docs/design/v2/tui-attach-shared-core.md）。
     childEnv[ZCODE_ATTACH_CORE_ENV] = "1";
-    child = spawn(spec.file, args, {
-      // detached 在 POSIX 走 setsid；不启用 shell，spawnSpec.file 必须直接可执行。
-      detached: true,
+
+    // UnsetEnvironment 兜底 manager 侧 env（systemctl --user import-environment
+    // 带进来的）：workspace 身份与 service-instance 名恒入列（后者是 systemd
+    // 通道变量，值由 manager 分配，外来同名一律是污染）；客户端归属名按
+    // 调用方 env 实到补列——manager env 不可枚举，看不到的无法预防。
+    const unsetEnvNames = [
+      ZCODE_WORKSPACE_IDENTITY_ENV,
+      ...SERVICE_INSTANCE_ENV_NAMES,
+      ...Object.keys(env)
+        .filter(
+          (name) =>
+            name !== ZCODE_WORKSPACE_IDENTITY_ENV &&
+            !SERVICE_INSTANCE_ENV_NAMES.has(name) &&
+            CLIENT_OWNERSHIP_ENV_PREFIXES.some((prefix) => name.startsWith(prefix)),
+        )
+        .toSorted(),
+    ];
+    const runnerArgs = buildServiceRunnerArgs({
+      unitName,
+      dataBaseDir,
+      socketPath,
+      spec,
+      runnerArgsPrefix: runner.argsPrefix ?? [],
+      forwardedEnvNames: Object.keys(childEnv).toSorted(),
+      unsetEnvNames,
+    });
+
+    options.log?.(`app-server: requesting shared core start via ${unitName}`);
+    child = spawn(runner.file, runnerArgs, {
+      // 拉起器是短寿命注册进程，不是 core 本身：env 带过滤后的 service env
+      // 供 --setenv=NAME 解析；stderr 接管收集做失败上下文；stdin/stdout 断开。
       env: childEnv,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (runnerStderr.length < SERVICE_RUNNER_STDERR_LIMIT) {
+        runnerStderr += chunk.slice(0, SERVICE_RUNNER_STDERR_LIMIT - runnerStderr.length);
+      }
     });
     child.once("error", (error) => {
       childError = error;
@@ -178,14 +359,13 @@ export async function ensureServer(
     child.once("exit", (code, signal) => {
       childExit = { code, signal };
     });
-    child.unref();
-    // 'spawn' 未触发说明二进制根本没起来（ENOENT/权限），直接携带原始 error 失败；
-    // 不能把没出生的进程写进 .pid/.info 登记成 owner。
+    // 'spawn' 未触发说明拉起器根本没起来（ENOENT/权限），直接携带原始
+    // error 失败；不能把没出生的进程写进 .pid/.info 登记成 owner。
     await new Promise<void>((resolve, reject) => {
       child!.once("spawn", () => resolve());
       child!.once("error", (error) =>
         reject(
-          new Error(`app-server spawn failed: ${error.message}`, {
+          new Error(`app-server service manager spawn failed: ${error.message}`, {
             cause: error,
           }),
         ),
@@ -193,40 +373,57 @@ export async function ensureServer(
     });
 
     // .pid/.info 由 server 端在 listen 成功后自登记（bind 成功者才是 owner）；
-    // 客户端在这里写会在双 spawn 竞争下登记死进程。本端只等 socket 就绪。
-    // 就绪窗口从 spawn 完成起算，不吃前面锁等待的预算：锁竞争获胜时剩余的
-    // 锁预算可能已近零，不能把刚出生的 core 立刻判死。
+    // 客户端在这里写会在双拉起竞争下登记死进程，也从不把登记文件当就绪/归属
+    // 证据读——它可能滞后或陈旧（上次 core 的残留）。本端只等 socket 就绪。
+    // 就绪窗口从拉起器进程 OS spawn 完成起算（'spawn' 事件之后、manager 受理
+    // 结果返回之前），不吃前面锁等待的预算：锁竞争获胜时剩余的锁预算可能已
+    // 近零，不能把刚受理的 core 立刻判死。
     const readyDeadline = now() + waitForSocketMs;
-    while (now() < readyDeadline) {
+    for (;;) {
       if (childError) {
-        throw new Error(`app-server spawn failed: ${childError.message}`, {
-          cause: childError,
-        });
-      }
-      if (childExit) {
         throw new Error(
-          `app-server exited before accepting on ${socketPath} (code=${childExit.code}, signal=${childExit.signal})`,
+          `app-server service manager failed (unit ${unitName}): ${childError.message}`,
+          { cause: childError },
+        );
+      }
+      if (childExit && childExit.code !== 0) {
+        // 受理失败：报错前再探一次 socket——同名 unit 可能已被并行启动
+        // 的先前请求带起，或者先前仍在启动的服务此刻刚就绪。
+        if (await probeSocket(socketPath)) return { socketPath, started: false };
+        const detail = sanitizeRunnerStderr(runnerStderr);
+        throw new Error(
+          `app-server service start failed (unit ${unitName}, exit=${childExit.code}, ` +
+            `signal=${childExit.signal})${detail ? `: ${detail}` : ""}`,
         );
       }
       if (await probeSocket(socketPath)) {
-        return { socketPath, started: true, pid: child.pid };
+        return { socketPath, started: true };
+      }
+      // childExit.code === 0：服务被受理，core 仍在 exec/listen——继续探测。
+      if (now() >= readyDeadline) {
+        throw new Error(
+          `Timed out waiting for app-server socket: ${socketPath} ` +
+            `(service unit ${unitName}; inspect with: systemctl --user status ${unitName})`,
+        );
       }
       await sleep(pollIntervalMs);
     }
-    throw new Error(`Timed out waiting for app-server socket: ${socketPath}`);
   } catch (error) {
-    // spawn 失败路径回收现场，避免留下半初始化文件误导下一次调用。
-    if (child?.pid !== undefined) {
+    // 失败路径只回收仍在运行的拉起器本身（systemd-run 是短寿命注册进程，
+    // 不是共享服务）；绝不按 unit/进程组停共享 core——其他客户端可能正在用。
+    if (child && !childExit && child.pid !== undefined) {
       try {
         process.kill(child.pid, "SIGTERM");
       } catch {
-        /* 子进程可能已退出 */
+        /* 拉起器可能已退出 */
       }
     }
     // spawn 失败路径不清理 .pid/.info：登记权在 server 端（listen 后自写），
     // 本调用从未写过；删别人登记的文件才是破坏。socket 路径同样不归本次调用所有。
     throw error;
   } finally {
+    child?.stderr?.destroy();
+    child?.unref();
     await releaseOwnedLock(lockPath).catch(() => undefined);
   }
 }

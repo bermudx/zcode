@@ -179,10 +179,7 @@ async function startAttachHarness(
   const dir = await mkdtemp(join(tmpdir(), "attach-model-"));
   const workspace = join(dir, "workspace");
   const { resolveSocketPath } = await import("../src/app-server-spawn.js");
-  const socketPath = resolveSocketPath(
-    { workspacePath: workspace },
-    { env: { ZCODE_DATA_BASE_DIR: dir } },
-  );
+  const socketPath = resolveSocketPath({ env: { ZCODE_DATA_BASE_DIR: dir } });
   await mkdir(dirname(socketPath), { recursive: true });
   let currentModelId = startModelId;
   let currentProviderId = startProviderId;

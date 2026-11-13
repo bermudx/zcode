@@ -202,6 +202,13 @@ export interface ZCodeAppOptions {
   includeVisualize?: boolean;
   skillPort?: SkillPort;
   mcpPort?: McpPort;
+  /**
+   * 协议 owner 的 client attachment 信号（issue #31 评审 R1）：仅 client 显式
+   * 声明 MCP 的 session 注入。信号在准备 factory 调用时捕获——app 物化横跨
+   * transport detach 的窗口里 record 尚未登记，runtime 靠它同步落下 client
+   * MCP admission 闸门；缺席保持普通会话语义。
+   */
+  mcpClientDetachSignal?: AbortSignal;
   /** 由宿主提供 per-app lease；产出的端口归 app 所有。 */
   mcpPortFactory?: (input: { workingDirectory?: string }) => McpPort;
   permissionBroker?: PermissionBrokerPort;

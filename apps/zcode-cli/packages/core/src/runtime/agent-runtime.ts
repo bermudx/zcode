@@ -50,6 +50,7 @@ import type {
   SkillLoadOutcome,
   SkillPort,
   McpPort,
+  McpServerConfig,
   DynamicWorkflowRunPort,
   ModelCatalogPort,
   SubagentPort,
@@ -103,6 +104,7 @@ import type {
   ActiveTurnSteeringState,
   AgentRuntimeConfig,
   AgentRuntimeDeps,
+  BorrowedMcpAccess,
   ContinueActiveTargetLoopOptions,
   ConversationBeforeInputForkOptions,
   ConversationRewindResult,
@@ -129,7 +131,7 @@ import type {
   WorkspaceFileRewindPreview,
   WorkspaceForkResult,
 } from "./types.js";
-import type { AgentRuntimeInternal } from "./internal.js";
+import type { AgentRuntimeInternal, McpConnectOperation } from "./internal.js";
 import { InMemoryRuntimeTaskRegistry, type RuntimeTaskRegistry } from "../runtime-task/registry.js";
 import type { WorkflowBlockedReminderClock } from "../runtime-task/workflow-blocked-reminder.js";
 import { createWorkflowBlockedReminder } from "./methods/dynamic-workflow-blocked-reminder.js";
@@ -204,6 +206,23 @@ export class AgentRuntime {
   private skillPort?: SkillPort;
   private mcpPort?: McpPort;
   private mcpStartupPromise?: Promise<McpConnectionSnapshot>;
+  /** 迟到注入补建 session MCP port 的同步工厂（issue #31 client MCP）。 */
+  private createMcpPort?: () => McpPort | undefined;
+  /** client attachment 信号退订（评审 R1）；只存退订，abort 后自清。 */
+  private mcpDetachUnsubscribe?: () => void;
+  /** 借用方 MCP 入口（评审 R3）：workflow/script 子会话 startup 时 await 父侧快照。 */
+  private borrowMcpAccess?: AgentRuntimeDeps["borrowMcpAccess"];
+  /** client 注入 MCP：期望/已生效声明与版本；undefined desired = 未注入过。 */
+  private mcpDesiredServers?: Record<string, McpServerConfig>;
+  private mcpDesiredVersion = 0;
+  private mcpAppliedVersion = 0;
+  private mcpAppliedServers?: Record<string, McpServerConfig>;
+  private mcpClientAttached = true;
+  private mcpAttachEpoch = 0;
+  private readonly mcpInFlightConnects = new Set<McpConnectOperation>();
+  private mcpReconnectNeeded = false;
+  private mcpApplyTail: Promise<void> = Promise.resolve();
+  private mcpClosed = false;
   private residencyBlockingWorkCount = 0;
   private readonly residencyBlockingWork = new Set<Promise<unknown>>();
   private ownedWorkClose?: Promise<void>;
@@ -347,6 +366,8 @@ export class AgentRuntime {
     this.contextSourcePort = deps.contextSourcePort;
     this.skillPort = deps.skillPort;
     this.mcpPort = deps.mcpPort;
+    this.createMcpPort = deps.createMcpPort;
+    this.borrowMcpAccess = deps.borrowMcpAccess;
     this.runtimeTaskRegistry = deps.runtimeTaskRegistry ?? new InMemoryRuntimeTaskRegistry();
     this.runtimeTaskRegistry.setActiveBranchGeneration?.(this.branchGeneration);
     this.workflowBlockedReminder = createWorkflowBlockedReminder(runtime);
@@ -372,6 +393,32 @@ export class AgentRuntime {
     if (this.contextBuilder) {
       runtime.initializeMessageHistoryFromContext(this.contextBuilder, this.rootTraceContext);
       this.contextInitialized = true;
+    }
+    // client attachment 闸门必须在 startMcpStartup 之前落定（评审 R1）：
+    // factory 物化横跨 detach 的会话出生即 detached，startup 不得放行 stdio；
+    // 信号后到的由订阅回调走现有 suspend 路径。
+    const mcpClientDetachSignal = deps.mcpClientDetachSignal;
+    if (mcpClientDetachSignal !== undefined) {
+      if (mcpClientDetachSignal.aborted) {
+        this.mcpClientAttached = false;
+        this.mcpAttachEpoch += 1;
+        this.mcpReconnectNeeded = true;
+      } else {
+        const onClientDetach = () => {
+          this.mcpDetachUnsubscribe = undefined;
+          void runtime.setMcpClientAttached(false).catch((error: unknown) => {
+            this.logger?.warn("MCP detach suspend via attachment signal failed", {
+              errorKind: error instanceof Error ? error.name : typeof error,
+              event: "mcp.detach_suspend.failed",
+              module: "core.runtime",
+              status: "failed",
+            });
+          });
+        };
+        mcpClientDetachSignal.addEventListener("abort", onClientDetach, { once: true });
+        this.mcpDetachUnsubscribe = () =>
+          mcpClientDetachSignal.removeEventListener("abort", onClientDetach);
+      }
     }
     runtime.startMcpStartup(this.rootTraceContext);
   }
@@ -471,7 +518,17 @@ export class AgentRuntime {
     // ExecutionPort.close() 会把后台 Bash 收口为 cancelled；若允许
     // teardown terminal event 再唤醒模型，并与随后关闭的 session store 竞态。
     this.shuttingDown = true;
-    this.shutdownController.abort(new Error("Session runtime closed"));
+    // client MCP 闸门同步落下：迟到的连接结果不得再向本 runtime 落地（issue #31）。
+    this.mcpClosed = true;
+    this.mcpClientAttached = false;
+    // attachment 订阅只留退订函数；shutdown 时 owner 信号可能再也用不到。
+    this.mcpDetachUnsubscribe?.();
+    this.mcpDetachUnsubscribe = undefined;
+    const closedReason = new Error("Session runtime closed");
+    // 在飞的 client connect（startup/apply 可有多条登记记录）逐个 abort——close 等
+    // residencyBlockingWork 收尾，不 abort 会让卡在握手的 connect 死等。
+    for (const op of this.mcpInFlightConnects) op.controller.abort(closedReason);
+    this.shutdownController.abort(closedReason);
     // 同一条理由：会话在关，提醒钟不能再到点唤起一轮。
     this.workflowBlockedReminder.stop();
     // 关闭单个 session 后进程仍存活，
@@ -483,6 +540,32 @@ export class AgentRuntime {
 
 export interface AgentRuntime {
   lastPermissionGrantId?: string;
+  /**
+   * client 注入 MCP（issue #31）：声明由 bootstrap 协议层下发，runtime 在整轮
+   * 边界落地。语义相等 no-op；回合中 stage，下一轮 executeTurnCommand 生效。
+   */
+  configureMcpServers(servers: Record<string, McpServerConfig>): Promise<void>;
+  /** client 显式 override 的克隆快照；undefined = 未注入过（不是空集）。 */
+  getConfiguredMcpServers(): Record<string, McpServerConfig> | undefined;
+  /**
+   * 已落地的生效 MCP 配置克隆（config.mcp）——workflow/script 子会话借用父
+   * port 时读它，绝不读 pending desired（评审 S4）。
+   */
+  getEffectiveMcpConfig(): AgentRuntimeConfig["mcp"];
+  getMcpPort(): McpPort | undefined;
+  /** ACP client detach/adopt 闸门；adoption 后连接在下一回合边界补连。 */
+  setMcpClientAttached(attached: boolean): Promise<void>;
+  /** 整轮边界/空闲沿的 staged 应用入口；协议与 facade 不直接调。 */
+  applyPendingMcpServers(): Promise<void>;
+  /**
+   * workflow/script 子会话借用入口（issue #31 评审 R3）：等本 runtime 已排队的
+   * startup/apply 落定后返回 {port, APPLIED config, status+tools} 一份快照；
+   * 绝不替父落地 staged desired，detached/closed 返回空。
+   */
+  prepareBorrowedMcp(input: {
+    traceContext: TraceContext;
+    signal: AbortSignal;
+  }): Promise<BorrowedMcpAccess>;
   retire(): Promise<void>;
   close(): Promise<void>;
   beginShutdown(): void;

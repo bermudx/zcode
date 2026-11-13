@@ -22,6 +22,7 @@ import {
   type ZCodeSessionEventFormat,
   type ModelSelection,
   type ZCodeModelContextBudgetStrategy,
+  type ZCodeProtocolMcpServer,
   type ZCodeProtocolMessage,
   type ZCodeProtocolMethod,
   type ZCodeProtocolNotification,
@@ -157,6 +158,13 @@ export interface ZCodeProtocolSessionRecord {
   restoreWarning?: { message: string; type: string };
   /** 冷恢复候选只供初始投影；新的选模事件立即清除，不能替代 Runtime 执行绑定。 */
   restoredModelSelection?: ModelSelection;
+  /**
+   * 客户端注入的 MCP 声明（session/create|resume 的 mcpServers）的最近一份已接受副本。
+   * 仅 in-memory 来源事实：resume 用它区分「省略=保留」与「[]=清空」，fork 用它继承；
+   * 绝不写进持久化 session info、snapshot、事件或诊断（含凭据，不落盘）。
+   * undefined 表示本会话从未接受过 client MCP 声明（非 client-MCP provenance）。
+   */
+  clientMcpServers?: ZCodeProtocolMcpServer[];
 }
 
 export interface ZCodeProtocolClientRequestOptions {
@@ -287,6 +295,15 @@ export interface ZCodeProtocolAgentServerContext {
   adoptDetachedSession?(sessionId: string): Promise<boolean>;
   /** 仅覆盖异步创建窗口，结束即释放；输入命令仍由 CommandInbox 排队。 */
   sessionCreationIds?: Set<string>;
+  /**
+   * 本 owner 当前 client attachment 的 detach 信号（issue #31 评审 R1）：
+   * session factory 物化窗口横跨 detach 时，record 尚未登记、detach 扫描
+   * 看不到它——factory 在准备调用时取走本信号交给 runtime，attachment 死亡
+   * 即可靠它落下 client MCP admission 闸门。缺席（测试/普通 context）保持旧语义。
+   */
+  getClientDetachSignal?: () => AbortSignal;
+  /** 本 owner 的 client 当前 attached；detached 与 terminated 都返回 false。 */
+  isClientAttached?: () => boolean;
   notify(notification: ZCodeProtocolNotification): void;
   requestClient<T>(
     method: ZCodeProtocolMethod,

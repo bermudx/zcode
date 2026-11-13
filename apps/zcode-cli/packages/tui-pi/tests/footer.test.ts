@@ -181,14 +181,16 @@ for (const isTTY of [true, false]) {
       h.store.set("activeTurnId", "turn-quota" as TurnId);
       await h.flush(() => h.store.state.quotaError !== undefined);
 
+      // 失败与读数并存：`stale: ` 前缀标注旧读数，尾部不再并挂独立徽标。
       const wide = strip(footerRows(h.app, 100)[0] ?? "");
-      assert.match(wide, /\d+m \d{2}s.*5h: 99%.*7d: 32%.*quota !$/);
+      assert.match(wide, /\d+m \d{2}s.*stale: 5h: 99%.*7d: 32% ↻\d+[hd]$/);
+      assert.doesNotMatch(wide, /quota !/);
       for (const width of [30, 45]) {
         const rows = footerRows(h.app, width);
         const top = strip(rows[0] ?? "");
         assert.match(top, /Ready\./);
         assert.match(top, /quota !$/);
-        assert.doesNotMatch(top, /5h:|7d:|\d+m \d{2}s/);
+        assert.doesNotMatch(top, /5h:|7d:|stale:|\d+m \d{2}s/);
         assert.equal(rows.length, 2);
         for (const row of rows) assert.ok(visibleWidth(row) <= width);
       }
@@ -211,6 +213,7 @@ for (const isTTY of [true, false]) {
       assert.equal(h.store.state.quotaError, undefined);
       assert.match(recovered, /1h: 50%/);
       assert.doesNotMatch(recovered, /quota !/);
+      assert.doesNotMatch(recovered, /stale:/);
       assert.equal(diagnostics.length, isTTY ? 0 : 1);
     } finally {
       await h.stop();
@@ -227,6 +230,10 @@ test("quota badge fallback respects the two-column gap and visible cwd width", a
       const healthy = strip(footerRows(h.app, 80)[0] ?? "");
       assert.match(healthy, /1h: 50%$/);
       h.store.set("quotaError", "synthetic failure");
+      // 读数在场：前缀口径，无独立徽标。
+      const marked = strip(footerRows(h.app, 80)[0] ?? "");
+      assert.match(marked, /stale: 1h: 50%$/);
+      assert.doesNotMatch(marked, /quota !/);
       const minWidth = visibleWidth(cwd) + 2 + visibleWidth("quota !");
       assert.equal(strip(footerRows(h.app, minWidth)[0] ?? ""), `${cwd}  quota !`);
       const tooNarrow = footerRows(h.app, minWidth - 1);
