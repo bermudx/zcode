@@ -11,7 +11,10 @@ import {
   toCommandCenterSkillList,
   toSkillSuggestions,
 } from "../src/attach/attach-skills.js";
-import { toTuiSkillSuggestions } from "../src/skill-suggestions.js";
+import {
+  toSkillCatalogEntries,
+  toTuiSkillSuggestions,
+} from "../src/skill-suggestions.js";
 
 const entry = (
   overrides: Partial<ZCodeSkillReferenceCatalogEntry> = {},
@@ -135,6 +138,21 @@ test("toTuiSkillSuggestions：embedded 侧（SkillMetadata 形状）同样过滤
   ]);
   // source 缺省（老服务端）不过滤。
   assert.equal(toTuiSkillSuggestions([{ description: "d", name: "x" }]).length, 1);
+});
+
+test("toSkillCatalogEntries 与补全同一份 filter+dedup，但保留裸名（issue #24）", () => {
+  // ACP 路由侧要按 Skill 工具 resolver 口径命中（name 或 qualifiedName）——
+  // 展示投影丢掉的裸名必须在这条目录投影里留住。
+  const entries = toSkillCatalogEntries([
+    { description: "d1", name: "lint", qualifiedName: "fmt:lint", source: "plugin" },
+    { description: "d2", name: "dynamic-workflows", source: "bundled" },
+    { description: "d3", name: "lint", qualifiedName: "fmt:lint", source: "plugin" },
+    { description: "d4", name: "agent-notes", source: "agents" },
+  ]);
+  assert.deepEqual(entries, [
+    { description: "d1", name: "lint", qualifiedName: "fmt:lint" },
+    { description: "d4", name: "agent-notes" },
+  ]);
 });
 
 test("listAttachSkillCatalog 发 skills/referenceCatalog 并校验回包形状", async () => {

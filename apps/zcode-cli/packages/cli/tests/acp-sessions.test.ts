@@ -63,6 +63,10 @@ async function fixture(t: test.TestContext) {
   // fake core 的内存 record 表：create/resume 登记，subscribe 只认在表会话；
   // evictSessions 模拟 core 重启丢内存 record，驱动 AttachRuntime 冷恢复分支。
   const resident = new Set<string>();
+  const catalogs = {
+    commands: { commands: [] as unknown[] },
+    skills: { authority: "workspace", skills: [] as unknown[] },
+  };
   const notify = (sessionId: string, type: string, payload: Record<string, unknown>) => {
     for (const socket of sockets) socket.write(`${JSON.stringify({
       method: "session/rawEvent",
@@ -100,6 +104,10 @@ async function fixture(t: test.TestContext) {
             resident.add(sessionId);
             result = snapshot(sessionId);
           }
+        } else if (message.method === "commands/referenceCatalog") {
+          result = catalogs.commands;
+        } else if (message.method === "skills/referenceCatalog") {
+          result = catalogs.skills;
         } else if (message.method === "session/subscribe") {
           if (resident.has(sessionId)) {
             result = { eventSeq: seq, events: [], rawEvents: [], sessionId };
@@ -146,7 +154,7 @@ async function fixture(t: test.TestContext) {
     await rm(directory, { recursive: true, force: true });
   });
   return {
-    sessions, requests, sockets, notify, connectedRefs, socketPath,
+    catalogs, sessions, requests, sockets, notify, connectedRefs, socketPath,
     get connectionCount() { return connectionCount; },
     get promptInput() { return promptInput; },
     rejectClose: (reject: boolean) => { rejectClose = reject; },
@@ -229,6 +237,65 @@ test("ACP close failure retains binding for retry; successful close removes reco
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.ok(!f.requests.slice(before).some((r) =>
     r.method === "session/resume" || r.method === "session/subscribe"));
+});
+
+test("ACP slash catalog keeps interactive-only commands for the interactive client (issue #22)", async (t) => {
+  const f = await fixture(t);
+  const session = await f.sessions.open("/workspace");
+  f.catalogs.commands.commands = [
+    {
+      description: "Interactive only", disableNonInteractive: true, name: "tui-only",
+      path: "/workspace/.zcode/commands/tui-only.md", scope: "project", source: "zcode",
+    },
+    {
+      description: "Any context", name: "review",
+      path: "/workspace/.zcode/commands/review.md", scope: "project", source: "zcode",
+    },
+  ];
+  // 同名技能与 interactive-only 命令共存：滤掉命令会让技能借「无同名命令」裁定
+  // 抢走本该由 facade 展开的路径。
+  f.catalogs.skills.skills = [
+    {
+      description: "same-named skill", enabled: true, id: "skill-tui-only",
+      name: "tui-only", path: "/home/u/.agents/skills/tui-only", scope: "user",
+    },
+  ];
+  const catalog = await f.sessions.slashCatalog(session.handle.sessionId);
+  // ACP 是交互式客户端：/name 原文转发后 core facade 展开不查
+  // disableNonInteractive（那只服务 app-server/headless 目录），滤掉既漏报
+  // 广告又让同名技能顶替（issue #22）。
+  assert.deepEqual(
+    catalog.commands.map((command) => command.name).sort(),
+    ["review", "tui-only"],
+  );
+  assert.deepEqual(catalog.skills.map((skill) => skill.name), ["tui-only"]);
+});
+
+test("ACP slash catalog keeps each skill's plain name beside qualifiedName (issue #24)", async (t) => {
+  const f = await fixture(t);
+  const session = await f.sessions.open("/workspace");
+  // Skill 工具 resolver 按 name 或 qualifiedName 命中：投影丢裸名会让
+  // `/skill review` 误报 Unknown——目录行两个名字都要留住。
+  f.catalogs.skills.skills = [
+    {
+      description: "plugin skill", enabled: true, id: "glm:plugin:/p/review",
+      name: "review", path: "/p/review", pluginName: "acp-registry",
+      qualifiedName: "acp-registry:review", scope: "plugin", source: "plugin",
+    },
+    {
+      description: "plain skill", enabled: true, id: "glm:workspace:/repo/lint",
+      name: "lint", path: "/repo/lint", scope: "workspace", source: "zcode",
+    },
+  ];
+  const catalog = await f.sessions.slashCatalog(session.handle.sessionId);
+  assert.deepEqual(catalog.skills, [
+    {
+      description: "plugin skill",
+      name: "review",
+      qualifiedName: "acp-registry:review",
+    },
+    { description: "plain skill", name: "lint" },
+  ]);
 });
 
 test("ACP reconnect opens a fresh transport for handles and lifecycle requests", async (t) => {

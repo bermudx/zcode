@@ -13,12 +13,14 @@ import type {
 } from "@zcode/shared";
 import {
   goalActionFromArgs,
-  localSlashCommandsUpdate,
   newGoalInputId,
   parseLocalSlashCommand,
+  resolveSkillInvocation,
   runDwfCommand,
   runGoalCommand,
+  slashCommandsUpdate,
   watchTurnSettlement,
+  type AcpSkillResolution,
 } from "../src/acp/acp-commands.js";
 import type { AttachSessionHandle } from "../src/attach/attach-session.js";
 
@@ -208,14 +210,191 @@ test("runDwfCommand resume success and structured rejection wording", async () =
   assert.match(await runDwfCommand(missingId.handle, "resume"), /^Usage: \/dwf/);
 });
 
-test("localSlashCommandsUpdate advertises exactly the two routed commands", () => {
-  const update = localSlashCommandsUpdate();
+test("slashCommandsUpdate: local commands only when the core catalog is unavailable", () => {
+  const update = slashCommandsUpdate();
   assert.equal(update.sessionUpdate, "available_commands_update");
   const names = update.availableCommands.map((command) => command.name).sort();
-  assert.deepEqual(names, ["dwf", "goal"]);
+  assert.deepEqual(names, ["dwf", "goal", "skill"]);
   for (const command of update.availableCommands) {
     assert.ok(command.description.length > 0);
   }
+});
+
+const catalog = {
+  commands: [
+    { argumentHint: "[focus]", description: "Review Guidelines", name: "review" },
+    { description: "shadowed", name: "goal" },
+    { description: "reserved builtin shadow", name: "init" },
+  ],
+  skills: [
+    { description: "Review a diff", name: "diff-review" },
+    { description: "same as command", name: "review" },
+    { description: "shadows the /init builtin", name: "init" },
+    { description: "shadows /model", name: "model" },
+  ],
+};
+
+test("slashCommandsUpdate: advertises custom commands and skills, first owner wins", () => {
+  const update = slashCommandsUpdate(catalog);
+  assert.equal(update.sessionUpdate, "available_commands_update");
+  const rows = update.availableCommands.map((command) => [command.name, command.description]);
+  assert.deepEqual(rows.map(([name]) => name), ["goal", "dwf", "skill", "review", "diff-review"]);
+  assert.equal(rows.find(([name]) => name === "review")?.[1], "Review Guidelines");
+});
+
+test("slashCommandsUpdate: case-colliding names dedupe to the routing winner", () => {
+  // 同名判定按归一化词（issue #19）：路由全程小写，command `Review` 使 /review
+  // 的任何写法落到自定义命令——skill `review` 与同词异写的 `REVIEW` 命令行
+  // 都指向不可达路径，广告即谎话。
+  const update = slashCommandsUpdate({
+    commands: [
+      { description: "command winner", name: "Review" },
+      { description: "duplicate spelling", name: "REVIEW" },
+    ],
+    skills: [
+      { description: "unreachable skill", name: "review" },
+      { description: "reachable", name: "diff-review" },
+    ],
+  });
+  assert.equal(update.sessionUpdate, "available_commands_update");
+  const rows = update.availableCommands.map((command) => [command.name, command.description]);
+  assert.deepEqual(
+    rows.map(([name]) => name),
+    ["goal", "dwf", "skill", "Review", "diff-review"],
+  );
+  assert.equal(rows.find(([name]) => name === "Review")?.[1], "command winner");
+});
+
+test("slashCommandsUpdate: core reserved names are never advertised", () => {
+  // 技能/命令行接管 /init、/model 等内置语义即是谎话（issue #17）；
+  // catalog 刻意带上 init/model 两类影子行，广告面必须全部剔除。
+  const update = slashCommandsUpdate(catalog);
+  assert.equal(update.sessionUpdate, "available_commands_update");
+  const names = update.availableCommands.map((command) => command.name);
+  for (const reserved of ["init", "model", "compact", "workflow"]) {
+    assert.ok(!names.includes(reserved), `/${reserved} must not be advertised`);
+  }
+});
+
+const promptText = (resolution: AcpSkillResolution): string | undefined =>
+  resolution.kind === "prompt" ? resolution.text : undefined;
+
+test("resolveSkillInvocation: rewrites skill invocations, leaves commands and unknowns raw", () => {
+  assert.match(promptText(resolveSkillInvocation("/diff-review check main", catalog)) ?? "", /Skill` tool with name `diff-review`[\s\S]*check main/);
+  assert.match(promptText(resolveSkillInvocation("/skill diff-review", catalog)) ?? "", /name `diff-review`/);
+  assert.equal(resolveSkillInvocation("/review", catalog).kind, "forward", "custom command wins over skill");
+  assert.equal(resolveSkillInvocation("/nope", catalog).kind, "forward");
+  assert.equal(resolveSkillInvocation("hello /diff-review", catalog).kind, "forward");
+});
+
+test("resolveSkillInvocation: command word and skill name match case-insensitively", () => {
+  // /goal、/dwf 路由与 TUI parseSlashCommand 都小写命令词——/skill 同规（issue #18）。
+  assert.match(promptText(resolveSkillInvocation("/SKILL diff-review", catalog)) ?? "", /name `diff-review`/);
+  // 技能名先精确后小写兜底，改写用目录规范名（Skill 工具按规范名解析）。
+  assert.match(promptText(resolveSkillInvocation("/skill DIFF-REVIEW go", catalog)) ?? "", /name `diff-review`[\s\S]*go/);
+  assert.match(promptText(resolveSkillInvocation("/Diff-Review", catalog)) ?? "", /name `diff-review`/);
+});
+
+test("resolveSkillInvocation: bare /skill answers locally; named /skill always rewrites", () => {
+  // 裸 /skill 列技能（TUI 同款），不产生 prompt（issue #15）。
+  const list = resolveSkillInvocation("/skill", catalog);
+  assert.equal(list.kind, "message");
+  if (list.kind === "message") {
+    assert.match(list.text, /Available skills \(4\):/);
+    assert.match(list.text, /- diff-review: Review a diff/);
+    assert.match(list.text, /\/skill <name> \[task\]/);
+  }
+  const empty = resolveSkillInvocation("/skill", { commands: [], skills: [] });
+  assert.deepEqual(empty, { kind: "message", text: "No skills found for this session." });
+});
+
+test("resolveSkillInvocation: /skill <name> never gated by the projected catalog", () => {
+  // 目录是展示投影（bundled 过滤、会话冻结、展示名去重），不是 resolver 全集：
+  // 未命中不本地回执 Unknown——按原词改写，Skill 工具的 Skill not found 才是
+  // 缺失的权威报出（issue #27、#28）。原样保大小写：resolver 精确匹配。
+  const miss = resolveSkillInvocation("/skill Dynamic-Workflows ship it", catalog);
+  assert.equal(miss.kind, "prompt");
+  assert.match(
+    promptText(miss) ?? "",
+    /Skill` tool with name `Dynamic-Workflows`[\s\S]*ship it/,
+  );
+  // 展示名去重藏掉的裸名同理放行：目录只剩 literal `p:x` 条目，插件技能的
+  // 裸名 `x` 仍可被 resolver 按 name 命中。
+  const deduped = {
+    commands: [],
+    skills: [{ description: "literal name", name: "p:x" }],
+  };
+  assert.match(
+    promptText(resolveSkillInvocation("/skill x go", deduped)) ?? "",
+    /name `x`[\s\S]*go/,
+  );
+});
+
+test("resolveSkillInvocation: missing catalog cannot adjudicate but still consumes /skill", () => {
+  // 目录拉取失败/在途：/skill 报不可用，/skill <name> 仍改写（Skill 工具按名裁定，
+  // 同 TUI 不校验目录）；直达名无目录可判一律 P005 原文转发。
+  const bare = resolveSkillInvocation("/skill");
+  assert.equal(bare.kind, "message");
+  if (bare.kind === "message") assert.match(bare.text, /unavailable/);
+  assert.match(promptText(resolveSkillInvocation("/skill diff-review go")) ?? "", /name `diff-review`/);
+  assert.equal(resolveSkillInvocation("/diff-review").kind, "forward");
+});
+
+test("resolveSkillInvocation: reserved names keep their core meaning", () => {
+  // 直达名不接管保留名：/init 原文转发由 facade 展开内置（issue #17）；
+  // 显式 /skill init 仍走技能命名空间——命令词已消歧，同 TUI 语义。
+  assert.equal(resolveSkillInvocation("/init", catalog).kind, "forward");
+  assert.equal(resolveSkillInvocation("/model glm-5", catalog).kind, "forward");
+  assert.match(promptText(resolveSkillInvocation("/skill init", catalog)) ?? "", /name `init`/);
+});
+
+const qualifiedCatalog = {
+  commands: [],
+  skills: [
+    { description: "First plugin review", name: "review", qualifiedName: "acp-registry:review" },
+    { description: "Second plugin review", name: "review", qualifiedName: "other-plugin:review" },
+    { description: "Plain skill", name: "lint" },
+  ],
+};
+
+test("resolveSkillInvocation: a qualified skill's plain name resolves like the Skill tool", () => {
+  // Skill 工具 resolver 同口径（issue #24）：name 或 qualifiedName 精确命中、
+  // 目录序首个胜出——裸名歧义不另设错误；改写用展示名锁定命中条目。
+  assert.match(
+    promptText(resolveSkillInvocation("/skill review go", qualifiedCatalog)) ?? "",
+    /name `acp-registry:review`[\s\S]*go/,
+  );
+  assert.match(
+    promptText(resolveSkillInvocation("/skill acp-registry:review", qualifiedCatalog)) ?? "",
+    /name `acp-registry:review`/,
+  );
+});
+
+test("resolveSkillInvocation: direct slash hits plain and qualified names identically", () => {
+  // /<plain> 与 /<qualified> 都可直达——裸名命中目录序首个（resolver first-match）。
+  assert.match(
+    promptText(resolveSkillInvocation("/review", qualifiedCatalog)) ?? "",
+    /name `acp-registry:review`/,
+  );
+  assert.match(
+    promptText(resolveSkillInvocation("/other-plugin:review task", qualifiedCatalog)) ?? "",
+    /name `other-plugin:review`[\s\S]*task/,
+  );
+});
+
+test("resolveSkillInvocation: lists advertise display names and the plain alias", () => {
+  // TUI `; alias` 同款：展示名在前，裸名作为可用 alias 标注（issue #24）。
+  const list = resolveSkillInvocation("/skill", qualifiedCatalog);
+  assert.equal(list.kind, "message");
+  if (list.kind === "message") {
+    assert.match(list.text, /- acp-registry:review \(alias review\): First plugin review/);
+    assert.match(list.text, /- lint: Plain skill/);
+  }
+  // 未知名同样按原词改写进轮内裁定，不再本地回执列表。
+  assert.match(
+    promptText(resolveSkillInvocation("/skill nope", qualifiedCatalog)) ?? "",
+    /name `nope`/,
+  );
 });
 
 function turnEvent(

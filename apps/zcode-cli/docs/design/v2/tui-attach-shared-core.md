@@ -356,16 +356,59 @@ markdown 命令在 attach 模式分两段：**目录走协议，展开留 core**
   刻意不接 `loadCustomCommand`。决策记录：
   [docs/fork/attach-custom-commands-design.md](../../../../../docs/fork/attach-custom-commands-design.md)。
 
-### ACP 前端的 `/skill` 手动调用（2026-11-09）
+### ACP 前端的 slash 命令面（2026-11-09）
 
-`piz acp` 客户端同样没有 command-center：`session/prompt` 在 `/goal`、
-`/dwf` 本地路由之后再过一遍 TUI 同款 `parseSlashCommand`，只对 `/skill`
-特判——`/<name> [task]` 改写为 `buildManualSkillPrompt` 后走普通 prompt
-路径（core 不认识 `/skill` 原文，原文转发会把命令词喂给模型）；裸
-`/skill` 不进 core，直接回一条 `agent_message_chunk` usage
-（`manualSkillCommandUsage`）并以 `end_turn` 收口。技能名不在 ACP 侧
-校验：缺失/歧义由 core 的 Skill 工具按实时技能集裁定，与 TUI 从不查
-目录同口径；其余 slash 输入维持 P005 原文转发。
+`piz acp` 客户端没有 command-center：本地 slash 命令由 `acp-commands.ts`
+按同一套 core 语义裁定。`session/new|resume` 响应落线后延迟一个宏任务经
+`slashCatalog` 拉取 `commands/referenceCatalog`（现扫）+
+`skills/referenceCatalog`（会话冻结），以 `available_commands_update`
+广告。本地命令（goal/dwf/skill）恒在，目录拉取失败只丢自定义命令/技能行；
+失败同时清掉路由侧的 `slashCatalogs` 条目——广告面回落本地命令时，改写面
+不得继续按旧目录裁定。延迟槽触发时连接已关闭/失败则直接返回：不发起
+`slashCatalog`——它会经 `laneFor` 为死连接重建 lane 甚至拉起 core，且
+此后的 rejection 与 released 竞态同记 debug（issue #25）。拉取期间会话被
+`session/close` 释放、或 close 后同 id 重新 resume 成另一条绑定时，迟到的
+回包不投递广告、不写 `slashCatalogs`——归属按绑定（handle）核对，不是按
+id；由此造成的拉取 rejection 是正常竞态，记 debug，不告警。同一绑定的重复
+resume 也会再起一次拉取，句柄核对无法区分这两次：目录每次调用现扫、结果
+可不同，后到回包不得用旧数据覆盖新结果——每次拉取记递增序号，仅最新一次
+的回包写 `slashCatalogs` 并投递广告，被取代的回包静默丢弃（不投递、不写、
+不告警，issue #23）。
+
+- **interactive-only 命令**：`disableNonInteractive` 透传不过滤——ACP
+  与 attach TUI 同为交互式客户端：`/name` 原文转发后 core facade 展开
+  不查该标记（`resolveZCodeCustomCommandPrompt` 只拒保留名），它只为
+  app-server/headless 这类非交互消费方服务。滤掉会让广告漏报真实可跑
+  的命令，且被滤命令无法 veto 同名技能——技能会抢走本该由 facade 展开
+  的自定义命令（issue #22）。
+- **广告过滤**：core 保留名（内置 init/workflow 等 + aliases +
+  compress/plan）不出现在命令/技能行——目录行接管内置语义即谎话，
+  集合与 bootstrap slash-command-surface 同口径（瘦包由
+  `BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES` 派生）。同名冲突先到
+  先得：本地 > 自定义命令 > 技能。同名按归一化词（小写、去 `/` 前缀）
+  判定：路由全程小写，同词异写的目录行只有一个是路由赢家，另一条
+  广告即谎话。
+- **`/skill`**：裸命令以本地消息列出技能（TUI `handleSkillListCommand`
+  同款，qualifiedName 行标注其裸名 alias）；`/skill <name> [task]` 恒
+  改写为 `buildManualSkillPrompt`——core 不认识 `/skill`
+  （command-center 本地命令兼 facade 保留名），原文转发会把命令词喂给
+  模型。命令词大小写不敏感（`/SKILL` 同款）。目录技能行同时保留
+  `name` 与 `qualifiedName`：命中判定与 Skill 工具 resolver 同口径
+  （`name === input || qualifiedName === input`，目录序首个胜出——
+  同名歧义不另设错误路径，issue #24），再按展示名小写兜底；命中时改写
+  用展示名（`qualifiedName ?? name`）锁定命中条目并校正大小写，未命中
+  或目录缺席按原词改写。**目录只是展示投影，不是 resolver 的权威全集**：
+  协议层刻意剔除 bundled（`Skill(dynamic-workflows)` 这类工作流门要求
+  的调用照样可解析）、会话冻结快照落后于 `loadSkill` 每次现扫、展示名
+  去重会藏掉仍可解析的裸名——按目录回执 `Unknown skill` 会把可解析名
+  误报成未知（issue #27、#28），故本地不裁定缺失；真缺失由 Skill 工具
+  `Skill not found: <name>` 在轮内报出，与 TUI 从不校验目录同口径。
+- **技能直达 `/<name> [task]`**：命中目录技能且非保留名、无同名自定义
+  命令时改写为手动技能提示；其余 slash 文本维持 P005 原文转发，由
+  core facade 展开内置命令。目录在途（session/new|resume 响应后到广告
+  落线前）直达名同样无法裁定，一律 P005 原文转发——这是刻意保留的窄
+  窗口：裁定需要目录，不让 prompt 或会话建立等目录拉取，窗口内打出的
+  `/<name>` 以普通文本到达模型的代价可接受。
 
 ### core 死亡与重连恢复
 
