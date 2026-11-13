@@ -38,31 +38,13 @@ git -C "$ROOT" diff-index --quiet HEAD -- ||
 SRC="$CLI_PKG/dist"
 DST="$CLI_PKG/dist-runtime"
 TMP="$CLI_PKG/.dist-runtime.tmp.$$"
-TUI_PI="$ROOT/apps/zcode-cli/packages/tui-pi"
-TUI="$ROOT/apps/zcode-cli/packages/tui"
-
-for f in zcode-attach.cjs zcode.cjs; do
-	[ -f "$SRC/$f" ] || fail "missing $SRC/$f — build first"
-done
-[ -f "$TUI_PI/dist/index.js" ] || fail "missing $TUI_PI/dist/index.js — build first"
-[ -f "$TUI/dist/index.js" ] || fail "missing $TUI/dist/index.js — build first"
 
 rm -rf "$TMP"
 trap 'rm -rf "$TMP"' EXIT
 
-mkdir -p "$TMP/node_modules/@zcode/tui-pi" "$TMP/node_modules/@zcode/tui"
-cp -R "$SRC/." "$TMP/"
-for pair in "$TUI_PI tui-pi" "$TUI tui"; do
-	pkg_dir="${pair% *}"
-	name="${pair#* }"
-	dst="$TMP/node_modules/@zcode/$name"
-	mkdir -p "$dst"
-	cp "$pkg_dir/package.json" "$dst/"
-	cp -R "$pkg_dir/dist" "$dst/"
-done
-
-# Records the base for the next `fork-tests.mjs --promote-gate`.
-git -C "$ROOT" rev-parse HEAD >"$TMP/PROMOTED_FROM"
+# Checks + layout assembly live in assemble-dist-runtime.sh, shared with the
+# ci workflow so the artifact and a local promote produce the same payload.
+sh "$ROOT/apps/zcode-cli/scripts/assemble-dist-runtime.sh" "$ROOT" "$TMP"
 
 # Atomic-ish swap: same-fs rename; a reader sees the old or new dir, never a
 # half-written one.
