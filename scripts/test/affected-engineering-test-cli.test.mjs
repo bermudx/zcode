@@ -192,6 +192,17 @@ test("Push 使用 remote SHA；新分支使用 staging 共同祖先；手动模�
   }
 });
 
+test("无 staging 的 fork：新分支首次推送回退到 origin/main 共同祖先", async (t) => {
+  const { write, git, base, invoke, hook } = await fixture(t);
+  await git("update-ref", "refs/remotes/origin/main", base);
+  await write("source.mjs", "export const value = 2;");
+  await git("add", ".");
+  await git("commit", "-m", "task");
+  const result = await invoke(["--scope", "push", "--dry-run", "--json"], await hook(zero));
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(paths(result), ["a.test.mjs"]);
+});
+
 test("无基线、无效基线、非 HEAD 推送均报错；删除 ref 不测试", async (t) => {
   const { invoke, hook, base } = await fixture(t);
   for (const [args, env] of [

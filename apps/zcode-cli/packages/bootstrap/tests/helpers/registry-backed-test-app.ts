@@ -189,6 +189,11 @@ async function* streamResult(result: Promise<ModelResult>): AsyncIterable<ModelE
     yield { id: "bootstrap-test-text", text: resolved.text, type: "text_delta" };
     yield { id: "bootstrap-test-text", type: "text_end" };
   }
+  // 走 streamText 通道时 toolCalls 必须以 tool_call 事件下发，否则整份
+  // generateText 结果里的工具调用被静默丢弃（回合流只消费事件流）。
+  for (const toolCall of resolved.toolCalls ?? []) {
+    yield { type: "tool_call", toolCall };
+  }
   yield {
     finishReason: resolved.finishReason,
     type: "finish",

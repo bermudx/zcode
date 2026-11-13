@@ -279,3 +279,106 @@ it("renders a human guide through real admission and keeps the ongoing turn", as
       "<system-reminder>\nThe user sent a new message while you were working:\nshort B\n\nThis is how ZCode surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n</system-reminder>",
   });
 });
+
+it("freezes admission facts before a blocked MCP apply; tools change before the next model request (S5/R4)", async () => {
+    const modelGate = deferred<unknown>();
+    const connectStarted = deferred<void>();
+    const connectGate = deferred<void>();
+    const events: string[] = [];
+    const requests: Array<{
+      providerId: string;
+      systemText: string;
+      toolNames: string[];
+    }> = [];
+    const runtime = new AgentRuntime(
+      createSessionId("prompt-admission-mcp-freeze"),
+      {
+        mode: "build",
+        outputStyle: { name: "old-style", prompt: "old" },
+        modelSelection: { providerId: "provider-a", modelId: "model-a" },
+      },
+      {
+        eventStore: createTestSessionEventStore(),
+        mcpPort: {
+          connectConfiguredServers: async () => {
+            connectStarted.resolve();
+            await connectGate.promise;
+            events.push("mcp-applied");
+            return {
+              statuses: {
+                s1: { status: "connected", transport: "stdio", toolCount: 1, updatedAt: "now" },
+              },
+              tools: [
+                {
+                  serverName: "s1",
+                  toolName: "echo",
+                  description: "injected",
+                  inputSchema: { type: "object", properties: {} },
+                },
+              ],
+            };
+          },
+          connectServer: async () => ({
+            status: "connected",
+            transport: "stdio",
+            toolCount: 1,
+            updatedAt: "now",
+          }),
+          disconnectServer: async () => undefined,
+          status: async () => ({}),
+          listTools: async () => [],
+          callTool: async () => ({ content: [{ type: "text", text: "pong" }] }),
+          close: async () => {},
+        } as never,
+        modelFactory: createTestModelFactory({
+          async generateText(request, observation) {
+            events.push("model-request");
+            requests.push({
+              providerId: String(observation.model.providerId),
+              // outputStyle reminder 以 attachment entry 下发，不固定在 system role——
+              // 全量序列化后按 style 名检索。
+              systemText: JSON.stringify(request.messages),
+              toolNames: (request.tools ?? []).map((t) => t.name),
+            });
+            await modelGate.promise;
+            return {
+              finishReason: "stop",
+              text: "done",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        }),
+      } as never,
+    );
+
+    // 回合 1 进行中时 staged 替换——apply 推迟到下一准入回合的边界。
+    const first = await runtime.admitPrompt("first", undefined, admissionOptions("freeze-first"));
+    for (let attempt = 0; attempt < 100 && !runtime.getActiveTurnInfo(); attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await runtime.configureMcpServers({
+      s1: { type: "stdio", command: "node", args: ["server.js"] },
+    });
+    modelGate.resolve(undefined);
+    if (first.kind === "started") await first.completion;
+
+    // 回合 2 准入即冻结 admission facts，随后卡在边界 apply 上。
+    const second = runtime.executeTurn("second");
+    await connectStarted.promise;
+    runtime.setSessionModelSelection({ providerId: "provider-b", modelId: "model-b" });
+    runtime.updateConfig({ outputStyle: { name: "new-style", prompt: "new" } });
+    connectGate.resolve(undefined);
+    await second;
+    // 回合 2：apply 先于首个 model request 完成（新工具已注册——tool 面即 NEW），
+    // 但 admission facts 是冻结的旧选择/旧 outputStyle——被废的迟变更不渗进已准入回合。
+    expect(events.indexOf("mcp-applied")).toBeLessThan(events.indexOf("model-request", 1));
+    expect(requests[1]).toMatchObject({ providerId: "provider-a" });
+    expect(requests[1]!.systemText).toContain("old-style");
+    expect(requests[1]!.systemText).not.toContain("new-style");
+    expect(requests[1]!.toolNames).toContain("mcp__s1__echo");
+
+    await runtime.executeTurn("third");
+    expect(requests[2]).toMatchObject({ providerId: "provider-b" });
+    expect(requests[2]!.systemText).toContain("new-style");
+    await runtime.close();
+});

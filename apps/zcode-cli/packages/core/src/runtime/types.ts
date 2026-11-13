@@ -83,6 +83,7 @@ import type {
   PdfDocumentPort,
   HooksRuntimeConfig,
   SkillPort,
+  McpConnectionSnapshot,
   McpPort,
   McpServerConfig,
   SubagentPort,
@@ -333,6 +334,18 @@ export interface MemoryRuntimeConfig {
   workspaceIdentity?: string;
 }
 
+/**
+ * 父 runtime 提供给借用方的 MCP 事实快照（issue #31 评审 R3）：port 是父已建
+ * 的连接面（借用方不得关闭），config 是父 APPLIED mcp 克隆（servers 由借用方
+ * 自行置空），snapshot 是父 ready 后一次性读出的 status+tools。三者一起返回，
+ * 避免借用方把「还在握手」误读成「没有工具」。
+ */
+export interface BorrowedMcpAccess {
+  port?: McpPort;
+  config?: AgentRuntimeConfig["mcp"];
+  snapshot: McpConnectionSnapshot;
+}
+
 export interface AgentRuntimeDeps {
   /** 只读目录入口；必须同步读取内存，不在请求收集阶段进行 I/O。 */
   getAgentDefinitions?: GetAgentDefinitions;
@@ -367,6 +380,29 @@ export interface AgentRuntimeDeps {
   pdfDocumentPort?: PdfDocumentPort;
   skillPort?: SkillPort;
   mcpPort?: McpPort;
+  /**
+   * 迟到注入补建 session MCP port 的同步工厂（issue #31 client MCP）。bootstrap 在
+   * 空会话首个显式 server 到来前不建任何 MCP 资源；runtime 只在需要非空配置的
+   * port 而 mcpPort 尚不存在时调用。与注入 mcpPort 并存，已建 port 继续复用。
+   */
+  createMcpPort?: () => McpPort | undefined;
+  /**
+   * 协议 owner 的 client attachment 信号（issue #31 评审 R1）：仅 client 显式
+   * 声明 MCP 的 session 注入。abort = 该 attachment 死亡——runtime 订阅一次并
+   * 用现有 setMcpClientAttached(false) 同步落闸门；构造时信号已 abort 则出生
+   * 即 detached 并立 reconnect 旗标。beginShutdown 解除订阅。
+   */
+  mcpClientDetachSignal?: AbortSignal;
+  /**
+   * workflow/script 子会话借用父 MCP 的异步入口（issue #31 评审 R3）：构造期
+   * 只登记依赖，startup 才 await 父侧 ready 后的 {port, config, snapshot}——
+   * 父 startup/apply 未落定前子会话不会把空工具面当成事实。子 runtime 对借来
+   * 的 port 只读不写：不 connect/disconnect/close/createMcpPort。
+   */
+  borrowMcpAccess?: (input: {
+    traceContext: TraceContext;
+    signal: AbortSignal;
+  }) => Promise<BorrowedMcpAccess>;
   subagentPort?: SubagentPort;
   coordinatorResponsePort?: CoordinatorResponsePort;
   /** 工作流 actor 提交终态结果的端口；存在即作为 submit_result 工具的注册门。 */

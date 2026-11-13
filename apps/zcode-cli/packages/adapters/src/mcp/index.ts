@@ -120,9 +120,25 @@ const MCP_STDIO_ERROR_MESSAGE_MAX_CHARS = 512;
  */
 const MAX_TRACKED_SERVER_REQUEST_IDS = 64;
 
+/** 连接失败诊断粒度：客户端供给的 command/args/env/stderr 均为不可信文本。 */
+export type McpConnectionDiagnosticsMode = "standard" | "structural";
+
+/**
+ * 结构性诊断模式下 status/log 唯一允许出现的失败文本；不带任何错误对象派生文本，
+ * 避免客户端 command 路径、参数或 stderr 内容借 ENOENT/协议错误进入日志与设置页。
+ */
+const MCP_STRUCTURAL_CONNECTION_ERROR_MESSAGE = "MCP server connection failed";
+
 export interface CreateMcpAdapterOptions {
   clientName?: string;
   clientVersion?: string;
+  /**
+   * 连接失败诊断粒度：
+   * - `standard`（缺省）：保留脱敏后的错误文本、stderr 尾部与官方 requestId。
+   * - `structural`：status/log 只发稳定分类（failureKind）与数值/结构字段，
+   *   不回放任何客户端供给文本；仅用于会话自有（client-supplied）连接路径。
+   */
+  connectionDiagnostics?: McpConnectionDiagnosticsMode;
   connectionContext?: McpConnectionContext;
   env?: NodeJS.ProcessEnv;
   logger?: Logger;
@@ -260,6 +276,7 @@ class NodeMcpAdapter implements McpPort {
   private readonly adapterInstanceId = randomUUID();
   private readonly clientName: string;
   private readonly clientVersion: string;
+  private readonly connectionDiagnostics: McpConnectionDiagnosticsMode;
   private readonly connectionContext?: McpConnectionContext;
   private readonly env?: NodeJS.ProcessEnv;
   private readonly logger?: Logger;
@@ -305,6 +322,7 @@ class NodeMcpAdapter implements McpPort {
   constructor(options: CreateMcpAdapterOptions) {
     this.clientName = options.clientName ?? "zcode";
     this.clientVersion = options.clientVersion ?? "0.0.0";
+    this.connectionDiagnostics = options.connectionDiagnostics ?? "standard";
     this.connectionContext = options.connectionContext;
     this.env = options.env;
     this.logger = options.logger?.child({
@@ -1907,10 +1925,15 @@ class NodeMcpAdapter implements McpPort {
       ? `${message} - ${responseDiagnostic.serverRequestId}`
       : message;
     const recentStderr = getRecentStderr?.();
+    // 结构性模式：客户端供给的错误文本（command 路径/args/env、子进程 stderr）一律
+    // 不可信。status/log 只发稳定分类 failureKind 与数值/结构字段；external
+    // serverRequestId 同样不回放。ordinary 文件/插件路径不受影响。
+    const structural = this.connectionDiagnostics === "structural";
     // 子进程缺依赖等错误只写 stderr，SDK 通常只返回 Connection closed。
     // 把同一次连接的脱敏诊断带给设置页；只展示证据，不按错误文本改变失败分类或重试。
-    const statusMessage =
-      config.type === "stdio"
+    const statusMessage = structural
+      ? MCP_STRUCTURAL_CONNECTION_ERROR_MESSAGE
+      : config.type === "stdio"
         ? [
             sanitizeMcpStdioStderr(displayMessage).slice(0, MCP_STDIO_ERROR_MESSAGE_MAX_CHARS),
             recentStderr,
@@ -1921,7 +1944,7 @@ class NodeMcpAdapter implements McpPort {
     const status = this.createStatus(config, "failed", {
       error: statusMessage,
       failureKind,
-      ...(responseDiagnostic?.serverRequestId
+      ...(!structural && responseDiagnostic?.serverRequestId
         ? { serverRequestId: responseDiagnostic.serverRequestId }
         : {}),
     });
@@ -1935,14 +1958,15 @@ class NodeMcpAdapter implements McpPort {
       ...this.connectionContext,
       connectDurationMs,
       durationMs: Date.now() - startedAt,
-      error: displayMessage,
+      error: structural ? MCP_STRUCTURAL_CONNECTION_ERROR_MESSAGE : displayMessage,
       event: "mcp.server.failed",
+      failureKind,
       listToolsDurationMs,
       mcpServerName: name,
       ...(officialAuthKind ? { officialAuthKind } : {}),
       ...(mcpTransportPid != null ? { mcpTransportPid } : {}),
       status: "failed",
-      ...(recentStderr ? { stderr: recentStderr } : {}),
+      ...(!structural && recentStderr ? { stderr: recentStderr } : {}),
       transport: config.type,
     });
     return status;
@@ -2130,6 +2154,23 @@ class NodeMcpAdapter implements McpPort {
   }
 
   private attachStdioLogging(name: string, transport: McpTransport): () => string | undefined {
+    // 结构性模式不保留也不回放任何子进程文本：stderr 是客户端可控的未标注值，
+    // 脱敏只能处理已知形态，漏一个形态就是一次真实泄露。逐块只记事件 + 字节数。
+    if (this.connectionDiagnostics === "structural") {
+      const stderr = (
+        transport as {
+          stderr?: { on(event: "data", handler: (chunk: Buffer) => void): void };
+        }
+      ).stderr;
+      stderr?.on("data", (chunk) => {
+        this.logger?.debug("MCP stdio stderr", {
+          byteCount: chunk.length,
+          event: "mcp.stdio.stderr",
+          mcpServerName: name,
+        });
+      });
+      return () => undefined;
+    }
     const stderrBuffer = createBoundedTextBuffer(MCP_STDIO_STDERR_LOG_MAX_CHARS);
     const stderr = (
       transport as {

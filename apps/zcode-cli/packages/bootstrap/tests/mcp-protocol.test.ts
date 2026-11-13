@@ -197,3 +197,65 @@ it("preserves workspace provenance and cwd from Host DTO to runtime; rejects arb
     false,
   );
 });
+
+// issue #31 CMCP01/02/06：client 声明的 wire 语义——undefined 与 [] 不可混淆，
+// scope/isolation 透传到 runtime 配置，record 克隆与外部数组解除引用。
+import { cloneClientMcpServers } from "../src/zcode-protocol/protocol-mcp-config.js";
+
+it("keeps undefined (no client override) distinct from an explicit empty override", () => {
+  expect(protocolMcpServersToRuntimeMcpConfig(undefined)).toBeUndefined();
+  // 显式 [] 必须产生 enabled:true + 空 servers——压制 file/plugin 回落，不是折叠成未声明。
+  expect(protocolMcpServersToRuntimeMcpConfig([])).toEqual({ enabled: true, servers: {} });
+});
+
+it("maps client-declared stdio/http/sse servers preserving scope, isolation and credentials", () => {
+  const stdio = zcodeProtocolMcpServerSchema.parse({
+    name: "client-stdio",
+    scope: "user",
+    command: "node",
+    cwd: "/session",
+    args: ["srv.mjs"],
+    env: [{ name: "TOKEN", value: "fake-credential-sentinel" }],
+    isolation: "session",
+  });
+  const http = zcodeProtocolMcpServerSchema.parse({
+    name: "client-http",
+    scope: "user",
+    type: "http",
+    url: "http://127.0.0.1:9/mcp",
+    headers: [{ name: "Authorization", value: "Bearer fake-credential-sentinel" }],
+    isolation: "session",
+  });
+  const mapped = protocolMcpServersToRuntimeMcpConfig([stdio, http]);
+  expect(mapped?.servers["client-stdio"]).toMatchObject({
+    type: "stdio",
+    source: { kind: "user" },
+    isolation: "session",
+    env: { TOKEN: "fake-credential-sentinel" },
+  });
+  expect(mapped?.servers["client-http"]).toMatchObject({
+    type: "http",
+    source: { kind: "user" },
+    isolation: "session",
+    headers: { Authorization: "Bearer fake-credential-sentinel" },
+  });
+});
+
+it("cloneClientMcpServers detaches record provenance from the caller array", () => {
+  const original = [
+    zcodeProtocolMcpServerSchema.parse({
+      name: "client-srv",
+      command: "node",
+      args: [],
+      env: [{ name: "K", value: "fake-credential-sentinel" }],
+    }),
+  ];
+  const clone = cloneClientMcpServers(original);
+  original[0]!.args.push("tampered");
+  (original[0] as { env: { value: string }[] }).env[0]!.value = "tampered";
+  expect(clone?.[0] && "args" in clone[0] ? clone[0].args : undefined).toEqual([]);
+  expect(
+    clone?.[0] && "env" in clone[0] ? clone[0].env[0]?.value : undefined,
+  ).toBe("fake-credential-sentinel");
+  expect(cloneClientMcpServers(undefined)).toBeUndefined();
+});

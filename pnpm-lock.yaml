@@ -453,6 +453,10 @@ importers:
       playwright-core:
         specifier: 1.59.1
         version: 1.59.1
+    devDependencies:
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
 
   apps/zcode-cli/packages/contracts:
     dependencies:

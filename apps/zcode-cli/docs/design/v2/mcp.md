@@ -176,6 +176,35 @@ ZCode app-server sessions are protocol-controlled and already accept `mcpServers
 
 This prevents a generic ZCode protocol client from accidentally enabling repository-local MCP servers.
 
+#### Explicit session MCP in no-plugins shared cores
+
+Issue #31 permits explicit protocol-client MCP overrides in `--no-plugins`
+sessions without enabling automatic MCP/plugin discovery. Absent or empty
+overrides keep the existing zero-MCP startup path: no pool, adapter, broker,
+settings lease, telemetry timer, or child process is created. Nonempty client
+overrides allocate session-owned transports lazily; they never merge with file,
+plugin, or builtin MCP servers.
+
+The runtime applies changed overrides between whole turns, not between model
+requests within a turn. Unchanged declarations preserve live connections, but
+declaration equality is not connection health: an identical override whose
+desired servers are failed, disconnected, or missing requests one bounded
+retry on that explicit configure/resume edge; still-connecting and explicitly
+disabled/untrusted entries are left alone. Session close or client detach
+promptly terminates the session's stdio transports — including sessions whose
+app factory is still materializing, which receive the detach through the
+server's per-attachment signal rather than a registry scan. Detach keeps the
+runtime and in-memory declaration adoptable.
+Forks inherit that declaration in memory but use independent connections.
+Workflow children borrow the parent's MCP surface by awaiting the parent's
+scheduled startup/apply and then reading the applied tool set on the parent's
+port; they never own or cancel the parent's transports.
+No client credentials enter persistence or diagnostic payloads.
+
+The authoritative ownership/order contract and acceptance cases are in the
+[ACP frontend](../../../../../docs/design/v2/acp-frontend.md#client-mcp-extension--issue-31).
+This is an approved source contract, not installation or live-T3 evidence.
+
 ### Implementation Plan
 
 1. Config discovery
@@ -285,6 +314,7 @@ See [mcp-node-fallback.md](mcp-node-fallback.md) for the shim directory, env con
 - A failed server connection marks only that server as `failed`; other servers may still connect.
 - Tool calls against disconnected or failed servers return structured tool errors.
 - Adapter errors preserve the original error message for logs and status, but do not expose secrets from configured headers or environment values.
+- Client-supplied (session-owned) connections use structural diagnostics: failure status and logs carry only the stable `failureKind` classification and structural fields — never raw error text, stderr content, or external request ids, since command paths, args, env values and child output are all client-controlled. Ordinary file/plugin adapter paths keep the standard detailed diagnostics.
 - Timeouts apply to connect, tool listing, and tool calls.
 
 ## Tests

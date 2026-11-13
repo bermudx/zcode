@@ -31,7 +31,6 @@ import {
   type ImageProcessorPort,
   type PdfDocumentPort,
   type Logger,
-  type McpPort,
   type SessionEventSink,
   type SessionId,
   type SessionStorePort,
@@ -58,7 +57,6 @@ interface CreateWorkflowFacadeDeps {
   imageProcessorPort: ImageProcessorPort;
   pdfDocumentPort?: PdfDocumentPort;
   logger: Logger;
-  mcpPort?: McpPort;
   /** 父会话的 model factory（与 script-workflow-child-runtime.ts 同一约定）。 */
   modelFactory: NonNullable<AgentRuntimeDeps["modelFactory"]>;
   permissionService: PermissionService;
@@ -345,7 +343,8 @@ function createWorkflowChildRuntime(
               disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),
             }))
           : undefined,
-      mcpPort: deps.mcpPort,
+      // child 借用父 MCP 面（评审 R3）：startup await 父侧就绪快照，构造期不冻结。
+      borrowMcpAccess: (input) => deps.runtime.prepareBorrowedMcp(input),
       eventSink: deps.eventSink,
       modelFactory: deps.modelFactory,
       resolveEffectiveModelSelection: deps.appOptions.resolveEffectiveModelSelection,

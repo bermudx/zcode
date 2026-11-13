@@ -23,7 +23,6 @@ import {
   type JsonSchema,
   type PdfDocumentPort,
   type Logger,
-  type McpPort,
   type ModelRequestAdmission,
   type SessionId,
   type SessionStorePort,
@@ -51,7 +50,6 @@ export interface ScriptWorkflowAgentRuntimeDeps {
   imageProcessorPort: ImageProcessorPort;
   pdfDocumentPort?: PdfDocumentPort;
   logger: Logger;
-  mcpPort?: McpPort;
   /** 父会话的 model factory：child 与主 turn 从同一份 Registry 视图造 Model，不各自冻结。 */
   modelFactory: NonNullable<AgentRuntimeDeps["modelFactory"]>;
   permissionService: PermissionService;
@@ -263,7 +261,10 @@ function createRuntimeDeps(
     imageProcessorPort: deps.imageProcessorPort,
     pdfDocumentPort: deps.pdfDocumentPort,
     logger: deps.logger,
-    mcpPort: deps.mcpPort,
+    // child 借用父 MCP 面（评审 R3）：startup 才 await 父 runtime 的就绪快照
+    // （port + APPLIED config + status/tools），构造期不冻结——父 startup/apply
+    // 未落定前子会话不会把空工具面当成事实；子会话绝不接管父连接生命周期。
+    borrowMcpAccess: (input) => deps.runtime.prepareBorrowedMcp(input),
     modelFactory: deps.modelFactory,
     resolveEffectiveModelSelection: deps.appOptions.resolveEffectiveModelSelection,
     // permissionBroker + providerRuntimeHeadersPort 都在这里面：父 runtime 派生，路由身份已改写成父会话。
@@ -297,3 +298,7 @@ export function createWorkflowChildSkillPort(
     })
   );
 }
+
+// 子会话借用父 MCP 面经父 runtime prepareBorrowedMcp 在 child startup 时
+// 产出快照（评审 R3）；servers 置空发生在 child runtime 内部，子会话只做
+// discovery、绝不接管父连接生命周期。

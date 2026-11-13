@@ -299,6 +299,13 @@ export class ZCodeProtocolAgentServer {
   /** 传输已断开但 server 未被 shutdown：sessions 继续跑、反向请求 park 等收养。 */
   private clientDetached = false;
   /**
+   * 当前 client attachment 的 MCP 准入信号（issue #31 评审 R1）：detach/disconnect
+   * 同步 abort。还在物化中的 session factory 在准备调用时取走本信号——record
+   * 未登记、detach 扫描看不到的窗口也由它落闸门。attachment 重置后旧信号
+   * 保持已 abort，不可复活。
+   */
+  private clientAttachment = new AbortController();
+  /**
    * 硬终止边界（disconnectClient/shutdown 已跑过）：clientDetached 由软/硬两条
    * 路径共享，dispatchClientRequest 单靠它无法区分"park 等收养"与"本 server
    * 正在销毁、应答永远无处可回"——后者必须直接失败，不能 park。
@@ -372,6 +379,8 @@ export class ZCodeProtocolAgentServer {
       claimDetachedSession: (sessionId) => this.tryAdoptDetachedSession(sessionId),
       claimedSessionRecords: new Map<string, ZCodeProtocolSessionRecord>(),
       sessions: new Map<string, ZCodeProtocolSessionRecord>(),
+      getClientDetachSignal: () => this.clientAttachment.signal,
+      isClientAttached: () => !this.clientDetached && !this.clientTerminated,
       // 交互应答登记表（broker 反向请求 × v4 resolveInteraction 命令的汇合点）。
       v4Interactions: new V4InteractionRegistry(
         resolveV4InteractionRegistryOptionsFromEnv(deps.env ?? process.env),
@@ -460,7 +469,11 @@ export class ZCodeProtocolAgentServer {
 
   setNotificationSink(sink: (message: ZCodeProtocolOutboundMessage) => void): void {
     this.runtimeResources.assertServing();
+    const wasDetached = this.clientDetached;
     this.clientDetached = false;
+    // 只有真正的 detached→attached 迁移才换 attachment 信号：每次 sink 安装
+    // 都重置会让物化中的旧 attachment 会话误以为 client 回来了（评审 R1）。
+    if (wasDetached) this.clientAttachment = new AbortController();
     this.messageSink = sink;
     // sink 恢复：flush 断线窗口内 park 的反向请求（detached 计时器在 deliver 内撤除）。
     for (const pending of [...this.parkedClientRequests]) {
@@ -477,6 +490,9 @@ export class ZCodeProtocolAgentServer {
   markClientDetached(error: Error): void {
     this.networkCapture.setCaptureId(null);
     this.clientDetached = true;
+    // attachment 信号先落下：物化中的 session factory（record 未登记）靠它
+    // 在 runtime 构造/启动前收到 detach，不依赖下面的 sessions 扫描（评审 R1）。
+    this.clientAttachment.abort(error);
     // detachConnection 的幂等补标记会二次进来：收养窗口以首次真正断链为起点。
     this.clientDetachedAt ??= Date.now();
     this.messageSink = undefined;
@@ -502,6 +518,24 @@ export class ZCodeProtocolAgentServer {
       }
       this.armDetachedRequestTimeout(pending);
     }
+    // client 注入 MCP（issue #31 CMCP08/10）：detach 的 session 同步落下 client
+    // stdio 准入闸门（setMcpClientAttached 的标志位先于任何 await 生效），
+    // teardown 排进 runtime apply tail 并计入 residency；adoption 经
+    // setMcpClientAttached(true) 在回合边界补连。只作用带声明的 record，
+    // 普通 file/plugin 会话的 MCP 生命周期不变。
+    for (const record of this.context.sessions.values()) {
+      if (record.clientMcpServers === undefined) continue;
+      void record.app.runtime
+        .setMcpClientAttached(false)
+        .catch((suspendError: unknown) => {
+          // MCP teardown 错误可能回显 command/env/header——诊断只报类别（评审 R8）。
+          this.logger?.warn("Client MCP suspend on detach failed", {
+            errorKind: suspendError instanceof Error ? suspendError.name : typeof suspendError,
+            event: "zcode_protocol.session.mcp_suspend_failed",
+            sessionId: record.app.sessionId,
+          });
+        });
+    }
   }
 
   /**
@@ -512,6 +546,7 @@ export class ZCodeProtocolAgentServer {
     this.networkCapture.setCaptureId(null);
     this.clientDetached = true;
     this.clientTerminated = true;
+    this.clientAttachment.abort(error);
     this.clientDisconnectError = error;
     this.messageSink = undefined;
     // 连接关闭后反向请求已不可能收到响应，必须先结束 pending，
@@ -1481,6 +1516,20 @@ export class ZCodeProtocolAgentServer {
     );
     record.ownerContext = this.context;
     this.context.sessions.set(sessionId, record);
+    // client 注入 MCP（issue #31 CMCP08）：ownership 转移到本 context 之后才
+    // 抬 attach 闸门——旧 owner 的迟到 suspend 先落地（apply tail 串行），
+    // 重连推迟到下一整轮边界，不让 detach 中杀的 stdio 在同一瞬复活竞态。
+    if (record.clientMcpServers !== undefined) {
+      void record.app.runtime
+        .setMcpClientAttached(true)
+        .catch((attachError: unknown) => {
+          this.logger?.warn("Client MCP reattach on adoption failed", {
+            errorKind: attachError instanceof Error ? attachError.name : typeof attachError,
+            event: "zcode_protocol.session.mcp_reattach_failed",
+            sessionId: record.app.sessionId,
+          });
+        });
+    }
     this.logger?.info("ZCode Protocol detached session adopted", {
       event: "zcode_protocol.session.adopted",
       sessionId,
