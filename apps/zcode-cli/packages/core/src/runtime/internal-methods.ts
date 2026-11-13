@@ -46,6 +46,7 @@ import type {
   ActiveTurnSteeringState,
   AgentRuntimeConfig,
   AgentRuntimeDeps,
+  BorrowedMcpAccess,
   ContextUsageCategory,
   ContextUsageConfidence,
   ContextUsageMetric,
@@ -288,6 +289,14 @@ export interface AgentRuntimeCoreMethods {
   getMcpPort(): McpPort | undefined;
   /** client attach/detach 闸门：detach 断开并收 stdio 子进程，attach 标记回合边界补连。 */
   setMcpClientAttached(attached: boolean): Promise<void>;
+  /**
+   * 借用方就绪入口（评审 R3）：等已排队的 apply/startup 落定后返回父侧
+   * {port, APPLIED config, snapshot}；detached/closed 返回空快照。
+   */
+  prepareBorrowedMcp(input: {
+    traceContext: TraceContext;
+    signal: AbortSignal;
+  }): Promise<BorrowedMcpAccess>;
   /** 回合边界入口：把 staged 配置 / attach 补连串行落地；空闲沿也在这里收口。 */
   applyPendingMcpServers(): Promise<void>;
   discoverSkillsForContext(traceContext: TraceContext): Promise<SkillLoadOutcome | undefined>;

@@ -90,6 +90,7 @@ import {
   getEffectiveMcpConfig,
   getMcpPort,
   initializeMcp,
+  prepareBorrowedMcp,
   refreshMcpToolsIfChanged,
   setMcpClientAttached,
 } from "./mcp.js";
@@ -305,6 +306,7 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.getMcpPort = getMcpPort;
   proto.setMcpClientAttached = setMcpClientAttached;
   proto.applyPendingMcpServers = applyPendingMcpServers;
+  proto.prepareBorrowedMcp = prepareBorrowedMcp;
   proto.startMcpStartup = startMcpStartup;
   proto.discoverSkillsForContext = discoverSkillsForContext;
   proto.createConfigOnlyContextSnapshot = createConfigOnlyContextSnapshot;

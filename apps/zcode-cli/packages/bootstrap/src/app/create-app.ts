@@ -1016,6 +1016,8 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       // session port；已建的 port 由 memo 返回同一对象。注入方拥有的 mcpPort
       // 不配工厂——runtime 显式清空时只断连接，不能替注入方关借来的资源（评审 R7）。
       createMcpPort: options.mcpPort === undefined ? getOrCreateSessionMcpPort : undefined,
+      // client 显式 MCP 会话的 owner attachment 信号（评审 R1）；普通会话缺席。
+      mcpClientDetachSignal: options.mcpClientDetachSignal,
       eventSink: options.eventSink,
       onOffPeakLifecycleEvent: options.onOffPeakLifecycleEvent
         ? (event) => options.onOffPeakLifecycleEvent!({ ...event, sessionId })

@@ -186,10 +186,19 @@ overrides allocate session-owned transports lazily; they never merge with file,
 plugin, or builtin MCP servers.
 
 The runtime applies changed overrides between whole turns, not between model
-requests within a turn. Unchanged declarations preserve live connections.
-Session close or client detach promptly terminates the session's stdio
-transports; detach keeps the runtime and in-memory declaration adoptable.
+requests within a turn. Unchanged declarations preserve live connections, but
+declaration equality is not connection health: an identical override whose
+desired servers are failed, disconnected, or missing requests one bounded
+retry on that explicit configure/resume edge; still-connecting and explicitly
+disabled/untrusted entries are left alone. Session close or client detach
+promptly terminates the session's stdio transports — including sessions whose
+app factory is still materializing, which receive the detach through the
+server's per-attachment signal rather than a registry scan. Detach keeps the
+runtime and in-memory declaration adoptable.
 Forks inherit that declaration in memory but use independent connections.
+Workflow children borrow the parent's MCP surface by awaiting the parent's
+scheduled startup/apply and then reading the applied tool set on the parent's
+port; they never own or cancel the parent's transports.
 No client credentials enter persistence or diagnostic payloads.
 
 The authoritative ownership/order contract and acceptance cases are in the

@@ -15,6 +15,8 @@ export interface McpLoopbackFixture {
   readonly url: string;
   /** 成功通过 auth 后实际到达 handler 的 tools/call 次数。 */
   acceptedToolCalls(): number;
+  /** 通过 auth 后到达的 initialize 请求数——retry/no-storm 断言用。 */
+  initializeRequests(): number;
   /** 因 auth 不符被 401 拒绝的请求次数。 */
   rejectedRequests(): number;
   close(): Promise<void>;
@@ -25,6 +27,8 @@ export interface McpLoopbackFixtureOptions {
   token: string;
   /** 无害标签——进 echo 结果，用来分辨是哪条连接回答的。 */
   label?: string;
+  /** 固定监听端口（offline→online 需复用同一 URL）；缺省 0=随机端口。 */
+  port?: number;
 }
 
 function createFixtureMcpServer(
@@ -65,11 +69,20 @@ function authorized(req: IncomingMessage, token: string): boolean {
   return req.headers.authorization === `Bearer ${token}`;
 }
 
-function listen(server: Server): Promise<number> {
+function listen(server: Server, port = 0): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port));
+    server.listen(port, "127.0.0.1", () => resolve((server.address() as AddressInfo).port));
   });
+}
+
+function countInitialize(body: unknown): boolean {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    !Array.isArray(body) &&
+    (body as { method?: unknown }).method === "initialize"
+  );
 }
 
 export async function startAuthenticatedMcpHttpFixture(
@@ -77,6 +90,7 @@ export async function startAuthenticatedMcpHttpFixture(
 ): Promise<McpLoopbackFixture> {
   const label = options.label ?? "unlabeled";
   let acceptedToolCalls = 0;
+  let initializeRequests = 0;
   let rejectedRequests = 0;
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const servers = new Set<McpServer>();
@@ -93,6 +107,7 @@ export async function startAuthenticatedMcpHttpFixture(
         typeof sessionId === "string" ? transports.get(sessionId) : undefined;
       if (req.method === "POST") {
         const body = await readJsonBody(req);
+        if (countInitialize(body)) initializeRequests += 1;
         if (!transport) {
           if (typeof sessionId === "string") {
             res.writeHead(404).end();
@@ -124,11 +139,12 @@ export async function startAuthenticatedMcpHttpFixture(
       if (!res.headersSent) res.writeHead(500).end();
     });
   });
-  const port = await listen(httpServer);
+  const port = await listen(httpServer, options.port ?? 0);
 
   return {
     url: `http://127.0.0.1:${port}/mcp`,
     acceptedToolCalls: () => acceptedToolCalls,
+    initializeRequests: () => initializeRequests,
     rejectedRequests: () => rejectedRequests,
     close: async () => {
       for (const transport of transports.values()) await transport.close().catch(() => undefined);
@@ -145,6 +161,7 @@ export async function startAuthenticatedMcpSseFixture(
 ): Promise<McpLoopbackFixture> {
   const label = options.label ?? "unlabeled";
   let acceptedToolCalls = 0;
+  let initializeRequests = 0;
   let rejectedRequests = 0;
   const transports = new Map<string, SSEServerTransport>();
   const servers = new Set<McpServer>();
@@ -176,6 +193,7 @@ export async function startAuthenticatedMcpSseFixture(
           return;
         }
         const body = await readJsonBody(req);
+        if (countInitialize(body)) initializeRequests += 1;
         await transport.handlePostMessage(req, res, body);
         return;
       }
@@ -184,11 +202,12 @@ export async function startAuthenticatedMcpSseFixture(
       if (!res.headersSent) res.writeHead(500).end();
     });
   });
-  const port = await listen(httpServer);
+  const port = await listen(httpServer, options.port ?? 0);
 
   return {
     url: `http://127.0.0.1:${port}/sse`,
     acceptedToolCalls: () => acceptedToolCalls,
+    initializeRequests: () => initializeRequests,
     rejectedRequests: () => rejectedRequests,
     close: async () => {
       for (const transport of transports.values()) await transport.close().catch(() => undefined);

@@ -12,7 +12,6 @@ import { createInMemorySessionEventStore } from "@zcode/adapters/storage";
 import { createNodeFileSystemAdapter } from "@zcode/adapters/fs";
 import { createTestModelFactory } from "../../core/tests/test-runtime-model.js";
 import { createRegistryBackedTestApp } from "./helpers/registry-backed-test-app.js";
-import { borrowedMcpConfig } from "../src/app/script-workflow-child-runtime.js";
 
 // issue #31 评审 S2/S3/S4：runtime detach/close 必须杀掉「在飞连接」的真实
 // stdio 子进程（applied+desired+in-flight 的并集），owned port close 代际安全，
@@ -263,18 +262,185 @@ describe("workflow child borrows parent applied MCP state (S4)", () => {
         } as unknown as McpPort,
       } as never,
     );
+    const borrowConfig = async () =>
+      (
+        await runtime.prepareBorrowedMcp({
+          traceContext: { traceId: "borrow-check" } as never,
+          signal: new AbortController().signal,
+        })
+      ).config;
     try {
-      expect(borrowedMcpConfig(runtime)).toMatchObject({ enabled: false, servers: {} });
+      // 借用入口返回的是父 APPLIED 配置（评审 R3）：servers 由 child runtime
+      // 在自己 startup 内置空——这里只验证 apply 代际被借用方看到。
+      expect(await borrowConfig()).toMatchObject({ enabled: false });
       const injected = { s1: { type: "stdio", command: "node", args: ["s.js"] } as McpServerConfig };
       await runtime.configureMcpServers(injected);
-      // 子会话构造读到的是 applied 生效配置 + servers 置空——借连接，不接生命周期。
-      expect(borrowedMcpConfig(runtime)).toMatchObject({ enabled: true, servers: {} });
+      expect(await borrowConfig()).toMatchObject({ enabled: true });
       await runtime.configureMcpServers({});
-      expect(borrowedMcpConfig(runtime)).toMatchObject({ enabled: false, servers: {} });
+      expect(await borrowConfig()).toMatchObject({ enabled: false });
       await runtime.configureMcpServers(injected);
-      expect(borrowedMcpConfig(runtime)).toMatchObject({ enabled: true, servers: {} });
+      expect(await borrowConfig()).toMatchObject({ enabled: true });
     } finally {
       await runtime.close();
     }
   });
+});
+
+// 评审 R3-返工：借用快照的最后一步（status/listTools）必须在同一代际栅栏内——
+// 读期间发生 queued apply 或 detach+adopt，返回的 config/port/status 会混代。
+describe("borrowed MCP access discovery fence (R3-rework)", () => {
+  function gatedPort(): {
+    port: McpPort;
+    armGate: () => void;
+    releaseGate: () => void;
+    statusSeen: Promise<void>;
+    statusCalls: () => number;
+    connectCalls: () => number;
+    resetConnectCalls: () => void;
+  } {
+    let armed = false;
+    let calls = 0;
+    let connects = 0;
+    let release!: () => void;
+    const gatePromise = new Promise<void>((r) => (release = r));
+    let seen!: () => void;
+    const statusSeen = new Promise<void>((r) => (seen = r));
+    const port = {
+      connectConfiguredServers: async (servers: Record<string, McpServerConfig>) => {
+        connects += 1;
+        return {
+          statuses: Object.fromEntries(
+            Object.keys(servers).map((name) => [
+              name,
+              { status: "connected", transport: "stdio", toolCount: 0, updatedAt: "t" },
+            ]),
+          ),
+          tools: [],
+        };
+      },
+      connectServer: async () => ({
+        status: "connected",
+        transport: "stdio",
+        toolCount: 0,
+        updatedAt: "t",
+      }),
+      disconnectServer: async () => undefined,
+      status: async () => {
+        calls += 1;
+        // 一次性闸门：只挂起第一个被 arm 的 status 读——别处意外的 status
+        // 调用照常通过，不会把并发 apply 死锁在闸门上。
+        if (armed) {
+          armed = false;
+          seen();
+          await gatePromise;
+        }
+        return {};
+      },
+      listTools: async () => [],
+      callTool: async () => ({ content: [{ type: "text", text: "pong" }] }),
+      close: async () => {},
+    } as unknown as McpPort;
+    return {
+      port,
+      armGate: () => {
+        armed = true;
+      },
+      releaseGate: release,
+      statusSeen,
+      statusCalls: () => calls,
+      connectCalls: () => connects,
+      resetConnectCalls: () => {
+        connects = 0;
+      },
+    };
+  }
+
+  const borrow = (runtime: AgentRuntime) =>
+    runtime.prepareBorrowedMcp({
+      traceContext: { traceId: "borrow-fence" } as never,
+      signal: new AbortController().signal,
+    });
+
+  it("queued apply during the final status read returns the NEW applied face, not a stale mix", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mcp-borrow-fence-"));
+    const { port, armGate, releaseGate, statusSeen, statusCalls } = gatedPort();
+    const runtime = createRuntimeWithLease("borrow-fence-gen", port, {
+      enabled: true,
+      servers: { s1: serverConfig(dir, "s1", false) },
+    });
+    try {
+      const warm = await borrow(runtime);
+      expect(Object.keys(warm.config?.servers ?? {})).toEqual(["s1"]);
+
+      armGate();
+      const pending = borrow(runtime);
+      await statusSeen; // status() 已进入并挂起——确定性卡在发现读上。
+      // 读期间落地新一代 applied：config.mcp 换对象、appliedVersion 递增。
+      await runtime.configureMcpServers({ s2: serverConfig(dir, "s2", false) });
+      releaseGate();
+      const access = await pending;
+      // 修后面向新代际返回 s2；修前返回被卡住的 s1 混合快照。
+      expect(Object.keys(access.config?.servers ?? {})).toEqual(["s2"]);
+      expect(statusCalls()).toBeGreaterThanOrEqual(3); // warm + 被卡 + 重读
+    } finally {
+      releaseGate();
+      await runtime.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("detach+adopt during the final status read re-reads instead of returning the stale snapshot", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mcp-borrow-fence-"));
+    const { port, armGate, releaseGate, statusSeen, statusCalls } = gatedPort();
+    const runtime = createRuntimeWithLease("borrow-fence-owner", port, {
+      enabled: true,
+      servers: { s1: serverConfig(dir, "s1", false) },
+    });
+    try {
+      await borrow(runtime); // warm：startup/tail 落定。
+      armGate();
+      const pending = borrow(runtime);
+      await statusSeen;
+      // 读期间 owner 换代：epoch/tail 都变——attached 复位后也不得交还旧读。
+      await runtime.setMcpClientAttached(false);
+      await runtime.setMcpClientAttached(true);
+      releaseGate();
+      const access = await pending;
+      expect(statusCalls()).toBeGreaterThanOrEqual(3); // warm + 被卡 + 重读
+      expect(Object.keys(access.config?.servers ?? {})).toEqual(["s1"]);
+    } finally {
+      releaseGate();
+      await runtime.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("concurrent configure: a stale identical-resume health probe cannot retry over a newer desired", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mcp-borrow-fence-"));
+    const { port, armGate, releaseGate, statusSeen, connectCalls, resetConnectCalls } =
+      gatedPort();
+    const runtime = createRuntimeWithLease("borrow-fence-desired", port, {
+      enabled: true,
+      servers: { s1: serverConfig(dir, "s1", false) },
+    });
+    try {
+      await borrow(runtime); // 落定 ctor startup；之后 connect 计数清零。
+      resetConnectCalls();
+      armGate();
+      // identical 声明命中 unchanged → status 健康探针被闸门卡住。
+      const stale = runtime.configureMcpServers({ s1: serverConfig(dir, "s1", false) });
+      await statusSeen;
+      // 探针等待期间另一个 configure 换了声明：desired 换代并立即 apply。
+      await runtime.configureMcpServers({ s2: serverConfig(dir, "s2", false) });
+      expect(connectCalls()).toBe(1); // 只有 s2 的 apply
+      releaseGate(); // status 返回 {}——s1 missing，陈旧探针本会判 retry。
+      await stale;
+      // 修前：陈旧探针立 reconnectNeeded 并再 apply 一次（第二次 connect）。
+      expect(connectCalls()).toBe(1);
+    } finally {
+      releaseGate();
+      await runtime.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

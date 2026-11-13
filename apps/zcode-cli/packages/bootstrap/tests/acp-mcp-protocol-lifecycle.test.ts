@@ -3,6 +3,7 @@
 // fixture），client 端是真实 unix socket 上的最小 NDJSON client。会话创建/
 // resume/fork/close 全部走协议请求——不是直接 runtime 拼装。
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,8 @@ import {
   type AcpMcpRawClient,
 } from "./helpers/acp-mcp-core-fixture.js";
 import type { RegistryBackedTestModelExecutor } from "./helpers/registry-backed-test-app.js";
+import { startAuthenticatedMcpHttpFixture } from "../../adapters/tests/fixtures/mcp-http-sse.js";
+import type { ZCodeProtocolAgentServer } from "../src/zcode-protocol/server.js";
 
 const FIXTURE = fileURLToPath(
   new URL("../../adapters/tests/fixtures/mcp-echo-server.mjs", import.meta.url),
@@ -1373,6 +1376,343 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
     } finally {
       client.close();
       await fixture.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // 评审 R1：detach 到达在飞 session/create factory——attachment 信号先于
+  // sessions 登记落下，迟到物化不得放行 stdio，也不得复活已死子进程。
+  it("CMCP-R1a detach before construction: no stdio admitted, late registration stays detached, adoption reconnects", async () => {
+    const requests: ModelRequest[] = [];
+    let releaseFactory!: () => void;
+    let factorySeenResolve!: () => void;
+    const factorySeen = new Promise<void>((resolve) => (factorySeenResolve = resolve));
+    const factoryGate = new Promise<void>((resolve) => (releaseFactory = resolve));
+    const fixture = await createAcpMcpCoreFixture({
+      modelExecutor: createToolCallingExecutor("mcp__s1__echo", requests),
+      appFactoryHooks: {
+        // 确定性屏障：factory 已进、真实 app 尚未构造。
+        preCreate: () => {
+          factorySeenResolve();
+          return factoryGate;
+        },
+      },
+    });
+    const dir = await mkdtemp(join(tmpdir(), "cmcp-r1a-"));
+    const client1 = await fixture.connectRawClient();
+    allowAllPermissions(client1);
+    try {
+      const createPromise = client1.request(
+        zcodeProtocolMethods.sessionCreate,
+        {
+          workspace: workspaceRef(fixture),
+          mcpServers: [stdioWireServer("s1", dir, { label: "r1a" })],
+        },
+      );
+      void createPromise.catch(() => undefined); // 死 socket 上响应无处投递
+      await factorySeen;
+
+      // 两条 detach 清理回调都在「无登记 record」的 sessions 表上跑完——
+      // 物化窗口内的会话只能靠 attachment 信号收到 detach。
+      client1.close();
+      await client1.closed;
+      // client 侧 close 完成 ≠ server EOF 已 drain——detach 标记是异步落下。
+      // 用 owner 表轮询做确定性屏障：两条清理回调跑完后 server 才 isDetached。
+      let ownerA: ZCodeProtocolAgentServer | undefined;
+      for (let i = 0; i < 400; i += 1) {
+        ownerA = [...fixture.servers].find((s) => s.isDetached());
+        if (ownerA) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(ownerA).toBeDefined();
+      expect(fixture.apps.size).toBe(0);
+
+      releaseFactory();
+      // 物化屏障：factory 返回 → sessions.set + attach reconcile 都已跑完。
+      for (let i = 0; i < 400 && fixture.apps.size === 0; i += 1) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(fixture.apps.size).toBe(1);
+      const [sessionId, app] = [...fixture.apps.entries()][0]!;
+      // 屏障之后才查 PID：出生即 detached 的 runtime 没有放行任何 stdio。
+      // （port 对象在装配期就建好了——准入证据看子进程与 status，不看 port 有无。）
+      expect(await listPids(dir)).toEqual([]);
+      expect(await app.runtime.getMcpPort()?.status()).toEqual({});
+      expect(fixture.ownerOf(sessionId)).toBe(ownerA);
+
+      // 真实 owner 收养 + prompt：零回合会话还没有持久化行，session/resume
+      // 的血缘预检不收它——但 session-scoped 请求的 claimDetachedSession 会在
+      // resolve 时把常驻 detached record 收养到本连接（server-types.ts:474）。
+      const client2 = await fixture.connectRawClient();
+      allowAllPermissions(client2);
+      try {
+        await client2.request(zcodeProtocolMethods.sessionSend, {
+          sessionId,
+          content: "adopted-r1a",
+          inputId: "in-2",
+        });
+        await waitTurnRequests(requests, 2);
+        await waitIdle(client2, sessionId);
+        expect(fixture.apps.get(sessionId)).toBe(app);
+        // owner 转移可观测：收养后挂在 client2 的 server 上。
+        const ownerB = fixture.ownerOf(sessionId);
+        expect(ownerB).toBeDefined();
+        expect(ownerB).not.toBe(ownerA);
+        const pid = await waitForFile(join(dir, "s1.pid"));
+        expect(processAlive(pid)).toBe(true);
+        const toolMessages = requests
+          .flatMap((r) => r.messages)
+          .filter((m) => m.role === "tool")
+          .map((m) => JSON.stringify(m));
+        expect(toolMessages.some((m) => m.includes(`echo[r1a@${pid}]`))).toBe(true);
+      } finally {
+        client2.close();
+      }
+    } finally {
+      client1.close();
+      await fixture.close();
+      expect(await listPids(dir)).toEqual([]);
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("CMCP-R1b detach while record unregistered (app built, factory held): blocked-initialize child dies before release; late registration stays detached", async () => {
+    let releaseFactory!: () => void;
+    let constructedResolve!: () => void;
+    const constructed = new Promise<void>((resolve) => (constructedResolve = resolve));
+    const factoryGate = new Promise<void>((resolve) => (releaseFactory = resolve));
+    const fixture = await createAcpMcpCoreFixture({
+      appFactoryHooks: {
+        // 确定性屏障：真实 app/runtime 已构造（startup 已在飞）、factory 未返回。
+        postCreate: () => {
+          constructedResolve();
+          return factoryGate;
+        },
+      },
+    });
+    const dir = await mkdtemp(join(tmpdir(), "cmcp-r1b-"));
+    const client1 = await fixture.connectRawClient();
+    allowAllPermissions(client1);
+    try {
+      const createPromise = client1.request(
+        zcodeProtocolMethods.sessionCreate,
+        {
+          workspace: workspaceRef(fixture),
+          // HOLD_INITIALIZE：子进程已起、握手永远挂起——在飞连接的典型形态。
+          mcpServers: [stdioWireServer("s1", dir, { hold: true })],
+        },
+      );
+      void createPromise.catch(() => undefined);
+      await constructed;
+      // 被扣握手的真实 stdio 子进程存在。
+      const pid = await waitForFile(join(dir, "s1.pid"));
+      expect(processAlive(pid)).toBe(true);
+      const sessionId = [...fixture.apps.keys()][0]!;
+
+      // record 未登记时 detach：attachment 信号让在飞 connect 中止，
+      // 子进程必须先于 factory 放行死掉。
+      client1.close();
+      await client1.closed;
+      expect(await waitForExit(pid)).toBe(true);
+
+      releaseFactory();
+      // 迟到登记屏障：sessions.set 后 owner 表出现该 session。
+      for (let i = 0; i < 400; i += 1) {
+        if ([...fixture.servers].some((s) => s.hasResidentSession(sessionId))) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect([...fixture.servers].some((s) => s.hasResidentSession(sessionId))).toBe(true);
+      const app = fixture.apps.get(sessionId)!;
+      // 登记后 reconcile 复核 detached：不得复活已死的连接/子进程。
+      for (let i = 0; i < 100; i += 1) {
+        await new Promise((r) => setTimeout(r, 25));
+        if ((await listPids(dir)).length > 0) break;
+      }
+      expect(await listPids(dir)).toEqual([]);
+      expect(processAlive(pid)).toBe(false);
+      expect(app).toBeDefined();
+    } finally {
+      client1.close();
+      await fixture.close();
+      expect(await listPids(dir)).toEqual([]);
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // 评审 R2：相同声明 ≠ 活连接。endpoint 缺席起 failed， identical resume 必须
+  // 经池 revalidate 原地重连；live sibling 的连接/PID 不受打扰。
+  it("CMCP-R2 identical resume retries failed entry; live sibling keeps PID; fail→success; no per-turn retry", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = await createAcpMcpCoreFixture({
+      // h1 上线后工具入面就优先调它（真实协议 ModelRequest 工具流）；
+      // 下线期间只提供 mcp__sib__echo，普通回合照常走完。
+      modelExecutor: {
+        generateText: async (request) => {
+          requests.push(request);
+          const lastRole = request.messages.at(-1)?.role;
+          const offered = ["mcp__h1__echo", "mcp__sib__echo"].find((name) =>
+            request.tools?.some((tool) => tool.name === name),
+          );
+          if (offered && lastRole !== "tool") {
+            return {
+              finishReason: "tool-calls",
+              text: "",
+              toolCalls: [{ id: "call-1", name: offered, input: { text: "hello" } }],
+              usage: {},
+            } as ModelResult;
+          }
+          return { finishReason: "stop", text: "done", usage: {} } as ModelResult;
+        },
+      },
+    });
+    const dir = await mkdtemp(join(tmpdir(), "cmcp-r2-"));
+    const TOKEN = "FAKE_R2_TOKEN";
+    // 先占一个空端口再释放，再把 TCP 黑洞绑上去：真·下线 endpoint 上 SDK 的
+    // 每次连接尝试都被计数——有界 attempt counter，不靠上线后的 initialize 数。
+    const reserved = await new Promise<number>((resolve, reject) => {
+      const probe = createServer();
+      probe.once("error", reject);
+      probe.listen(0, "127.0.0.1", () => {
+        const port = (probe.address() as { port: number }).port;
+        probe.close(() => resolve(port));
+      });
+    });
+    let attempts = 0;
+    const blackhole = createServer((socket) => {
+      attempts += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      blackhole.once("error", reject);
+      blackhole.listen(reserved, "127.0.0.1", () => resolve());
+    });
+    const url = `http://127.0.0.1:${reserved}/mcp`;
+    const declaration = () => [
+      {
+        name: "h1",
+        type: "http",
+        url,
+        headers: [{ name: "Authorization", value: `Bearer ${TOKEN}` }],
+      },
+      stdioWireServer("sib", dir, { label: "sib" }),
+    ];
+    const client = await fixture.connectRawClient();
+    allowAllPermissions(client);
+    const statusOf = async (sessionId: string, name: string) =>
+      (await fixture.apps.get(sessionId)!.runtime.getMcpPort()!.status())[name]?.status;
+    const waitStatus = async (sessionId: string, name: string, want: string) => {
+      for (let i = 0; i < 400; i += 1) {
+        if ((await statusOf(sessionId, name)) === want) return;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error(`${name} never reached status ${want}`);
+    };
+    try {
+      const sessionId = await createSession(client, fixture, {
+        mcpServers: declaration(),
+      });
+      // typed status 证据：sib 活、h1 死（endpoint 缺席的 startup 结果）。
+      await waitStatus(sessionId, "sib", "connected");
+      await waitStatus(sessionId, "h1", "failed");
+      const pidSib = await waitForFile(join(dir, "sib.pid"));
+      const attemptsAfterStartup = attempts;
+      expect(attemptsAfterStartup).toBeGreaterThanOrEqual(1);
+
+      // endpoint 仍缺席的 identical resume：显式 retry 真实发起（attempts 有界
+      // 增长），仍 failed——versions 不吞掉下一次 retry。
+      await client.request(zcodeProtocolMethods.sessionResume, {
+        sessionId,
+        workspace: workspaceRef(fixture),
+        mcpServers: declaration(),
+      });
+      await waitStatus(sessionId, "h1", "failed");
+      const attemptsAfterRetry = attempts;
+      expect(attemptsAfterRetry).toBeGreaterThan(attemptsAfterStartup);
+      expect(attemptsAfterRetry - attemptsAfterStartup).toBeLessThanOrEqual(4);
+
+      // 普通回合（endpoint 仍缺席）：零新连接尝试——没有 per-turn 重试。
+      await client.request(zcodeProtocolMethods.sessionSend, {
+        sessionId,
+        content: "turn-while-down",
+        inputId: "in-1",
+      });
+      await waitTurnRequests(requests, 2);
+      await waitIdle(client, sessionId);
+      expect(attempts).toBe(attemptsAfterRetry);
+
+      // 同一 URL 上线：identical resume 经 revalidate 原地重连成功。
+      await new Promise<void>((resolve) => blackhole.close(() => resolve()));
+      const http = await startAuthenticatedMcpHttpFixture({ token: TOKEN, port: reserved, label: "h1" });
+      try {
+        await client.request(zcodeProtocolMethods.sessionResume, {
+          sessionId,
+          workspace: workspaceRef(fixture),
+          mcpServers: declaration(),
+        });
+        await waitStatus(sessionId, "h1", "connected");
+        expect(http.initializeRequests()).toBe(1);
+
+        // 真协议工具流：回合的 ModelRequest 拿到 mcp__h1__echo、真实调用、
+        // tool 结果回到下一个 ModelRequest。
+        await client.request(zcodeProtocolMethods.sessionSend, {
+          sessionId,
+          content: "call-h1",
+          inputId: "in-2",
+        });
+        await waitTurnRequests(requests, 4);
+        await waitIdle(client, sessionId);
+        const toolMessages = requests
+          .flatMap((r) => r.messages)
+          .filter((m) => m.role === "tool")
+          .map((m) => JSON.stringify(m));
+        expect(toolMessages.some((m) => m.includes("echo[h1@http]"))).toBe(true);
+        // live sibling：同一条连接同一个 PID，没被 retry 打扰。
+        expect(Number((await readFile(join(dir, "sib.pid"), "utf8")).trim())).toBe(pidSib);
+        expect(processAlive(pidSib)).toBe(true);
+        expect((await statusOf(sessionId, "sib")) === "connected").toBe(true);
+        // 健康回合后没有新手握——connected 的 entry 不重连。
+        expect(http.initializeRequests()).toBe(1);
+      } finally {
+        await http.close();
+      }
+    } finally {
+      client.close();
+      await fixture.close();
+      if (blackhole.listening) {
+        await new Promise<void>((resolve) => blackhole.close(() => resolve()));
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("CMCP-R2b identical resume during held handshake does not respawn or disturb the pending connect", async () => {
+    const fixture = await createAcpMcpCoreFixture();
+    const dir = await mkdtemp(join(tmpdir(), "cmcp-r2b-"));
+    const pidDir = join(dir, "pids");
+    const client = await fixture.connectRawClient();
+    allowAllPermissions(client);
+    try {
+      const sessionId = await createSession(client, fixture, {
+        mcpServers: [stdioWireServer("held", dir, { hold: true, pidDir })],
+      });
+      // 被扣握手的在飞连接：子进程已起、handshake 不完成。
+      const pid = await waitForFile(join(dir, "held.pid"));
+      expect(processAlive(pid)).toBe(true);
+
+      // identical resume：connecting 条目不在 retry 范围——resume 正常返回，
+      // 不生二胎、不拆在飞连接。
+      await client.request(zcodeProtocolMethods.sessionResume, {
+        sessionId,
+        workspace: workspaceRef(fixture),
+        mcpServers: [stdioWireServer("held", dir, { hold: true, pidDir })],
+      });
+      // 每次 spawn 都写自己的 pid 文件——文件数=spawn 次数，硬证据。
+      expect((await readdir(pidDir)).filter((f) => f.endsWith(".pid")).length).toBe(1);
+      expect(processAlive(pid)).toBe(true);
+    } finally {
+      client.close();
+      await fixture.close();
+      expect(await listPids(pidDir)).toEqual([]);
       await rm(dir, { recursive: true, force: true });
     }
   }, 60_000);

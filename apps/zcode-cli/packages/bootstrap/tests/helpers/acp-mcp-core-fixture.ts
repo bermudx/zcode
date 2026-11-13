@@ -29,6 +29,15 @@ export interface AcpMcpCoreFixtureOptions {
   version?: string;
   /** 注入捕获式 loggerFactory（CMCP13 诊断/泄漏断言）；缺省走默认。 */
   loggerFactory?: LoggerFactory;
+  /**
+   * createZCodeApp 的确定性闸门（评审 R1）：preCreate 在真实构造之前、
+   * postCreate 在构造完成且 apps.set 已发生、但 factory 尚未 return 时调用。
+   * 只用于物化窗口测试——挂起 promise 即挂起 session/create。
+   */
+  appFactoryHooks?: {
+    preCreate?: () => void | Promise<void>;
+    postCreate?: (app: ZCodeApp) => void | Promise<void>;
+  };
 }
 
 export interface AcpMcpCoreFixture {
@@ -95,8 +104,9 @@ export async function createAcpMcpCoreFixture(
         noPlugins,
         sessionStore,
         ...(options.loggerFactory ? { loggerFactory: options.loggerFactory } : {}),
-        createZCodeApp: (appOptions) => {
-          const created = createRegistryBackedTestApp({
+        createZCodeApp: async (appOptions) => {
+          await options.appFactoryHooks?.preCreate?.();
+          const created = await createRegistryBackedTestApp({
             ...appOptions,
             env: appEnv,
             // runtime 也拿到同一 store：persistSession/目标续跑需要真实 session 行。
@@ -107,10 +117,9 @@ export async function createAcpMcpCoreFixture(
             ...(options.loggerFactory ? { loggerFactory: options.loggerFactory } : {}),
             ...(options.modelExecutor ? { modelExecutor: options.modelExecutor } : {}),
           });
-          return Promise.resolve(created).then((app) => {
-            apps.set(String(app.sessionId), app);
-            return app;
-          });
+          apps.set(String(created.sessionId), created);
+          await options.appFactoryHooks?.postCreate?.(created);
+          return created;
         },
         // 与生产 entrypoint 同语义：只把「其他」detached 且仍 resident 的
         // session 交收养；绝不返回自己（finishDetachedSessionAdoption 也会挡）。

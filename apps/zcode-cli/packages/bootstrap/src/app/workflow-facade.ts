@@ -39,7 +39,6 @@ import {
   type WorkflowDefinition,
 } from "@zcode/contracts";
 import { collectDisabledPaths } from "../skill-command-overrides.js";
-import { borrowedMcpConfig } from "./script-workflow-child-runtime.js";
 import type { PrepareUserExecutionBoundary, ZCodeAppOptions } from "./types.js";
 import { createWorkflowMethods, type WorkflowFacade } from "./workflow-methods.js";
 
@@ -286,9 +285,6 @@ function createWorkflowChildRuntime(
     options.childSessionId,
     {
       ...deps.runtimeConfig,
-      // 借用父 port：生效 mcp 只认父 runtime 已落地的配置（评审 S4）；servers 置空
-      // 让 child 启动只做 discovery，不接管父会话的连接生命周期。
-      mcp: borrowedMcpConfig(deps.runtime),
       agentName: options.workflowKind === "expert" ? "zcode-expert" : "zcode-workflow",
       // workflow child 不在 Guarded 合同内；只隔离父任务模式，不继承审批。
       mode: "yolo",
@@ -347,8 +343,8 @@ function createWorkflowChildRuntime(
               disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),
             }))
           : undefined,
-      // child 借用父 port 的现有连接（评审 S4）：构造时现读父 runtime 的 port。
-      mcpPort: deps.runtime.getMcpPort(),
+      // child 借用父 MCP 面（评审 R3）：startup await 父侧就绪快照，构造期不冻结。
+      borrowMcpAccess: (input) => deps.runtime.prepareBorrowedMcp(input),
       eventSink: deps.eventSink,
       modelFactory: deps.modelFactory,
       resolveEffectiveModelSelection: deps.appOptions.resolveEffectiveModelSelection,

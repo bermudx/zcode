@@ -336,7 +336,9 @@ validated ACP declaration
   → next turn discovers the confirmed tool set
 
 transport detach
-  → synchronously suspend client MCP admission and fence late connection work
+  → synchronously suspend client MCP admission and fence late connection work,
+    including sessions whose app factory is still materializing (attachment
+    signal is captured before the factory await, not found by a later scan)
   → disconnect and await session-owned stdio teardown
   → retain runtime/history and in-memory declaration for adoption
   → resume/adoption schedules suspended connections at the next turn boundary
@@ -351,10 +353,14 @@ shared-core restart while this adapter lives
   other runtime turn entry points must cross the same boundary. A model-request
   boundary inside a running turn is not sufficient.
 - Semantically equal declarations, including credentials, are a no-op on live
-  connections. Server/object ordering alone does not force a reconnect.
-  Disconnected servers can reconnect without changing their declaration.
-  Removed or changed servers retire their old session connections; unaffected
-  servers keep theirs.
+  or still-connecting connections. Server/object ordering alone does not force
+  a reconnect. Declaration equality is not connection health: an identical
+  create/resume declaration still retries desired servers whose live status is
+  failed, disconnected, or missing — one bounded retry per explicit
+  configure/resume, never a per-turn retry loop. Servers mid-handshake or
+  explicitly disabled/untrusted are left alone; live entries keep the same
+  connections and PIDs. Removed or changed servers retire their old session
+  connections; unaffected servers keep theirs.
 - Applying, suspending, and closing are serialized and fenced against stale
   asynchronous completion. Close is terminal. Detach cannot be undone by a
   late connect result or an old owner's callback after adoption.
@@ -365,6 +371,16 @@ shared-core restart while this adapter lives
 - Warm/adopted resume must not replace the ACP handle or its in-flight waiter.
   Identical live settings remain connected; changed settings wait for the
   current turn to finish. No restart or cancellation is used for refresh.
+- Workflow children borrow the parent's MCP surface through an asynchronous
+  readiness dependency, not a constructor-time snapshot: a child waits for the
+  parent's already-scheduled startup/boundary apply to settle, then discovers
+  the applied tool set on the parent's port. Discovery is generation-fenced:
+  if the parent's attachment, apply, port, or applied configuration changes
+  while the status/tool reads are in flight, the stale read is discarded and
+  discovery retries against the new generation — a borrower never receives a
+  mixed-generation snapshot. Borrowers never own, connect,
+  disconnect, or cancel the parent's transports, and never apply the parent's
+  pending staged configuration during an active parent turn.
 - Fork copies the most recently accepted client declaration, including a
   pending replacement, in memory. The child gets independent session-owned
   connections; closing/detaching either session cannot kill the other's tools.

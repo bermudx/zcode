@@ -7,6 +7,9 @@
 //   MCP_FIXTURE_LABEL    — harmless generation label (e.g. "v1"/"v2") stamped in
 //                          echo output; lets tests prove which connection answered.
 //   MCP_FIXTURE_HOLD_INITIALIZE=1 — never answer initialize (blocked handshake).
+//   MCP_FIXTURE_INITIALIZE_RELEASE_FILE — hold the initialize answer until this
+//                          file exists (async poll); the held handshake can be
+//                          released deterministically or killed mid-wait.
 //   MCP_FIXTURE_HOLD_CALL=1 — never answer tools/call (barrier for detach tests).
 //   MCP_FIXTURE_CALL_MARKER_FILE — write own PID here when a tools/call is
 //                          RECEIVED, before the holdCall gate; lets tests await
@@ -21,6 +24,7 @@
 // Tool results carry pid + label + echoed input only — env/credential values are
 // never read into or echoed back from results.
 import { mkdirSync, writeFileSync } from "node:fs";
+import { access } from "node:fs/promises";
 import { join } from "node:path";
 
 if (process.env.MCP_FIXTURE_PID_FILE) {
@@ -31,6 +35,7 @@ if (process.env.MCP_FIXTURE_PID_DIR) {
   writeFileSync(join(process.env.MCP_FIXTURE_PID_DIR, `${process.pid}.pid`), String(process.pid));
 }
 const holdInitialize = process.env.MCP_FIXTURE_HOLD_INITIALIZE === "1";
+const initReleaseFile = process.env.MCP_FIXTURE_INITIALIZE_RELEASE_FILE;
 const holdCall = process.env.MCP_FIXTURE_HOLD_CALL === "1";
 const failInitialize = process.env.MCP_FIXTURE_FAIL_INITIALIZE === "1";
 if (process.env.MCP_FIXTURE_STDERR_TEXT) {
@@ -72,7 +77,7 @@ process.stdin.on("data", (chunk) => {
         });
         continue;
       }
-      respond({
+      const initResponse = {
         jsonrpc: "2.0",
         id: message.id,
         result: {
@@ -80,7 +85,23 @@ process.stdin.on("data", (chunk) => {
           capabilities: { tools: {} },
           serverInfo: { name: "fixture-echo", version: "0.0.1" },
         },
-      });
+      };
+      if (initReleaseFile) {
+        // 释放文件闸门：文件出现前扣住握手（异步轮询，进程被杀即终止）。
+        void (async () => {
+          for (;;) {
+            try {
+              await access(initReleaseFile);
+              break;
+            } catch {
+              await new Promise((r) => setTimeout(r, 15));
+            }
+          }
+          respond(initResponse);
+        })();
+        continue;
+      }
+      respond(initResponse);
       continue;
     }
     if (message.method === "tools/list") {

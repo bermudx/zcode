@@ -134,9 +134,6 @@ export function createScriptWorkflowAgentRuntime(input: {
     {
       ...inheritedConfig,
       ...(systemPrompt === undefined ? {} : { systemPrompt }),
-      // 借用父 port：生效 mcp 只认父 runtime 已落地的配置（评审 S4）；servers 置空
-      // 让 child 启动只做 discovery，不能 connect/close 父会话的连接生命周期。
-      mcp: borrowedMcpConfig(input.deps.runtime),
       agentName: input.request.opts?.agentType ?? "zcode-workflow",
       maxTurns: input.request.opts?.maxTurns ?? input.deps.runtimeConfig.maxTurns,
       // 基线 YOLO，父任务仍保留自己的 Guarded。legacy script workflow child 就停在这里；dwf actor
@@ -264,9 +261,10 @@ function createRuntimeDeps(
     imageProcessorPort: deps.imageProcessorPort,
     pdfDocumentPort: deps.pdfDocumentPort,
     logger: deps.logger,
-    // child 借用父 port 的现有连接：port 在构造时从父 runtime 现读（评审 S4）——
-    // 空会话迟到注入/清空再注入之后，子会话必须拿到当前 port 而不是装配期快照。
-    mcpPort: deps.runtime.getMcpPort(),
+    // child 借用父 MCP 面（评审 R3）：startup 才 await 父 runtime 的就绪快照
+    // （port + APPLIED config + status/tools），构造期不冻结——父 startup/apply
+    // 未落定前子会话不会把空工具面当成事实；子会话绝不接管父连接生命周期。
+    borrowMcpAccess: (input) => deps.runtime.prepareBorrowedMcp(input),
     modelFactory: deps.modelFactory,
     resolveEffectiveModelSelection: deps.appOptions.resolveEffectiveModelSelection,
     // permissionBroker + providerRuntimeHeadersPort 都在这里面：父 runtime 派生，路由身份已改写成父会话。
@@ -301,13 +299,6 @@ export function createWorkflowChildSkillPort(
   );
 }
 
-/**
- * 子会话借用父 port 时的生效 MCP 配置（评审 S4）：APPLIED config.mcp 克隆 +
- * servers 置空——子会话 discovery 只读父现有 tools/status，不接管连接生命周期。
- */
-export function borrowedMcpConfig(runtime: {
-  getEffectiveMcpConfig(): AgentRuntimeConfig["mcp"];
-}): AgentRuntimeConfig["mcp"] {
-  const effective = runtime.getEffectiveMcpConfig();
-  return effective === undefined ? undefined : { ...effective, servers: {} };
-}
+// 子会话借用父 MCP 面经父 runtime prepareBorrowedMcp 在 child startup 时
+// 产出快照（评审 R3）；servers 置空发生在 child runtime 内部，子会话只做
+// discovery、绝不接管父连接生命周期。

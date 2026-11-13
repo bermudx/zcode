@@ -3871,6 +3871,11 @@ async function createRecord(
   // automation-port 需要读取「本会话」的实时 model/mode/thought；record 在 app 之后才建。
   // 用可变持有者做惰性绑定：CronCreate 在 turn 中调用 create() 时 record 早已就绪。
   let ownSessionRecord: ZCodeProtocolSessionRecord | undefined;
+  // client 显式 MCP 会话在准备 factory 调用时就取走当前 attachment 信号：
+  // factory await 横跨 detach 时 record 尚未登记、detach 扫描看不到它——
+  // runtime 靠本信号落下 admission 闸门，迟到登记再由下方 reconcile 复核（评审 R1）。
+  const mcpClientDetachSignal =
+    params.mcpServers !== undefined ? context.getClientDetachSignal?.() : undefined;
   const app = await createWorkspaceZCodeApp(context, workspace, {
     env: context.deps.env,
     eventStore,
@@ -3978,6 +3983,7 @@ async function createRecord(
     traceContext,
     version: context.deps.version,
     modelIoFullRetentionEnabled: context.appRuntimePreferences.modelIoFullRetentionEnabled,
+    ...(mcpClientDetachSignal !== undefined ? { mcpClientDetachSignal } : {}),
   });
   const now = Date.now();
   const record: ZCodeProtocolSessionRecord = {
@@ -4008,6 +4014,22 @@ async function createRecord(
   // app 一旦物化就交给生命周期执行面持有。订阅接线抛错时也必须能找到并释放它。
   context.sessions.set(sessionId, record);
   context.assertServing?.();
+  // 登记后立刻按当前 owner attachment 对账（评审 R1）：物化窗口内的 detach
+  // 已由信号先行落下（此处 setMcpClientAttached(false) 是幂等复核）；中途又
+  // 恢复 attached 时把它拉回 adoption 语义，补连在下一回合边界发生。
+  // 不复活旧 owner——isClientAttached 读的是本 context 的当前 attachment。
+  if (record.clientMcpServers !== undefined && context.isClientAttached !== undefined) {
+    void record.app.runtime
+      .setMcpClientAttached(context.isClientAttached())
+      .catch((reconcileError: unknown) => {
+        context.logger?.warn("Client MCP attach reconcile failed", {
+          errorKind:
+            reconcileError instanceof Error ? reconcileError.name : typeof reconcileError,
+          event: "zcode_protocol.session.mcp_attach_reconcile_failed",
+          sessionId: record.app.sessionId,
+        });
+      });
+  }
   let subscribed = true;
   let unsubscribeSessionEvents = () => {};
   record.unsubscribe = () => {

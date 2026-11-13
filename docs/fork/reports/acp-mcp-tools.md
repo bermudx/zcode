@@ -129,6 +129,198 @@ fixes (still in tree from prior rounds):
   for noPlugins sessions, workflow children borrow effective config
   (`servers: {}` — discovery only, no ownership).
 
+PR #34 review 3 (R1/R2/R3, still in tree, uncommitted) — three review findings
+from checklist comment `6842002612`, fixed together:
+
+- R1 attachment signal (`server.ts`, `server-types.ts`,
+  `server-operations.ts`, `types.ts` app options, `create-app.ts`,
+  `agent-runtime.ts`, `internal.ts`, `internal-methods.ts`): a server-owned
+  `AbortController` tracks the current client attachment, aborted synchronously
+  in `markClientDetached`/`disconnectClient`; `context.getClientDetachSignal` /
+  `context.isClientAttached` expose it. `createRecord` captures the signal
+  before the async app factory when `params.mcpServers !== undefined` and
+  passes it through `ZCodeAppOptions` into `AgentRuntimeDeps
+  .mcpClientDetachSignal`. The runtime constructor drops admission
+  synchronously (`mcpClientAttached=false`, `mcpReconnectNeeded=true`) when the
+  signal is already aborted, otherwise subscribes once into
+  `setMcpClientAttached(false)`; `beginShutdown` unsubscribes. After the late
+  `context.sessions.set`, the record reconciles via `isClientAttached` so a
+  detached materialization never resurrects. Adoption (`claimDetachedSession`
+  inside `requireSession`) keeps the existing attach-at-boundary reconnect.
+- R2 identical-declaration retry (`methods/mcp.ts`): `configureMcpServers`
+  compares the incoming declaration against the *effective* declaration
+  (`mcpDesiredServers ?? config.mcp.servers`) so the create-with-mcp case
+  reaches the retry probe. When unchanged and no reconnect already pending,
+  `detectMcpRetryNeeded` reads `port.status()` and requests
+  `mcpReconnectNeeded=true` only for desired-enabled names that are
+  `failed`/`disconnected`/missing and not already in `mcpInFlightConnects`;
+  connecting/live/disabled entries are never disturbed. `performMcpApply`
+  passes `revalidate: true` to `connectConfiguredServers` when the reconnect
+  flag caused the apply, so cached failed pool entries reconnect while live
+  entries are ping-reused (same PID); the flag clears only after a
+  current-epoch successful apply. The status probe captures the desired
+  version/object identity plus attach epoch before the async read and
+  discards its result when desired changed during the probe — a stale probe
+  can neither set `mcpReconnectNeeded` nor trigger an apply over a newer
+  declaration. No per-turn polling or reconnect loops.
+- R3 borrowed access (`runtime/types.ts` `BorrowedMcpAccess`,
+  `borrowMcpAccess` dep, `methods/mcp.ts` `prepareBorrowedMcp`, child
+  `startMcpStartup`/`initializeMcp`, `script-workflow-child-runtime.ts`,
+  `workflow-facade.ts`): both workflow child constructors now pass
+  `borrowMcpAccess: (input) => parent.prepareBorrowedMcp(input)` instead of
+  freezing the parent's port/config at construction. `prepareBorrowedMcp`
+  waits the parent's already-scheduled `mcpApplyTail` and `mcpStartupPromise`
+  (rereading identities until stable; never waits the parent turn, never
+  applies staged desired during an active turn), then reads the full
+  discovery snapshot (`status()` + `listTools()`) inside the same generation
+  fence: after the reads it rechecks attach epoch, apply-tail/startup
+  identities, port and applied-config references and retries the whole
+  discovery on any change, so a queued apply or detach+adopt during the
+  final read can never produce a mixed-generation snapshot. It returns
+  `{port, config, snapshot}` with `config.servers:{}` applied by the child.
+  Child startup awaits it under the child's own shutdown signal — child
+  cancellation never aborts the parent handshake — and fences
+  closed/detach/epoch before assignment. `initializeMcp` now reads the real
+  `mcpPort` after the startup await (previously captured before). The
+  `borrowedMcpConfig` export is removed; tests call `prepareBorrowedMcp`.
+- Specs: `docs/design/v2/acp-frontend.md` (detached admission pre-registry,
+  live-vs-failed retry, borrower awaits applied discovery);
+  `docs/design/v2/mcp.md` (same three semantics).
+- New regressions: `acp-mcp-protocol-lifecycle.test.ts` CMCP-R1a (detach
+  before construction: no stdio admitted across materialization, late
+  registration stays detached, second-owner `sessionSend` adopts via
+  `claimDetachedSession` and the turn calls the real tool — a zero-turn
+  session has no persisted row, so `session/resume` lineage validation
+  correctly rejects it and the request-level adoption path is used instead),
+  CMCP-R1b (detach after real app built but before factory return:
+  blocked-initialize child dies before release, no resurrection), CMCP-R2
+  (HTTP endpoint behind a bounded TCP-blackhole attempt counter → failed
+  status; identical resume while down issues a bounded retry (≤4 attempts)
+  and stays failed; a normal turn while still down issues zero new
+  connection attempts; same endpoint healthy + identical resume reconnects
+  and the next real protocol turn calls `mcp__h1__echo` end to end; live
+  stdio sibling keeps its PID and its connected entry is never
+  reinitialized), CMCP-R2b (identical resume during held handshake does not
+  respawn or disturb the pending connect);
+  `client-mcp-lifecycle.test.ts` three new borrowed-discovery fence cases
+  (queued apply during the gated final `status()` read returns the NEW
+  applied face, not a stale mix; detach+adopt during the read re-reads
+  instead of returning the stale snapshot; a stale identical-resume health
+  probe cannot trigger a second apply over a newer desired);
+  `workflow-child-mcp-borrow.test.ts` three
+  new cases (late port apply while script child waits → first ModelRequest
+  carries the inherited tool + real echo; `runWorkflow` facade child during
+  held handshake likewise; child cancellation while waiting settles promptly
+  without aborting the parent's handshake). Fixture additions:
+  `MCP_FIXTURE_INITIALIZE_RELEASE_FILE` (deterministic handshake gate),
+  HTTP/SSE fixture fixed-port + `initializeRequests()` counters;
+  `acp-mcp-core-fixture.ts` gains `appFactoryHooks` barriers.
+
+## Verify commands run (review 3)
+
+All via `mise exec --` unless noted; logs and exit codes under
+`/home/daniel/.local/state/piz-acp-mcp-009cbbe5/review3-*.log`.
+
+Evidence correction recorded in rework 1: `review3-cli-tests.log` and
+`review3-typecheck.log` captured only a `cd` failure from a wrong relative
+path (`EXIT:1`), not the actual runs — the interactive runs themselves did
+pass, but those two log files are not proof. The exact intended checks were
+re-run with absolute cwd and fresh logs under `rework1-*` (see the rework-1
+section below), which is the authoritative artifact for cli 13/13 and
+typecheck 15/15.
+
+- `apps/zcode-cli`: `turbo run build --filter=@zcode/bootstrap...
+  --filter=@zcode/contracts...` → exit 0 (library builds only, needed so
+  bootstrap tests see the changed `@zcode/core`/`@zcode/adapters` `dist/`).
+- `packages/bootstrap`: `vitest run
+  tests/acp-mcp-protocol-lifecycle.test.ts
+  tests/workflow-child-mcp-borrow.test.ts
+  tests/script-workflow-child-runtime.test.ts` → 49/49 pass, exit 0
+  (`review3-bootstrap-tests.log`).
+- `packages/core`: `vitest run tests/mcp-client-config.test.ts` → 10/10,
+  exit 0 (`review3-core-tests.log`).
+- `packages/cli`: `node --disable-warning=DEP0205 --import tsx --test
+  tests/acp-mcp-e2e.test.ts tests/acp-sessions.test.ts` → 13/13, exit 0
+  (re-run logged at `rework1-cli-tests.log`; the review-3 log file is a
+  broken-cwd artifact — see correction note above).
+- `apps/zcode-cli`: `turbo run typecheck --filter=@zcode/bootstrap
+  --filter=@zcode/core --filter=@zcode/adapters --filter=@zcode/cli` → 15/15
+  tasks, exit 0 (re-run logged at `rework1-typecheck.log`; turbo resolved
+  via the repo-root binary — no local `.bin/turbo` in the nested workspace).
+- Throwaway `tsc --noEmit` over the four changed bootstrap test/helper files:
+  0 errors in changed files; remaining diagnostics are pre-existing baseline
+  helpers (`registry-backed-test-app.ts`, `test-agent-runtime.ts`,
+  `provider-config-fixtures.ts`, one unchanged `generateText` stub missing
+  `usage` in `client-mcp-lifecycle.test.ts:186`) — same class as rework-5.
+  (Re-run logged at `rework1-test-tsc.log`.)
+- Repo root: `pnpm architecture:check --changed` → OK, 0 violations
+  (`review3-arch.log`; note `bootstrap/src/app`, `core/src/runtime`,
+  `adapters/src/mcp` are not managed roots — no controlled context exists for
+  them); `git diff --check` → clean; changed-file `oxlint` → 0 errors,
+  4 warnings, all pre-existing baseline lines untouched by the diff
+  (`review3-diffcheck-oxlint.log`).
+- `pnpm --dir apps/zcode-cli lint` is environment-blocked at baseline:
+  `run-cli-lint.mjs` execs `npm_execpath` as a node script, but the installed
+  pnpm 10.33.2 is a standalone ELF (`@pnpm/exe`), so `node <elf>` fails with
+  `SyntaxError` before any package runs — identical failure without this
+  delta. The underlying per-package `oxlint src --no-ignore` was run directly
+  instead (core 0 errors, adapters 0 errors, bootstrap only registered
+  max-lines errors on `create-app.ts`/`server.ts` plus baseline warnings on
+  unchanged lines).
+- Red reproductions (temporary local reversals, all restored and re-verified
+  green): R1 — cutting `mcpClientDetachSignal` in `server-operations.ts`
+  makes CMCP-R1a/R1b fail with an admitted/leaked stdio child; R2 — forcing
+  `retryRequested=false` in built `core/dist` makes CMCP-R2 fail (`h1` never
+  reconnects); R3 — skipping the readiness wait in built `prepareBorrowedMcp`
+  makes the late-apply/facade/cancellation cases fail (model request before
+  handshake release). Rebuilt/restore-verified; no `TEMP-RED-REPRO` markers
+  remain in src or dist. (Re-run with saved logs under `rework1-red-*`.)
+- No disposable fixture processes left running after the pass.
+
+## Verify commands run (review 3, rework 1)
+
+All via `mise exec --` with absolute cwd recorded inside each log; logs and
+exit codes under `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/rework1-*`.
+
+- `apps/zcode-cli`: `turbo run build --filter=@zcode/bootstrap...
+  --filter=@zcode/contracts...` → 9/9 tasks, exit 0
+  (`rework1-build.log`; prerequisite so bootstrap tests see the changed
+  `@zcode/core` `dist/`).
+- `packages/bootstrap`: `vitest run
+  tests/acp-mcp-protocol-lifecycle.test.ts
+  tests/workflow-child-mcp-borrow.test.ts
+  tests/script-workflow-child-runtime.test.ts
+  tests/client-mcp-lifecycle.test.ts` → 57/57 pass, exit 0
+  (`rework1-bootstrap-tests.log`; adds the three borrowed-discovery fence
+  cases and the strengthened CMCP-R2).
+- `packages/core`: `vitest run tests/mcp-client-config.test.ts` → 10/10,
+  exit 0 (`rework1-core-tests.log`).
+- `packages/cli`: `node --disable-warning=DEP0205 --import tsx --test
+  tests/acp-mcp-e2e.test.ts tests/acp-sessions.test.ts` → 13/13, exit 0
+  (`rework1-cli-tests.log`; absolute cwd — replaces the broken review-3 log).
+- `apps/zcode-cli`: `turbo run typecheck --filter=@zcode/bootstrap
+  --filter=@zcode/core --filter=@zcode/adapters --filter=@zcode/cli` → 15/15
+  tasks, exit 0 (`rework1-typecheck.log`; absolute cwd).
+- Throwaway `tsc --noEmit` over the changed bootstrap test/helper files via
+  a temporary `tsconfig.rework1-check.json` (deleted after the run): 20
+  diagnostics, all pre-existing baseline helper/fixture stubs in untouched
+  files (`test-agent-runtime.ts`, `registry-backed-test-app.ts`,
+  `provider-config-fixtures.ts`, `../core/tests/test-runtime-model.ts`) plus
+  one baseline `generateText` stub in `client-mcp-lifecycle.test.ts`
+  (byte-identical to the baseline line; the file was never in a package
+  tsconfig). 0 errors in any line this delta added
+  (`rework1-test-tsc.log`).
+- Red reproductions re-run with saved logs (temporary local reversals, all
+  restored and re-verified green): `rework1-red-r1.log` (cut
+  `mcpClientDetachSignal` → CMCP-R1a/R1b fail), `rework1-red-r2.log`
+  (`retryRequested=false` → identical resume after endpoint recovery never
+  reconnects `h1`), `rework1-red-r3fence.log` (pre-fence `prepareBorrowedMcp`
+  → mixed stale snapshot returned; 2 fence tests fail),
+  `rework1-red-desired-fence.log` (desired-generation recheck removed →
+  stale health probe triggers a second apply: `connectCalls() === 2`).
+- `git diff --check` → clean; no `TEMP-RED-REPRO` markers in src or dist;
+  no disposable fixture processes left running.
+
 ## Verify commands run (rework 5)
 
 All via `mise exec --` from the stated directories; full output and exit codes

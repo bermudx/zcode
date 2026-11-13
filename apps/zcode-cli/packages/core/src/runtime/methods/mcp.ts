@@ -12,7 +12,7 @@ import type {
   TraceContext,
 } from "../deps.js";
 import type { AgentRuntimeInternal, McpConnectOperation } from "../internal.js";
-import type { AgentRuntimeConfig } from "../types.js";
+import type { AgentRuntimeConfig, BorrowedMcpAccess } from "../types.js";
 import type { McpToolDescriptor, PluginReferenceCatalog } from "@zcode/contracts";
 
 const MCP_SESSION_OAUTH_AUTHORIZATION_TIMEOUT_MS = 15_000;
@@ -66,6 +66,46 @@ export function startMcpStartup(
 ): Promise<McpConnectionSnapshot> | undefined {
   if (this.mcpInitialized) return this.mcpStartupPromise;
   this.mcpInitialized = true;
+
+  // workflow/script 子会话借用父 MCP（评审 R3）：port/config 都不是自己的，
+  // startup 唯一要做的是 await 父侧就绪快照。借用分支先于无 port/disabled
+  // 早退——port 此刻还没有才是常态。
+  if (this.borrowMcpAccess) {
+    const borrowEpoch = this.mcpAttachEpoch;
+    const borrow = this.borrowMcpAccess({
+      signal: this.shutdownSignal,
+      traceContext,
+    })
+      .then((access) => {
+        // 等待期间 child 自己的 shutdown/detach/换代已发生：旧快照不得落地。
+        if (
+          this.mcpClosed ||
+          !this.mcpClientAttached ||
+          borrowEpoch !== this.mcpAttachEpoch
+        ) {
+          return { statuses: {}, tools: [] };
+        }
+        if (access.port) this.mcpPort = access.port;
+        if (access.config !== undefined) {
+          // 保留父 APPLIED 的 enabled/trust 元数据；servers 置空——子会话只做
+          // discovery，绝不接管父连接生命周期。
+          this.config.mcp = { ...access.config, servers: {} };
+        }
+        return access.snapshot;
+      })
+      .catch((error: unknown) => {
+        this.logger?.warn("MCP borrow access failed", {
+          ...traceContextToLogContext(traceContext),
+          errorKind: mcpErrorKind(error),
+          event: "mcp.borrow.failed",
+          module: "core.runtime",
+          status: "failed",
+        });
+        return { statuses: {}, tools: [] };
+      });
+    this.mcpStartupPromise = this.trackResidencyBlockingWork(borrow);
+    return this.mcpStartupPromise;
+  }
 
   // client detach / 关闭期间不得借 startup 补连或复活 stdio（issue #31）；
   // attach 后 applyPendingMcpServers 走显式补连路径，不经过这里的 one-shot 门。
@@ -184,12 +224,10 @@ export async function initializeMcp(
   if (this.mcpToolsRegistered) return;
 
   const startup = this.startMcpStartup(traceContext);
-  const mcpPort = this.mcpPort;
-  if (!startup || !mcpPort) {
+  if (!startup || (!this.mcpPort && !this.borrowMcpAccess)) {
     this.mcpToolsRegistered = true;
     return;
   }
-  const serverCount = Object.keys(this.config.mcp?.servers ?? {}).length;
   const initEpoch = this.mcpAttachEpoch;
 
   try {
@@ -209,6 +247,13 @@ export async function initializeMcp(
       this.mcpToolsRegistered = true;
       return;
     }
+    // 借用路径的 port 在 startup 完成后才装上（评审 R3）；仍然缺席即空工具面。
+    const mcpPort = this.mcpPort;
+    if (!mcpPort) {
+      this.mcpToolsRegistered = true;
+      return;
+    }
+    const serverCount = Object.keys(this.config.mcp?.servers ?? {}).length;
     const registered = registerMcpTools(this.registry, mcpPort, snapshot.tools, {
       allowedTools: this.config.toolAllowlist,
       disallowedTools: this.config.toolDisallowlist,
@@ -311,7 +356,8 @@ export function getMcpPort(this: AgentRuntimeInternal): McpPort | undefined {
 
 /**
  * 已落地的生效 MCP 配置克隆——只读 config.mcp（APPLIED），绝不读 pending desired。
- * workflow/script 子会话借用父 port 时发现路径按它走（评审 S4）。
+ * 子会话借用不直接走这里：borrowMcpAccess/prepareBorrowedMcp 返回同款 APPLIED
+ * 快照（含代际栅栏，评审 R3）；本 getter 服务其余只读调用方。
  */
 export function getEffectiveMcpConfig(
   this: AgentRuntimeInternal,
@@ -325,12 +371,38 @@ export async function configureMcpServers(
 ): Promise<void> {
   if (this.mcpClosed) return;
   const next = structuredClone(servers);
+  // 「相同声明」比对的是当前生效声明（staged desired，否则 create 时的
+  // config.mcp.servers）——首次 identical resume 在 mcpDesiredServers 仍
+  // undefined 时也必须识别为 unchanged，否则 retry 判定根本到不了（评审 R2-修复）。
+  const currentDeclaration = this.mcpDesiredServers ?? this.config.mcp?.servers;
   const unchanged =
-    this.mcpDesiredServers !== undefined &&
-    mcpConfigFingerprint(this.mcpDesiredServers) === mcpConfigFingerprint(next);
-  // 语义相等（含凭据、键序无关的对象）即 no-op——但欠着重连/欠账时必须照常落地，
-  // detach 期间的同配置 resume 不能吞掉补连义务（issue #31 评审 R2）。
-  if (unchanged && !this.mcpReconnectNeeded) return;
+    currentDeclaration === undefined
+      ? // 从未声明过的会话显式下发（含空集）：仍按「变更」暂存，保住
+        // desired={} 的显式清空 provenance，不把首次下发吞成 no-op。
+        false
+      : mcpConfigFingerprint(currentDeclaration) === mcpConfigFingerprint(next);
+  // 语义相等（含凭据、键序无关的对象）不等于活连接（评审 R2-修复）：port 上
+  // 已 failed/disconnected/missing 的期望 server 需要显式 retry。读 status
+  // 前后的 desired/epoch 都必须复核——迟到读不得覆盖更新的配置或复活 detach。
+  if (unchanged && !this.mcpReconnectNeeded) {
+    const epoch = this.mcpAttachEpoch;
+    const desiredBefore = this.mcpDesiredServers;
+    const desiredVersion = this.mcpDesiredVersion;
+    const retryRequested = await detectMcpRetryNeeded(this, next);
+    // status 读期间 desired 可能被并发 configure 替换——迟到的健康判定不得
+    // 按旧声明立 retry，也不得覆盖更新的 desired（保留最新声明）。
+    if (
+      this.mcpClosed ||
+      epoch !== this.mcpAttachEpoch ||
+      this.mcpDesiredVersion !== desiredVersion ||
+      this.mcpDesiredServers !== desiredBefore
+    ) {
+      return;
+    }
+    if (!retryRequested) return;
+    // 声明没变、连接死了：不推进 desired 版本，只立补连旗标走既有边界路径。
+    this.mcpReconnectNeeded = true;
+  }
   if (!unchanged) {
     this.mcpDesiredServers = next;
     this.mcpDesiredVersion += 1;
@@ -338,6 +410,39 @@ export async function configureMcpServers(
   // 有在跑 / 排队 / 预留的回合时只暂存——本轮继续用旧连接，回合边界再落地。
   if (this.hasActiveOrQueuedTurnWork()) return;
   await this.applyPendingMcpServers();
+}
+
+/**
+ * 显式 configure/resume 的 retry 判定（评审 R2-修复）：只看当前 port.status 的
+ * 活事实——期望启用、不在在飞 connect、且 live 状态为 failed/disconnected/
+ * missing 的 server 才算欠连；connecting/disabled/untrusted 一律不打扰。
+ * 返回 false 时调用方保持原 no-op 语义（status 不可读时保守不判 retry）。
+ */
+async function detectMcpRetryNeeded(
+  runtime: AgentRuntimeInternal,
+  servers: Record<string, McpServerConfig>,
+): Promise<boolean> {
+  const desiredEnabled = Object.entries(servers)
+    .filter(([, config]) => config.enabled !== false)
+    .map(([name]) => name);
+  if (desiredEnabled.length === 0) return false;
+  // 有期望却没 port：资源缺失需重建（createMcpPort 在 apply 里补建）。
+  const port = runtime.mcpPort;
+  if (!port) return true;
+  const inFlight = new Set<string>();
+  for (const op of runtime.mcpInFlightConnects) {
+    for (const name of Object.keys(op.servers)) inFlight.add(name);
+  }
+  const statuses = await port.status().catch(() => undefined);
+  if (statuses === undefined) return false;
+  for (const name of desiredEnabled) {
+    if (inFlight.has(name)) continue;
+    const status = statuses[name]?.status;
+    if (status === undefined || status === "failed" || status === "disconnected") {
+      return true;
+    }
+  }
+  return false;
 }
 
 export async function setMcpClientAttached(
@@ -483,6 +588,9 @@ async function performMcpApply(
     // 连接开始时的 attachment epoch：connect/注册期间的 detach/attach 使本轮结果
     // 过期——只有当前 attached owner 允许提交 apply / 清 reconnect 旗标（评审 R2）。
     const epoch = this.mcpAttachEpoch;
+    // reconnect/显式 retry 触发的全量 connect 必须让池复用层重校验缓存条目：
+    // failed 的就地重连、live 的 ping 保活复用（评审 R2-修复）。
+    const revalidate = this.mcpReconnectNeeded;
     // 在飞登记跟随本次 connect await、finally 只删本条：startup 与并发/后续
     // apply 的记录互不覆盖，detach 并集按全表补齐在飞 server（评审 S2/F1）。
     const connectOp: McpConnectOperation = {
@@ -494,6 +602,7 @@ async function performMcpApply(
     let snapshot: McpConnectionSnapshot;
     try {
       snapshot = await port.connectConfiguredServers(desired, {
+        revalidate,
         signal: applySignal,
         oauthAuthorizationTimeoutMs: MCP_SESSION_OAUTH_AUTHORIZATION_TIMEOUT_MS,
         trace: this.rootTraceContext,
@@ -579,6 +688,95 @@ async function performMcpApply(
     this.mcpAppliedVersion = desiredVersion;
     this.mcpReconnectNeeded = false;
     return;
+  }
+}
+
+const EMPTY_BORROWED_MCP: BorrowedMcpAccess = {
+  snapshot: { statuses: {}, tools: [] },
+};
+
+/**
+ * 子会话借用入口（评审 R3）：等本 runtime 已排队的 apply tail 与 startup
+ * 落定，再按当前 port/status/tools 读一份快照。只等独立的 MCP 工作，从不
+ * 等父 turn 本身，也绝不替父落地 staged desired——active 回合内的 pending
+ * 配置对借用方不可见（保持 APPLIED 快照语义）。调用方 signal + 本 runtime
+ * shutdown 只取消「等待」，不取消父侧 connect。
+ */
+export async function prepareBorrowedMcp(
+  this: AgentRuntimeInternal,
+  input: { traceContext: TraceContext; signal: AbortSignal },
+): Promise<BorrowedMcpAccess> {
+  const ABORTED = Symbol("mcp.borrow.aborted");
+  // 等待/发现统一走这条：调用方 signal + 本 runtime shutdown 只取消「等」，
+  // 不取消父侧 connect/status 本身。
+  const raceAbort = async <T>(work: Promise<T>): Promise<T | typeof ABORTED> => {
+    const combined = AbortSignal.any([input.signal, this.shutdownSignal]);
+    if (combined.aborted) return ABORTED;
+    let abort: (() => void) | undefined;
+    try {
+      return await Promise.race<T | typeof ABORTED>([
+        work,
+        new Promise<never>((_, reject) => {
+          abort = () => reject(combined.reason);
+          combined.addEventListener("abort", abort, { once: true });
+        }),
+      ]);
+    } catch {
+      return ABORTED;
+    } finally {
+      if (abort) combined.removeEventListener("abort", abort);
+    }
+  };
+  // work 失败不等于 abort：tail/startup 落定（含失败）都继续走栅栏重读；
+  // 只有调用方/父 shutdown 信号才算取消。
+  const waitFor = async (work: Promise<unknown>): Promise<boolean> =>
+    (await raceAbort(work.then(
+      () => true as const,
+      () => true as const,
+    ))) === true;
+  // tail/startup 在等待期间可能被新一轮工作替换——重读身份直到两次捕获一致。
+  // 发现读（status/listTools）也必须在同一栅栏内：读期间发生 queued apply、
+  // detach+adopt 或 port 换代会让 config/port/status 混代——任何身份变化都
+  // 丢弃本轮并重读稳定的 applied 面（评审 R3-返工）。
+  for (;;) {
+    const tail = this.mcpApplyTail;
+    const startup = this.mcpStartupPromise;
+    if (!(await waitFor(tail))) return EMPTY_BORROWED_MCP;
+    if (!(await waitFor(startup ?? Promise.resolve()))) return EMPTY_BORROWED_MCP;
+    if (tail !== this.mcpApplyTail || startup !== this.mcpStartupPromise) continue;
+    // owner 在等待期间变了（detach/shutdown）：detached 的正确答案是空；
+    // 旧快照不得交还给借用方。
+    if (this.mcpClosed || !this.mcpClientAttached) return EMPTY_BORROWED_MCP;
+    const epoch = this.mcpAttachEpoch;
+    const appliedVersion = this.mcpAppliedVersion;
+    const configRef = this.config.mcp;
+    const config = configRef === undefined ? undefined : structuredClone(configRef);
+    const port = this.mcpPort;
+    if (!port || config?.enabled === false) {
+      return { ...EMPTY_BORROWED_MCP, ...(config !== undefined ? { config } : {}) };
+    }
+    const statuses = await raceAbort(port.status().catch(() => ({})));
+    if (statuses === ABORTED) return EMPTY_BORROWED_MCP;
+    const tools = await raceAbort(port.listTools().catch(() => []));
+    if (tools === ABORTED) return EMPTY_BORROWED_MCP;
+    if (this.mcpClosed || !this.mcpClientAttached || input.signal.aborted) {
+      return EMPTY_BORROWED_MCP;
+    }
+    if (
+      epoch !== this.mcpAttachEpoch ||
+      appliedVersion !== this.mcpAppliedVersion ||
+      tail !== this.mcpApplyTail ||
+      startup !== this.mcpStartupPromise ||
+      port !== this.mcpPort ||
+      configRef !== this.config.mcp
+    ) {
+      continue;
+    }
+    return {
+      ...(config !== undefined ? { config } : {}),
+      port,
+      snapshot: { statuses, tools },
+    };
   }
 }
 

@@ -139,6 +139,16 @@ export interface AgentRuntimeInternal
    */
   createMcpPort?: () => McpPort | undefined;
   /**
+   * client attachment 信号的退订函数（评审 R1）：只存退订，不存第二份生命周期
+   * 状态；信号 abort 后自清，beginShutdown 兜底解除。
+   */
+  mcpDetachUnsubscribe?: () => void;
+  /**
+   * 借用方 MCP 入口（评审 R3）：workflow/script 子会话由父注入；startup 阶段
+   * await 一次拿 {port, config, snapshot}，缺席即普通自有 port 语义。
+   */
+  borrowMcpAccess?: AgentRuntimeDeps["borrowMcpAccess"];
+  /**
    * client 注入 MCP 的期望/已生效配置（`Record<serverName, config>`）。undefined =
    * 从未收到 client 声明，继续用 config.mcp.servers；显式 {} = client 清空，
    * 不回退文件/plugin 配置。版本号只在 desired 变化时递增，apply 按版本判断是否欠账。

@@ -295,6 +295,15 @@ export interface ZCodeProtocolAgentServerContext {
   adoptDetachedSession?(sessionId: string): Promise<boolean>;
   /** 仅覆盖异步创建窗口，结束即释放；输入命令仍由 CommandInbox 排队。 */
   sessionCreationIds?: Set<string>;
+  /**
+   * 本 owner 当前 client attachment 的 detach 信号（issue #31 评审 R1）：
+   * session factory 物化窗口横跨 detach 时，record 尚未登记、detach 扫描
+   * 看不到它——factory 在准备调用时取走本信号交给 runtime，attachment 死亡
+   * 即可靠它落下 client MCP admission 闸门。缺席（测试/普通 context）保持旧语义。
+   */
+  getClientDetachSignal?: () => AbortSignal;
+  /** 本 owner 的 client 当前 attached；detached 与 terminated 都返回 false。 */
+  isClientAttached?: () => boolean;
   notify(notification: ZCodeProtocolNotification): void;
   requestClient<T>(
     method: ZCodeProtocolMethod,
