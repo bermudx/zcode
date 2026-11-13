@@ -166,6 +166,8 @@ test("CMCP01+CMCP11 allow: ACP new forwards stdio+http+sse; permission allow run
   const sessions = new AcpCoreSessions({
     env: {},
     ensureConnected: async () => ({ socketPath: fixture.socketPath }),
+    // 与改动前同语义：字段显式 false，core 依旧 fail-closed。
+    workflowMode: "disabled",
   });
   const app = createAcpAgentApp({ sessions, version: "1.2.3" });
   const { agentStream, clientStream } = createGuardedAcpTransport();
@@ -278,6 +280,8 @@ test("CMCP11 reject: denied permission never reaches the MCP fixture and returns
   const sessions = new AcpCoreSessions({
     env: {},
     ensureConnected: async () => ({ socketPath: fixture.socketPath }),
+    // 与改动前同语义：字段显式 false，core 依旧 fail-closed。
+    workflowMode: "disabled",
   });
   const app = createAcpAgentApp({ sessions, version: "1.2.3" });
   const { agentStream, clientStream } = createGuardedAcpTransport();
@@ -346,6 +350,8 @@ test("CMCP12 ACP boundary: malformed/duplicate mcpServers fail with INVALID_PARA
   const sessions = new AcpCoreSessions({
     env: {},
     ensureConnected: async () => ({ socketPath: fixture.socketPath }),
+    // 与改动前同语义：字段显式 false，core 依旧 fail-closed。
+    workflowMode: "disabled",
   });
   const app = createAcpAgentApp({ sessions, version: "1.2.3" });
   const { agentStream, clientStream } = createGuardedAcpTransport();
@@ -444,6 +450,8 @@ test("CMCP04 bound resume forwards mcpServers to the warm session; unchanged ent
   const sessions = new AcpCoreSessions({
     env: {},
     ensureConnected: async () => ({ socketPath: fixture.socketPath }),
+    // 与改动前同语义：字段显式 false，core 依旧 fail-closed。
+    workflowMode: "disabled",
   });
   const app = createAcpAgentApp({ sessions, version: "1.2.3" });
   const { agentStream, clientStream } = createGuardedAcpTransport();
@@ -571,5 +579,90 @@ test("CMCP04 bound resume forwards mcpServers to the warm session; unchanged ent
     agentConnection.close();
     await fixture.close();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue #5: onDemand ACP session keeps /workflow deferred, then activates on the command (real core)", { timeout: 30000 }, async () => {
+  const requests: ModelRequest[] = [];
+  const fixture = await createAcpMcpCoreFixture({
+    modelExecutor: {
+      generateText: async (request) => {
+        requests.push(request);
+        return {
+          finishReason: "stop",
+          text: "done",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        } as ModelResult;
+      },
+    },
+  });
+  const sessions = new AcpCoreSessions({
+    env: {},
+    ensureConnected: async () => ({ socketPath: fixture.socketPath }),
+    workflowMode: "onDemand",
+  });
+  const app = createAcpAgentApp({ sessions, version: "1.2.3" });
+  const { agentStream, clientStream } = createGuardedAcpTransport();
+  const agentConnection = app.connect(agentStream);
+  const testClient = client({ name: "e2e-client" }).onRequest(
+    methods.client.session.requestPermission,
+    ({ params }) => ({
+      outcome: {
+        outcome: "selected" as const,
+        optionId: pickOptionByKind(params.options, "allow_once"),
+      },
+    }),
+  );
+  const clientConnection = testClient.connect(clientStream);
+  try {
+    const agent = clientConnection.agent;
+    await agent.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await agent.request<{ sessionId: string }>(methods.agent.session.new, {
+      cwd: fixture.workspace,
+      mcpServers: [],
+    });
+    // onDemand：首个普通 prompt 的模型请求不得带工作流工具面（推迟到 /workflow）。
+    const plain = await agent.request<{ stopReason: string }>(methods.agent.session.prompt, {
+      prompt: [{ text: "say hi", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(plain.stopReason, "end_turn");
+    assert.equal(
+      requests[0]?.tools?.some((tool) => tool.name === "CreateWorkflow"),
+      false,
+      "workflow tools must stay deferred before /workflow",
+    );
+
+    const prompt = await agent.request<{ stopReason: string }>(methods.agent.session.prompt, {
+      prompt: [{ text: "/workflow test", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(prompt.stopReason, "end_turn");
+    // 激活先于本轮首个模型请求（launch.md「On demand: activation」）。
+    assert.ok(
+      requests[1]?.tools?.some((tool) => tool.name === "CreateWorkflow"),
+      "CreateWorkflow missing from the /workflow turn's first model request",
+    );
+    // 持久化的激活 entry：runtime/dynamic_workflow_activation，轮询到落库。
+    type Entries = Awaited<
+      ReturnType<NonNullable<typeof fixture.sessionStore.sessionEntries>>
+    >;
+    let entries: Entries = [];
+    for (let i = 0; i < 200 && entries.length === 0; i += 1) {
+      entries =
+        (await fixture.sessionStore.sessionEntries?.({
+          sessionID: created.sessionId as Parameters<
+            NonNullable<typeof fixture.sessionStore.sessionEntries>
+          >[0]["sessionID"],
+          type: "runtime/dynamic_workflow_activation",
+        })) ?? [];
+      if (entries.length === 0) await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(entries.length, 1);
+  } finally {
+    await sessions.closeAll().catch(() => undefined);
+    clientConnection.close();
+    agentConnection.close();
+    await fixture.close();
   }
 });

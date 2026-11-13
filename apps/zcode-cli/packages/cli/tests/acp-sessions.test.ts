@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   ZCODE_PROTOCOL_VERSION,
   zcodeProtocolErrorCodes,
+  type DynamicWorkflowMode,
   type ZCodeProtocolMcpServer,
 } from "@zcode/shared";
 import { AcpCoreSessions } from "../src/acp/acp-sessions.js";
@@ -49,7 +50,7 @@ function snapshot(sessionId: string) {
   };
 }
 
-async function fixture(t: test.TestContext) {
+async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = "onDemand") {
   const directory = await mkdtemp(join(tmpdir(), "acp-sessions-"));
   const socketPath = join(directory, "core.sock");
   const sockets = new Set<Socket>();
@@ -146,6 +147,7 @@ async function fixture(t: test.TestContext) {
       connectedRefs.push(ref);
       return { socketPath };
     },
+    workflowMode,
   });
   t.after(async () => {
     await sessions.closeAll();
@@ -408,6 +410,53 @@ test("CMCP14 replay snapshot tracks bound resume: success replaces, omit/failure
   assert.equal(recovery.length, 1);
   assert.deepEqual(recovery[0].params.mcpServers, declB);
 });
+
+// issue #5：ACP lane 的每条 session/create 与 session/resume 都显式带灰度门字段；
+// 缺席 = core 按协议 fail-closed（这正是 issue 的故障形态）。fixture 的默认 mode
+// 与 run.ts 的 ACP 缺省一致（onDemand）。
+test("issue #5: every create/resume shape carries the resolved workflow gate (onDemand)", { timeout: 15000 }, async (t) => {
+  const f = await fixture(t);
+  const session = await f.sessions.open("/workspace");
+  // warm-record resume（mcpServers 声明路径）也带同一份字段。
+  await f.sessions.resume({
+    cwd: "/workspace",
+    sessionId: session.handle.sessionId,
+    mcpServers: fakeMcp("warm"),
+  });
+  // 未绑定会话的冷 resume。
+  await f.sessions.resume({ cwd: "/other", sessionId: "cold-resume" });
+  // core 重启后的冷恢复 resume（AttachRuntime.recoverSession）同样必须带——
+  // 否则冷物化 record 按协议 fail-closed，已激活会话丢工具面。
+  const wait = reconnectedBarrier(session.handle);
+  f.evictSessions(session.handle.sessionId);
+  for (const socket of f.sockets) socket.destroy();
+  await wait();
+  const creates = f.requests.filter((r) => r.method === "session/create");
+  const resumes = f.requests.filter((r) => r.method === "session/resume");
+  assert.equal(creates.length, 1);
+  // warm（mcpServers）+ cold + 冷恢复三条 session/resume。
+  assert.ok(resumes.length >= 3, `expected >=3 resume requests, got ${resumes.length}`);
+  for (const r of [...creates, ...resumes]) {
+    assert.equal(r.params.dynamicWorkflowEnabled, true, `${r.method} params`);
+    assert.equal(r.params.dynamicWorkflowMode, "onDemand", `${r.method} params`);
+  }
+});
+
+for (const mode of ["disabled", "alwaysOn"] as const) {
+  test(`issue #5: --workflow-mode ${mode} reaches create/resume unchanged`, async (t) => {
+    const f = await fixture(t, mode);
+    await f.sessions.open("/workspace");
+    await f.sessions.resume({ cwd: "/other", sessionId: `resume-${mode}` });
+    const creates = f.requests.filter((r) => r.method === "session/create");
+    const resumes = f.requests.filter((r) => r.method === "session/resume");
+    assert.equal(creates.length, 1);
+    assert.equal(resumes.length, 1);
+    for (const r of [...creates, ...resumes]) {
+      assert.equal(r.params.dynamicWorkflowEnabled, mode !== "disabled");
+      assert.equal(r.params.dynamicWorkflowMode, mode);
+    }
+  });
+}
 
 test("CMCP14 replay snapshot survives caller mutation; per-session isolation; close excludes recovery", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);

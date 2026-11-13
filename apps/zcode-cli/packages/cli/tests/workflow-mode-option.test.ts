@@ -185,6 +185,49 @@ for (const argv of [["app-server"], ["agent-server"], ["login"], ["skills"]] as 
   });
 }
 
+// ── issue #5：acp lane ──────────────────────────────────────────────────────
+// ACP 缺省 onDemand（与其他 lane 的 disabled 不同）：mode 经 runAcpCommand
+// 第五参数进会话层，逐条 create/resume 下发灰度字段。
+
+test("acp with a bogus --workflow-mode exits 1 naming the three values", async () => {
+  const ctx = createContext(["acp", "--workflow-mode", "bogus"]);
+  assert.equal(await run(ctx, {}), 1);
+  assert.match(
+    ctx.stderr.output(),
+    /Unsupported --workflow-mode value: bogus\. Supported modes: disabled, onDemand, alwaysOn\./,
+  );
+});
+
+test("acp --workflow-mode alwaysOn reaches runAcpCommand with alwaysOn", async () => {
+  let seen: string | undefined;
+  const ctx = createContext(["acp", "--workflow-mode", "alwaysOn"]);
+  assert.equal(
+    await run(ctx, {
+      runAcpCommand: async (_ctx, _options, _deps, _version, workflowMode) => {
+        seen = workflowMode;
+        return 0;
+      },
+    }),
+    0,
+  );
+  assert.equal(seen, "alwaysOn");
+});
+
+test("acp without --workflow-mode reaches runAcpCommand with the onDemand default", async () => {
+  let seen: string | undefined;
+  const ctx = createContext(["acp"]);
+  assert.equal(
+    await run(ctx, {
+      runAcpCommand: async (_ctx, _options, _deps, _version, workflowMode) => {
+        seen = workflowMode;
+        return 0;
+      },
+    }),
+    0,
+  );
+  assert.equal(seen, "onDemand");
+});
+
 // ── DWG-17：headless ─────────────────────────────────────────────────────────
 
 test("headless /workflow under the default mode exits 1 before any app exists", async () => {

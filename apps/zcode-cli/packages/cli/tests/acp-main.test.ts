@@ -37,6 +37,7 @@ function run(stdin: NodeJS.ReadableStream, stdout: NodeJS.WritableStream) {
     stdin,
     stdout,
     version: "1.2.3",
+    workflowMode: "onDemand",
   });
   return { diagnostics: () => diagnostics, result };
 }

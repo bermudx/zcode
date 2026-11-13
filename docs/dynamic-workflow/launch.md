@@ -2769,11 +2769,21 @@ exact spelling, surrounding whitespace ignored); anything else fails at the CLI 
 error that names the three values, exit code 1, before any app or session exists. There is no
 environment variable and no config key; `ZCODE_DYNAMIC_WORKFLOW_MODE` stays Host-only.
 
-**Where the flag is accepted.** With `-p`/`--prompt`, with `--target`, and for the TUI (no
-command, or `tui`). Anywhere else it is an error with exit code 1: on `app-server` and
-`agent-server` because the Host owns the decision there and a flag would give the mode a
-second owner; on the other subcommands (`login`, `plugins`, `skills`, `doctor`, …) because
-they create no session for it to shape.
+**Where the flag is accepted.** With `-p`/`--prompt`, with `--target`, for the TUI (no
+command, or `tui`), and for `acp`. Anywhere else it is an error with exit code 1: on
+`app-server` and `agent-server` because the Host owns the decision there and a flag would
+give the mode a second owner; on the other subcommands (`login`, `plugins`, `skills`,
+`doctor`, …) because they create no session for it to shape.
+
+**The ACP lane (`zcode acp` / `piz acp`).** The stdio ACP adapter joins the flag scope with
+a different default: when the flag is absent the mode is `onDemand`, not `disabled`. ACP
+sessions otherwise could never reach dynamic workflows — the adapter has no Host and no
+settings surface, so without a sent mode the core keeps its fail-closed answer. The session
+layer writes `dynamicWorkflowEnabled = mode !== "disabled"` and `dynamicWorkflowMode = mode`
+onto every `session/create` and `session/resume` (including cold-recovery resumes after a
+core restart), and the first `/workflow` in a session activates the tool surface exactly as
+described above. `--workflow-mode disabled` restores the previous fail-closed behaviour
+unchanged. The thin `zcode-attach acp` entry accepts the same flag after the subcommand.
 
 **How it reaches the runtime.** The CLI entry resolves the mode once per process and writes
 both runtime-config fields explicitly on every app it creates (the first one and those behind
