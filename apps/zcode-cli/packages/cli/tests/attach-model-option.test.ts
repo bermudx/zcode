@@ -4,13 +4,18 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { ZCODE_PROTOCOL_VERSION, type ZCodeModelOption } from "@zcode/shared";
+import {
+  ZCODE_PROTOCOL_VERSION,
+  type DynamicWorkflowMode,
+  type ZCodeModelOption,
+} from "@zcode/shared";
 import type { RunContext } from "@zcode/shared-types";
 import { run } from "../src/run.js";
 import {
   runAttachCommand,
   resolveInitialModelRef,
 } from "../src/attach/attach-command.js";
+import { workflowModeSessionParams } from "../src/workflow-mode.js";
 import { parseAttachEntryArgs } from "../src/attach/attach-entry-args.js";
 import {
   GLM_COMPACT_CONTEXT_WINDOW,
@@ -162,7 +167,11 @@ async function startFakeCore(
 interface AttachHarness {
   coreRequests: Captured[];
   destroy: () => Promise<void>;
-  runAttach: (initialModel?: string, resume?: { continueSession?: boolean }) => Promise<{
+  runAttach: (
+    initialModel?: string,
+    resume?: { continueSession?: boolean },
+    options?: { submitInsideTui?: readonly string[]; workflowMode?: DynamicWorkflowMode },
+  ) => Promise<{
     exitCode: number;
     initialModel?: string;
     initialResultModel?: string;
@@ -193,6 +202,10 @@ async function startAttachHarness(
     if (request.method === "session/subscribe") {
       return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
     }
+    if (request.method === "session/messages") {
+      // /resume 后的 loadSessionTranscript：回包按共享 schema 校验，缺 messages 键即拒。
+      return { messages: [] };
+    }
     if (request.method === "session/setModel") {
       const model = request.params.model as { modelId: string; providerId: string };
       currentModelId = model.modelId;
@@ -205,6 +218,10 @@ async function startAttachHarness(
   const runAttach = (
     initialModel?: string,
     resume?: { continueSession?: boolean },
+    attachOptions?: {
+      submitInsideTui?: readonly string[];
+      workflowMode?: DynamicWorkflowMode;
+    },
   ) => {
     const stderrChunks: string[] = [];
     const ctx = {
@@ -226,6 +243,12 @@ async function startAttachHarness(
       resolveWorkspaceGitBranch: async () => undefined,
       runTui: async (options: Record<string, unknown>) => {
         tuiOptions = options;
+        // TUI 接管后依次提交（/new、/resume <id> 等 commandCenter 路由）。
+        for (const input of attachOptions?.submitInsideTui ?? []) {
+          await (
+            options.submitPrompt as (input: string, opts?: object) => Promise<unknown>
+          )(input, {});
+        }
         return 0;
       },
     } as never;
@@ -237,6 +260,8 @@ async function startAttachHarness(
       "pi",
       { continueSession: resume?.continueSession === true },
       initialModel,
+      undefined,
+      attachOptions?.workflowMode,
     ).then((exitCode) => {
       const initialResult = tuiOptions?.initialResult as
         | { model?: string }
@@ -701,4 +726,128 @@ test("run：--model 不能用于非 tui 命令", async () => {
   const h = scopeHarness(["--model", "zai/glm-5.3"]);
   assert.equal(await run(h.ctx, h.deps), 1);
   assert.match(h.stderr(), /--model can only be used with tui --shared-core/);
+});
+
+// ── --workflow-mode：attach 车道会话级灰度 ──
+// attach 车道（zcode-attach/piz、zcode attach、tui --shared-core）没有 Host
+// 下发 mode，进程旗标的解析值必须随 session/create 与每次 session/resume 下发，
+// 服务端按参数优先裁决（launch.md「The standalone CLI: `--workflow-mode`」）。
+// 不能走 workspace/updateDynamicWorkflowPolicy：单 core 跨 workspace/客户端共享，
+// 进程级偏好会被别的 pane 覆盖或泄漏。旗标缺席 = 两键都不下发（fail-closed 不变）。
+
+test("workflowModeSessionParams：disabled 不发参数，其余 mode 显式携带两键", () => {
+  assert.deepEqual(workflowModeSessionParams("disabled"), {});
+  assert.deepEqual(workflowModeSessionParams("onDemand"), {
+    dynamicWorkflowEnabled: true,
+    dynamicWorkflowMode: "onDemand",
+  });
+  assert.deepEqual(workflowModeSessionParams("alwaysOn"), {
+    dynamicWorkflowEnabled: true,
+    dynamicWorkflowMode: "alwaysOn",
+  });
+});
+
+test("zcode-attach 解析 --workflow-mode 并校验取值", () => {
+  assert.equal(
+    parseAttachEntryArgs(["--workflow-mode", "onDemand"]).workflowMode,
+    "onDemand",
+  );
+  assert.equal(
+    parseAttachEntryArgs(["--workflow-mode", "alwaysOn"]).workflowMode,
+    "alwaysOn",
+  );
+  // 缺值与非法值都显式失败（与 --model/--resume 同判），不静默降级成 disabled。
+  assert.throws(
+    () => parseAttachEntryArgs(["--workflow-mode"]),
+    /--workflow-mode requires a value/,
+  );
+  assert.throws(
+    () => parseAttachEntryArgs(["--workflow-mode", "sometimes"]),
+    /Unsupported --workflow-mode value: sometimes\. Supported modes: disabled, onDemand, alwaysOn\./,
+  );
+});
+
+test("create 路径：--workflow-mode onDemand → session/create 携带灰度参数", async () => {
+  const h = await startAttachHarness();
+  try {
+    const result = await h.runAttach(undefined, undefined, { workflowMode: "onDemand" });
+    assert.equal(result.exitCode, 0, result.stderr);
+    const create = h.coreRequests.find((r) => r.method === "session/create");
+    assert.ok(create, "session/create request was sent");
+    assert.equal(create.params.dynamicWorkflowEnabled, true);
+    assert.equal(create.params.dynamicWorkflowMode, "onDemand");
+  } finally {
+    await h.destroy();
+  }
+});
+
+test("resume 路径：onDemand + 启动恢复目标 → session/resume 携带灰度参数", async () => {
+  const h = await startAttachHarness();
+  try {
+    const result = await h.runAttach(
+      undefined,
+      { continueSession: true },
+      { workflowMode: "onDemand" },
+    );
+    assert.equal(result.exitCode, 0, result.stderr);
+    const resumes = h.coreRequests.filter((r) => r.method === "session/resume");
+    assert.equal(resumes.length, 1);
+    assert.equal(resumes[0]?.params.dynamicWorkflowEnabled, true);
+    assert.equal(resumes[0]?.params.dynamicWorkflowMode, "onDemand");
+    assert.equal(h.coreRequests.some((r) => r.method === "session/create"), false);
+  } finally {
+    await h.destroy();
+  }
+});
+
+test("旗标缺席或显式 disabled：create 与 resume 都不携带灰度键", async () => {
+  const h = await startAttachHarness();
+  try {
+    assert.equal((await h.runAttach()).exitCode, 0);
+    const create = h.coreRequests.find((r) => r.method === "session/create");
+    assert.ok(create, "session/create request was sent");
+    assert.equal("dynamicWorkflowEnabled" in create.params, false);
+    assert.equal("dynamicWorkflowMode" in create.params, false);
+  } finally {
+    await h.destroy();
+  }
+  const h2 = await startAttachHarness();
+  try {
+    const result = await h2.runAttach(
+      undefined,
+      { continueSession: true },
+      { workflowMode: "disabled" },
+    );
+    assert.equal(result.exitCode, 0, result.stderr);
+    const resume = h2.coreRequests.find((r) => r.method === "session/resume");
+    assert.ok(resume, "session/resume request was sent");
+    assert.equal("dynamicWorkflowEnabled" in resume.params, false);
+    assert.equal("dynamicWorkflowMode" in resume.params, false);
+  } finally {
+    await h2.destroy();
+  }
+});
+
+test("/new 与 /resume <id>：onDemand 下新会话请求携带同一灰度参数", async () => {
+  const h = await startAttachHarness();
+  try {
+    const result = await h.runAttach(undefined, undefined, {
+      submitInsideTui: ["/new", "/resume sess-1"],
+      workflowMode: "onDemand",
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+    const creates = h.coreRequests.filter((r) => r.method === "session/create");
+    assert.equal(creates.length, 2, "startup create + /new create");
+    for (const call of creates) {
+      assert.equal(call.params.dynamicWorkflowEnabled, true);
+      assert.equal(call.params.dynamicWorkflowMode, "onDemand");
+    }
+    const resumes = h.coreRequests.filter((r) => r.method === "session/resume");
+    assert.equal(resumes.length, 1);
+    assert.equal(resumes[0]?.params.sessionId, SID);
+    assert.equal(resumes[0]?.params.dynamicWorkflowEnabled, true);
+    assert.equal(resumes[0]?.params.dynamicWorkflowMode, "onDemand");
+  } finally {
+    await h.destroy();
+  }
 });

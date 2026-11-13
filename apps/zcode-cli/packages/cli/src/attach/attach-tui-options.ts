@@ -9,6 +9,7 @@ import {
   zcodeProtocolNotifications,
   zcodeSessionListResultSchema,
   zcodeUserInputRequestParamsSchema,
+  type DynamicWorkflowMode,
   type ZCodeProtocolMcpServer,
   type ZCodeSessionRawEvent,
 } from "@zcode/shared";
@@ -35,6 +36,7 @@ import type {
 } from "../command-center.js";
 import { createCommandCenter, parseSlashCommand } from "../command-center.js";
 import type { TuiPromptHandler } from "../tui-command-state.js";
+import { DEFAULT_CLI_WORKFLOW_MODE, workflowModeSessionParams } from "../workflow-mode.js";
 
 const RECONNECT_BACKOFF_START_MS = 1000;
 const RECONNECT_BACKOFF_MAX_MS = 30_000;
@@ -79,6 +81,9 @@ export interface AttachRuntimeOptions {
   runtimePreferences?: Record<string, unknown>;
   /** session/resume 冷恢复所需的 workspace ref（core 重启后 session/subscribe 找不到 record）。 */
   workspace?: { workspacePath: string; workspaceKey: string; workspaceIdentity?: string };
+  /** 冷恢复 session/resume 携带的动态工作流灰度（缺省 disabled = 不带参数，
+   *  与启动 create/resume 同一结论，见 workflowModeSessionParams）。 */
+  workflowMode?: DynamicWorkflowMode;
   /** 冷恢复分支读取该会话最后确认的 client MCP 声明（ACP issue #31 的
    *  replay 快照；声明只活在 client 侧内存，core 冷物化需要原样带回）。
    *  undefined=无声明可回放；[]=显式清空声明照旧回放。warm resubscribe 不查。 */
@@ -476,6 +481,10 @@ export class AttachRuntime {
         await this.client.request(zcodeProtocolMethods.sessionResume, {
           sessionId: handle.sessionId,
           workspace: this.options.workspace,
+          // 冷物化重建 runtime 会重读灰度门；不带参数就丢回进程级结论（fail-closed）。
+          ...workflowModeSessionParams(
+            this.options.workflowMode ?? DEFAULT_CLI_WORKFLOW_MODE,
+          ),
           // core 重启/空闲回收后冷恢复会丢掉内存里的上限，随 resume 带回当前模型对应的值。
           ...(compactContextWindow !== undefined ? { compactContextWindow } : {}),
           // client MCP 声明仅存于本进程内存；core 侧 record 冷物化时随同一
@@ -527,6 +536,8 @@ export interface CreateAttachHandlerOptions {
   /** create 结果快照（含 protocol.version 已由入口校验）。 */
   initialHandle: AttachSessionHandle;
   workspace: { workspacePath: string; workspaceKey: string; workspaceIdentity?: string };
+  /** /new 的 session/create 与 /resume 的 session/resume 携带的灰度（缺省 disabled）。 */
+  workflowMode?: DynamicWorkflowMode;
   deps?: Partial<CommandCenterDeps>;
   logger?: AttachRuntimeLogger;
 }
@@ -577,12 +588,19 @@ export function createAttachPromptHandler(
 
   const getApp = async (): Promise<CommandCenterApp> => asCommandCenterApp(current);
 
+  // /new 与 /resume 重建 runtime 时按入口解析出的同一 mode 携带灰度参数；
+  // disabled 展开成 {} = 不带参数（fail-closed，与启动 create/resume 一致）。
+  const workflowSessionParams = workflowModeSessionParams(
+    options.workflowMode ?? DEFAULT_CLI_WORKFLOW_MODE,
+  );
+
   const newApp = async (): Promise<CommandCenterApp> => {
     const created = (await request(zcodeProtocolMethods.sessionCreate, {
       // /new 与启动同规：首发前的空会话是 deferred 草稿，不进 session/list、
       // 不被 picker / -c 选中；首条 prompt 被 accepted 时 core 提升为 immediate。
       persistence: "deferred",
       workspace: options.workspace,
+      ...workflowSessionParams,
     })) as { session: { sessionId: string } };
     current = await toHandle(created.session.sessionId);
     return asCommandCenterApp(current);
@@ -606,6 +624,7 @@ export function createAttachPromptHandler(
       sessionId: target,
       // 冷物化判定需要 workspace ref，与入口 resume 请求同形。
       workspace: options.workspace,
+      ...workflowSessionParams,
     })) as { sessionId?: string };
     current = await toHandle(resumed.sessionId ?? target);
     return asCommandCenterApp(current);

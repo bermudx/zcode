@@ -10,6 +10,7 @@ import {
   resolveZCodeRuntimeEnv,
   zcodeProtocolMethods,
   zcodeSessionStateSnapshotSchema,
+  type DynamicWorkflowMode,
   type ZCodeModelOption,
 } from "@zcode/shared";
 import type { GlobalOptions, RunContext } from "@zcode/shared-types";
@@ -24,7 +25,7 @@ import { resolveLocale } from "@zcode/i18n";
 import { resolveWorkspaceGitBranch } from "../tui-workspace-git.js";
 import { loadPiTuiRuntime } from "../tui-pi-runtime-loader.js";
 import { loadTuiRuntime } from "../tui-runtime-loader.js";
-import { DEFAULT_CLI_WORKFLOW_MODE } from "../workflow-mode.js";
+import { DEFAULT_CLI_WORKFLOW_MODE, workflowModeSessionParams } from "../workflow-mode.js";
 import { AttachSessionHandle } from "./attach-session.js";
 import { projectAttachTranscriptMessages } from "./attach-projection.js";
 import { listAttachSkillCatalog, toSkillSuggestions } from "./attach-skills.js";
@@ -97,6 +98,11 @@ export const runAttachCommand = async (
   // "piz" 仅 zcode-attach 专用入口（attach-main）传：进程名/产品即 piz，
   // herdr reporter 报 --agent piz。monolith 入口进程是 zcode，不传。
   attachHerdrAgent?: "piz",
+  // `--workflow-mode`（piz 经 attach-entry-args，zcode attach/tui --shared-core
+  // 经 run.ts）：attach 车道无 Host，灰度只能随会话级请求下发，见
+  // workflowModeSessionParams。参数放末尾：测试里有不带类型检查的位置实参
+  // 传 "piz"，插到 attachHerdrAgent 之前会把 "piz" 误收为 mode。
+  workflowMode: DynamicWorkflowMode = DEFAULT_CLI_WORKFLOW_MODE,
 ): Promise<number> => {
   // catch 路径也要上报终态 error，故声明在 try 外。
   let oscStatusReporter: AttachOscStatusReporter | undefined;
@@ -159,6 +165,8 @@ export const runAttachCommand = async (
       connect: (path) => connectAttachClient(path, { logger: transportLogger }),
       logger: transportLogger,
       locale: startupLocale,
+      // 断线冷恢复的 session/resume 也要带同一灰度门，否则重建的 runtime 丢工具面。
+      workflowMode,
     });
     // herdr reporter：必须在 createAttachPromptHandler 注册首个句柄前挂好
     // onSessionBound，才能收到初始绑定（否则 pane 无 session/resume 元数据）。
@@ -198,6 +206,7 @@ export const runAttachCommand = async (
         ? await client.request(zcodeProtocolMethods.sessionResume, {
             sessionId: resumeTarget,
             workspace: workspaceRef,
+            ...workflowModeSessionParams(workflowMode),
           })
         : undefined;
       // 握手：session/create 直接返回协议快照；版本断言先于任何会话状态依赖。
@@ -210,6 +219,7 @@ export const runAttachCommand = async (
         ((await client.request(zcodeProtocolMethods.sessionCreate, {
           persistence: "deferred",
           workspace: workspaceRef,
+          ...workflowModeSessionParams(workflowMode),
         })) as unknown);
       // 版本断言先于全量 schema 校验：snapshot.protocol.version 是 z.literal 断言位，
       // 直接 parse 会把版本漂移报成模糊 ZodError，先单独读出再给可操作错误。
@@ -255,6 +265,7 @@ export const runAttachCommand = async (
         client,
         initialHandle: handle,
         runtime,
+        workflowMode,
         workspace: workspaceRef,
       });
       const runTui =
@@ -263,7 +274,6 @@ export const runAttachCommand = async (
           ? (await loadPiTuiRuntime()).runTui
           : (await loadTuiRuntime()).runTui);
       const developerMode = resolveZCodeRuntimeEnv(env) === "development";
-      const workflowMode = DEFAULT_CLI_WORKFLOW_MODE;
       const exitCode = await runTui({
         developerMode,
         getMainSessionId: promptHandler.getMainSessionId,

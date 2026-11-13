@@ -3644,3 +3644,61 @@ test("cancelBackgroundTask 发严格 schema 的 taskId 键并校验回包", asyn
     await rm(dir, { force: true, recursive: true });
   }
 });
+
+// 冷恢复的 session/resume（core 重启后 subscribe 找不到 record → recoverSession
+// 冷物化）也要带入口解析出的灰度参数：runtime 重建时服务端重读灰度门，不带就
+// 丢回进程级结论（fail-closed），onDemand 会话的工作流工具面会静默丢失。
+test("onDemand：断线冷恢复的 session/resume 携带灰度参数", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
+  const socketPath = join(dir, "core.sock");
+  let cold = false;
+  let resumed = false;
+  const responder = (request: Captured): unknown => {
+    if (request.method === "session/subscribe") {
+      if (cold && !resumed) {
+        return Promise.reject(
+          Object.assign(new Error("session unavailable"), {
+            code: zcodeProtocolErrorCodes.sessionUnavailable,
+          }),
+        );
+      }
+      return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID };
+    }
+    if (request.method === "session/resume") {
+      resumed = true;
+      return {};
+    }
+    return {};
+  };
+  let core = await startFakeCore(socketPath, responder);
+  const runtime = new AttachRuntime({
+    socketPath,
+    workflowMode: "onDemand",
+    workspace: { workspaceKey: "/tmp/ws", workspacePath: "/tmp/ws" },
+  });
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  runtime.registerSession(handle);
+  const client = await runtime.connect();
+  try {
+    await handle.subscribe();
+    await core.kill();
+    await client.closed;
+    cold = true;
+    core = await startFakeCore(socketPath, responder);
+    // 第一轮重连退避 1s；resubscribe 先撞 sessionUnavailable 再走 session/resume。
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    const resumes = core.requests.filter((r) => r.method === "session/resume");
+    assert.equal(resumes.length, 1, "cold recovery must resume the session once");
+    assert.equal(resumes[0]?.params.sessionId, SID);
+    assert.equal(resumes[0]?.params.dynamicWorkflowEnabled, true);
+    assert.equal(resumes[0]?.params.dynamicWorkflowMode, "onDemand");
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});

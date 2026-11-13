@@ -2786,6 +2786,19 @@ as written; the TUI's `/dwf resume` activates the way the GUI's Resume does, bec
 through `trackResumedDynamicWorkflowRun`. Core's "absent means eager" polarity is untouched:
 the standalone CLI simply never leaves the fields absent.
 
+The shared-core attach lane (`zcode-attach` / `piz`, and `zcode attach` /
+`tui --shared-core`) accepts the same flag and cannot write the runtime config
+directly: one core process serves every workspace and thin client, so the mode
+travels as session params instead of the process-wide
+`workspace/updateDynamicWorkflowPolicy` preference. The client sends
+`dynamicWorkflowEnabled` and `dynamicWorkflowMode` on `session/create` and on
+every `session/resume` (startup `-c`/`--resume`, `/new`, `/resume <id>`, and the
+cold-recovery resume after a core restart); the server's params-first resolver
+then produces the same two runtime fields. When the flag is absent the client
+sends neither key — the request is identical to before and stays fail-closed.
+`session/fork` has no such params: a forked session's gate comes from the core's
+workspace-level conclusion, not from the parent session or the flag.
+
 The mode belongs to the process, not the session. Nothing about it is persisted, and resuming
 a session under a different mode switches its surface silently, the same rule as a server
 flip on the desktop (an `onDemand` resume still restores activation from the session's

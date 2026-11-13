@@ -3,7 +3,9 @@
 // 入口只收 attach 语义子集；未知旗标沿用既有宽容行为（忽略），新增
 // 旗标必须显式登记并接入 runAttachCommand。
 import type { GlobalOptions } from "@zcode/shared-types";
+import type { DynamicWorkflowMode } from "@zcode/shared";
 import type { CliResumeRequest } from "../cli-types.js";
+import { normalizeWorkflowModeOption } from "../workflow-mode.js";
 
 export interface AttachEntryArgs {
   action?: "help" | "version";
@@ -11,6 +13,8 @@ export interface AttachEntryArgs {
   initialModel?: string;
   options: GlobalOptions;
   resume: CliResumeRequest;
+  /** `--workflow-mode <mode>`：attach 车道无 Host，mode 随会话级请求下发。 */
+  workflowMode?: DynamicWorkflowMode;
 }
 
 export function parseAttachEntryArgs(argv: readonly string[]): AttachEntryArgs {
@@ -18,6 +22,7 @@ export function parseAttachEntryArgs(argv: readonly string[]): AttachEntryArgs {
   const resume: CliResumeRequest = { continueSession: false };
   let action: "help" | "version" | undefined;
   let initialModel: string | undefined;
+  let workflowMode: DynamicWorkflowMode | undefined;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--locale") {
@@ -41,11 +46,20 @@ export function parseAttachEntryArgs(argv: readonly string[]): AttachEntryArgs {
         throw new Error("--model requires a value: --model <model|provider/model>");
       }
       initialModel = value;
+    } else if (arg === "--workflow-mode") {
+      const value = argv[++i];
+      // 与 --model 同判：缺值显式报错；非法值由 normalizer 报出三枚举名。
+      if (value === undefined || value === "") {
+        throw new Error(
+          "--workflow-mode requires a value: --workflow-mode <disabled|onDemand|alwaysOn>",
+        );
+      }
+      workflowMode = normalizeWorkflowModeOption(value);
     } else if (arg === "--version" || arg === "-v") {
       action = "version";
     } else if (arg === "--help" || arg === "-h") {
       action = "help";
     }
   }
-  return { action, initialModel, options, resume };
+  return { action, initialModel, options, resume, workflowMode };
 }
