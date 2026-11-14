@@ -76,10 +76,13 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   Shared credentials use atomic file replacement: a symlink to the live
   credential file is not safe shared write-through access and can be replaced
   with a separate credential copy. Do not use one for isolated live checks.
-- Root and CLI workspace typecheck/lint are separate. Run relevant checks and
-  report actual failures/limits. CLI tests on patch branches:
-  `mise exec -- node apps/zcode-cli/scripts/fork-tests.mjs` (selected); `--full`
-  only for sync or on request; before promoting use `--promote-gate`. Never `.skip`/delete upstream tests
+- Builds, typecheck, lint and tests run in CI ONLY (`ci` workflow). Never run
+  them on the operator's machine, and never put them in an agent brief: push
+  the branch and read CI on the head SHA (2026-11-13: local fork-tests and
+  builds from several agents drove load to 28). The one exception is
+  `--promote-gate` before promotion, and only when the operator asks.
+  Root and CLI workspace typecheck/lint are separate CI steps; report actual
+  failures/limits. Never `.skip`/delete upstream tests
   for speed. Real terminal/model behavior and resource cost
   require observation, not claims based on compilation or fixtures.
   cli `tsconfig.json` covers only `src/**` — test files are never typechecked
