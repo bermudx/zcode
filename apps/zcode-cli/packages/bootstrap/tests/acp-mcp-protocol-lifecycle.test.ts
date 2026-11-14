@@ -16,7 +16,7 @@ import {
   type ModelResult,
   type SessionId,
 } from "@zcode/contracts";
-import { zcodeProtocolMethods } from "@zcode/shared";
+import { zcodeProtocolMethods, zcodeSessionMessagesResultSchema } from "@zcode/shared";
 import { projectIdFromDirectory } from "../src/app/paths.js";
 import {
   createAcpMcpCoreFixture,
@@ -583,6 +583,8 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
             JSON.stringify(m).includes("seed-history-cmcp08"),
           ),
         ).toBe(true);
+        // #52 回归：真实 core 的 session/messages 必须满足客户端 strict 协议 schema。
+        expect(() => zcodeSessionMessagesResultSchema.parse(history)).not.toThrow();
 
         // 收养 reconnect 起新代子进程，下一轮 tool call 真实走通。
         const pid2 = await waitForFile(join(dir, "s1.pid"), 400);

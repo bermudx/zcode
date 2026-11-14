@@ -106,6 +106,7 @@ import {
   buildSessionSnapshot,
   buildWorkspaceRef,
   formatProtocolModelSelection,
+  mapMessageWithParts,
   mapSessionEventForProtocol,
   mapSessionInfo,
   resolveSessionContextUsage,
@@ -2143,8 +2144,11 @@ export async function readMessages(context: ZCodeProtocolAgentServerContext, raw
     ? allMessages.findIndex((message) => String(message.info.id) === params.afterMessageId)
     : -1;
   const messages = afterMessageIndex >= 0 ? allMessages.slice(afterMessageIndex + 1) : allMessages;
+  // 修复 #52：存储层 part 键为 id/sessionID/messageID，协议 schema 为 partId/sessionId/messageId；
+  // 出协议前必须映射，否则瘦客户端 strict 解析拒收，/resume 转录无法渲染。
+  const limited = params.limit ? messages.slice(-params.limit) : messages;
   return {
-    messages: params.limit ? messages.slice(-params.limit) : messages,
+    messages: limited.map(mapMessageWithParts),
   };
 }
 
