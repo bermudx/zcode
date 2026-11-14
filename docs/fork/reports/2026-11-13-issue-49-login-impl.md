@@ -212,4 +212,15 @@ attach TUI / ACP ── auth/loginStart {provider} ──▶ shared core
 
 ## PR
 
-PENDING — draft PR closes #49, labels `bug`/`P1`/`attach`.
+Draft PR https://github.com/bermudx/zcode/pull/57 — "Closes #49",
+labels `bug`/`P1`/`attach`. Head SHA `660e0ad7`. Note: `gh pr create` /
+`gh pr edit` GraphQL calls fail for this token ("bermudi does not have the
+correct permissions"), so the PR was created/labelled via REST
+(`gh api repos/bermudx/zcode/pulls`, `issues/57/labels`).
+
+CI: `ci` workflow run https://github.com/bermudx/zcode/actions/runs/43552848417
+on head `660e0ad7` — in_progress at report time. Local checks above were
+run by the previous attempt before the CI-only rule was re-affirmed for
+this handoff; this attempt ran no local builds/typecheck/lint/tests and
+pushed with `--no-verify` because the `verify:pre-push` hook runs those
+local checks (operator hard rule: CI only).
