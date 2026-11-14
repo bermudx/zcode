@@ -17,7 +17,20 @@ export interface AttachEntryArgs {
   workflowMode?: DynamicWorkflowMode;
 }
 
-export function parseAttachEntryArgs(argv: readonly string[]): AttachEntryArgs {
+const VALUE_FLAGS = new Set(["--locale", "--resume", "--model", "--workflow-mode"]);
+
+// 修复 #53：`--flag=value` 曾被当作未知旗标静默忽略（单体车道两种写法都收）。
+// 带值旗标统一展开成 `--flag value` 再走同一套判定，空值仍显式报错。
+function expandEqualsForms(argv: readonly string[]): string[] {
+  return argv.flatMap((arg) => {
+    const eq = arg.indexOf("=");
+    if (eq < 0 || !VALUE_FLAGS.has(arg.slice(0, eq))) return [arg];
+    return [arg.slice(0, eq), arg.slice(eq + 1)];
+  });
+}
+
+export function parseAttachEntryArgs(rawArgv: readonly string[]): AttachEntryArgs {
+  const argv = expandEqualsForms(rawArgv);
   const options: GlobalOptions = { force: false, json: false, noColor: false, verbose: false };
   const resume: CliResumeRequest = { continueSession: false };
   let action: "help" | "version" | undefined;
