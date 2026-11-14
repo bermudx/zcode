@@ -436,6 +436,22 @@ test("zcode-attach --resume 缺值报错，不静默降级为新会话", () => {
   assert.throws(() => parseAttachEntryArgs(["--resume", ""]), /--resume requires a value/);
 });
 
+// #53 回归：`--flag=value` 写法曾被静默忽略。
+test("zcode-attach 接受 --flag=value 写法", () => {
+  const parsed = parseAttachEntryArgs([
+    "--model=zai/glm-5.3",
+    "--workflow-mode=onDemand",
+    "--resume=sess-1",
+    "--locale=en",
+  ]);
+  assert.equal(parsed.initialModel, "zai/glm-5.3");
+  assert.equal(parsed.workflowMode, "onDemand");
+  assert.equal(parsed.resume.resumeSessionId, "sess-1");
+  assert.equal(parsed.options.locale, "en");
+  assert.throws(() => parseAttachEntryArgs(["--model="]), /--model requires a value/);
+  assert.throws(() => parseAttachEntryArgs(["--workflow-mode=bogus"]), /disabled|onDemand|alwaysOn/);
+});
+
 // ── runAttachCommand：启动期 setModel 应用 ──
 
 test("create 路径：--model 完整 ref 触发 session/setModel 且目录校验默认档位", async () => {
