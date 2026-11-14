@@ -2796,6 +2796,113 @@ export type ZCodeProviderRefreshRegistryParams = z.infer<
 export type ZCodeProviderRefreshRegistryResult = z.infer<
   typeof zcodeProviderRefreshRegistryResultSchema
 >;
+
+// ── auth/*：attach 瘦客户端（TUI/ACP）的 Coding Plan 登录面 ──────────────
+// 浏览器在 client 侧打开（core 可能无显示）；core 只做 OAuth init/poll 与凭据落盘。
+// apiKey/token 只进 params 和凭据文件，绝不进日志或结果体。
+export const zcodeAuthCodingPlanProviderSchema = z.enum(["zai", "bigmodel"]);
+export type ZCodeAuthCodingPlanProvider = z.infer<typeof zcodeAuthCodingPlanProviderSchema>;
+
+export const zcodeAuthLoginStartParamsSchema = z
+  .object({
+    provider: zcodeAuthCodingPlanProviderSchema,
+  })
+  .strict();
+export type ZCodeAuthLoginStartParams = z.infer<typeof zcodeAuthLoginStartParamsSchema>;
+export const zcodeAuthLoginStartResultSchema = z
+  .object({
+    authorizeUrl: nonEmptyString,
+    expiresAt: z.number().int().positive(),
+    flowId: nonEmptyString,
+    pollIntervalSec: z.number().positive(),
+  })
+  .strict();
+export type ZCodeAuthLoginStartResult = z.infer<typeof zcodeAuthLoginStartResultSchema>;
+
+export const zcodeAuthLoginCompleteParamsSchema = z
+  .object({
+    flowId: nonEmptyString,
+  })
+  .strict();
+export type ZCodeAuthLoginCompleteParams = z.infer<
+  typeof zcodeAuthLoginCompleteParamsSchema
+>;
+export const zcodeAuthUserSchema = z
+  .object({
+    avatar: z.string().optional(),
+    email: z.string().optional(),
+    name: z.string().optional(),
+    user_id: nonEmptyString,
+  })
+  .strict();
+export type ZCodeAuthUser = z.infer<typeof zcodeAuthUserSchema>;
+// 登录失败不抛协议错误：client 要把 error 渲染成可读提示 + standalone fallback 指引。
+export const zcodeAuthLoginCompleteResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      configPath: nonEmptyString,
+      credentialsPath: nonEmptyString,
+      model: nonEmptyString,
+      ok: z.literal(true),
+      provider: zcodeAuthCodingPlanProviderSchema,
+      user: zcodeAuthUserSchema,
+    })
+    .strict(),
+  z
+    .object({
+      error: nonEmptyString,
+      ok: z.literal(false),
+    })
+    .strict(),
+]);
+export type ZCodeAuthLoginCompleteResult = z.infer<
+  typeof zcodeAuthLoginCompleteResultSchema
+>;
+
+export const zcodeAuthConfigureApiKeyParamsSchema = z
+  .object({
+    apiKey: nonEmptyString,
+    provider: zcodeAuthCodingPlanProviderSchema,
+  })
+  .strict();
+export type ZCodeAuthConfigureApiKeyParams = z.infer<
+  typeof zcodeAuthConfigureApiKeyParamsSchema
+>;
+export const zcodeAuthConfigureApiKeyResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      configPath: nonEmptyString,
+      model: nonEmptyString,
+      ok: z.literal(true),
+      provider: zcodeAuthCodingPlanProviderSchema,
+    })
+    .strict(),
+  z
+    .object({
+      error: nonEmptyString,
+      ok: z.literal(false),
+    })
+    .strict(),
+]);
+export type ZCodeAuthConfigureApiKeyResult = z.infer<
+  typeof zcodeAuthConfigureApiKeyResultSchema
+>;
+
+// logout 的 provider 字段是给后续按 Provider 精细登出留的口子；当前实现统一清理全部账号。
+export const zcodeAuthLogoutParamsSchema = z
+  .object({
+    provider: z.enum(["zai", "bigmodel", "all"]).optional(),
+  })
+  .strict();
+export type ZCodeAuthLogoutParams = z.infer<typeof zcodeAuthLogoutParamsSchema>;
+export const zcodeAuthLogoutResultSchema = z
+  .object({
+    credentialsPath: nonEmptyString,
+    ok: z.literal(true),
+  })
+  .strict();
+export type ZCodeAuthLogoutResult = z.infer<typeof zcodeAuthLogoutResultSchema>;
+
 export const zcodeInteractionPreferencesSchema = z
   .object({
     askUserQuestionAutoResolutionEnabled: z.boolean(),
@@ -4520,6 +4627,12 @@ export const zcodeProtocolMethods = {
   // 进程级 Account Provider Config 与 workspace 运行目录分离。
   providerUpdateAccountConfig: "provider/updateAccountConfig",
   providerRefreshRegistry: "provider/refreshRegistry",
+  // attach 瘦客户端（TUI/ACP）的 Coding Plan 登录/登出面：凭据与 OAuth 轮询归 core，
+  // 浏览器打开与 URL 展示归 client（core 可能无显示）。
+  authLoginStart: "auth/loginStart",
+  authLoginComplete: "auth/loginComplete",
+  authConfigureApiKey: "auth/configureApiKey",
+  authLogout: "auth/logout",
   workspaceUpdateInteractionPreferences: "workspace/updateInteractionPreferences",
   workspaceUpdateModelIoPreferences: "workspace/updateModelIoPreferences",
   // Off-Peak 工具面门禁是 workspace 级事实（灰度 + 本地/远程），由 host 在 agent 就绪时同步；

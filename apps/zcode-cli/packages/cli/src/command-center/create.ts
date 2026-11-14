@@ -30,6 +30,7 @@ import {
   emitLoginAuthorizeMessage,
   formatLoginResult,
   formatProviderSetupResult,
+  loginFailureResponse,
   loginSetupResponse,
   parseApiKeyLoginArgs,
 } from "./login-flow.js";
@@ -37,6 +38,15 @@ import { loginRequiredResponse } from "../tui-login-state.js";
 import type { CommandCenterDeps } from "./types.js";
 
 const UNSUPPORTED_ATTACHMENTS_RESPONSE = "Image attachments are only supported for normal prompts.";
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (typeof DOMException !== "undefined" &&
+      error instanceof DOMException &&
+      error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
 
 export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
   return async (input, options) => {
@@ -124,23 +134,28 @@ export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
             };
           }
 
-          return {
-            loginRequired: false,
-            mode: deps.getMode?.(),
-            response: formatLoginResult(
-              await deps.login({
-                abortSignal: options.abortSignal,
-                onAuthorizeUrl: async (data) => {
-                  await emitLoginAuthorizeMessage(
-                    options,
-                    data.authorize_url,
-                    "Z.AI",
-                    await deps.getApp(),
-                  );
-                },
-              }),
-            ),
-          };
+          try {
+            return {
+              loginRequired: false,
+              mode: deps.getMode?.(),
+              response: formatLoginResult(
+                await deps.login({
+                  abortSignal: options.abortSignal,
+                  onAuthorizeUrl: async (data) => {
+                    await emitLoginAuthorizeMessage(
+                      options,
+                      data.authorize_url,
+                      "Z.AI",
+                      await deps.getApp(),
+                    );
+                  },
+                }),
+              ),
+            };
+          } catch (error) {
+            if (isAbortError(error)) throw error;
+            return { mode: deps.getMode?.(), response: loginFailureResponse(error) };
+          }
         }
         if (command.args === "bigmodel-coding-plan") {
           if (!deps.loginBigmodel) {
@@ -150,23 +165,28 @@ export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
             };
           }
 
-          return {
-            loginRequired: false,
-            mode: deps.getMode?.(),
-            response: formatProviderSetupResult(
-              await deps.loginBigmodel({
-                abortSignal: options.abortSignal,
-                onAuthorizeUrl: async (data) => {
-                  await emitLoginAuthorizeMessage(
-                    options,
-                    data.authorize_url,
-                    "BigModel",
-                    await deps.getApp(),
-                  );
-                },
-              }),
-            ),
-          };
+          try {
+            return {
+              loginRequired: false,
+              mode: deps.getMode?.(),
+              response: formatProviderSetupResult(
+                await deps.loginBigmodel({
+                  abortSignal: options.abortSignal,
+                  onAuthorizeUrl: async (data) => {
+                    await emitLoginAuthorizeMessage(
+                      options,
+                      data.authorize_url,
+                      "BigModel",
+                      await deps.getApp(),
+                    );
+                  },
+                }),
+              ),
+            };
+          } catch (error) {
+            if (isAbortError(error)) throw error;
+            return { mode: deps.getMode?.(), response: loginFailureResponse(error) };
+          }
         }
 
         const apiKeyCommand = parseApiKeyLoginArgs(command.args);
@@ -184,16 +204,21 @@ export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
               response: `Usage: /login ${apiKeyCommand.kind} <api-key>`,
             };
           }
-          return {
-            loginRequired: false,
-            mode: deps.getMode?.(),
-            response: formatProviderSetupResult(
-              await deps.configureApiKey({
-                apiKey: apiKeyCommand.apiKey,
-                providerId: apiKeyCommand.providerId,
-              }),
-            ),
-          };
+          try {
+            return {
+              loginRequired: false,
+              mode: deps.getMode?.(),
+              response: formatProviderSetupResult(
+                await deps.configureApiKey({
+                  apiKey: apiKeyCommand.apiKey,
+                  providerId: apiKeyCommand.providerId,
+                }),
+              ),
+            };
+          } catch (error) {
+            if (isAbortError(error)) throw error;
+            return { mode: deps.getMode?.(), response: loginFailureResponse(error) };
+          }
         }
 
         return {
@@ -217,11 +242,16 @@ export function createCommandCenter(deps: CommandCenterDeps): TuiSubmitPrompt {
           };
         }
 
-        const result = await deps.logout();
-        return {
-          mode: deps.getMode?.(),
-          response: `Logged out from Coding Plan accounts. Credentials: ${result.credentialsPath}`,
-        };
+        try {
+          const result = await deps.logout();
+          return {
+            mode: deps.getMode?.(),
+            response: `Logged out from Coding Plan accounts. Credentials: ${result.credentialsPath}`,
+          };
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          return { mode: deps.getMode?.(), response: loginFailureResponse(error) };
+        }
       }
 
       if (command.name === "compact") {

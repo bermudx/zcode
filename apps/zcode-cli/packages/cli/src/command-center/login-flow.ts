@@ -142,6 +142,17 @@ export async function emitLoginAuthorizeMessage(
   });
 }
 
+// /login 在瘦客户端（attach TUI/ACP）经 core 跑 OAuth/API-Key 写入；core 不可达或
+// 服务端失败时必须有 standalone fallback 指引，否则终端用户只能看到一条死错误。
+export const MONOLITH_LOGIN_FALLBACK_HINT = "Or run: zcode login zai";
+
+export function loginFailureResponse(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.endsWith(MONOLITH_LOGIN_FALLBACK_HINT)
+    ? message
+    : `${message}\n${MONOLITH_LOGIN_FALLBACK_HINT}`;
+}
+
 export function parseApiKeyLoginArgs(args: string): {
   apiKey: string;
   kind: "bigmodel-coding-plan-api-key" | "zai-coding-plan-api-key";

@@ -43,6 +43,7 @@ import {
   type AcpPermissionResult,
 } from "./acp-project.js";
 import type { AcpCorePort, AcpSession } from "./acp-sessions.js";
+import type { ThinBrowserOpenResult } from "../attach/attach-auth.js";
 import { AcpMcpMapError, mapAcpMcpServers } from "./acp-mcp.js";
 import {
   newGoalInputId,
@@ -51,6 +52,8 @@ import {
   slashCommandsUpdate,
   runDwfCommand,
   runGoalCommand,
+  runLoginCommand,
+  runLogoutCommand,
   watchTurnSettlement,
   type AcpLocalCommand,
   type AcpSlashCatalog,
@@ -71,6 +74,8 @@ export interface AcpAgentOptions {
   logger?: AcpAgentLogger;
   /** stdio 入口记录致命投影/输出失败，用于诊断与非零退出码。 */
   onConnectionError?: (error: Error) => void;
+  /** 测试注入：替换 /login 的本地浏览器打开（避免测试拉起真实 xdg-open/open）。 */
+  openBrowser?: (url: string) => Promise<ThinBrowserOpenResult>;
   sessions: AcpCorePort;
   version: string;
 }
@@ -502,7 +507,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
         } finally {
           watch.dispose();
         }
-      } else {
+      } else if (command.kind === "dwf") {
         const response = await runDwfCommand(session.handle, command.args);
         emit([
           {
@@ -510,6 +515,31 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
             sessionUpdate: "agent_message_chunk",
           },
         ]);
+      } else {
+        // /login /logout：进程级 auth/* op 走共享 core；URL 与结果都以
+        // agent_message_chunk 下发（ACP stdout 是 NDJSON，assistant_message
+        // 事件投影不出去）。ownsCoreTurn=false：这些是 op 往返，core 里没有
+        // 「我们的」turn，cancel 只需断开客户端侧等待。
+        const send = (text: string) =>
+          emit([
+            {
+              content: { text, type: "text" },
+              sessionUpdate: "agent_message_chunk",
+            },
+          ]);
+        const request = (method: string, params?: unknown) =>
+          options.sessions.coreRequest(sessionId, method, params);
+        if (command.kind === "login") {
+          await runLoginCommand({
+            args: command.args,
+            openBrowser: options.openBrowser,
+            request,
+            send,
+            signal: controller.signal,
+          });
+        } else {
+          await runLogoutCommand({ request, send });
+        }
       }
       await pendingDrain;
       if (connectionFailure) throw connectionFailure;
