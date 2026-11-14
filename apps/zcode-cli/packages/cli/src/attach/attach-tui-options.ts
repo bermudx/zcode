@@ -26,6 +26,7 @@ import type {
   TuiSubmitPromptResult,
 } from "@zcode/tui";
 import { connectAttachClient, AttachProtocolError, type AttachClient } from "./attach-client.js";
+import { createAttachAuthDeps, type ThinBrowserOpenResult } from "./attach-auth.js";
 import { AttachSessionHandle, asCommandCenterApp } from "./attach-session.js";
 import { listAttachSkillCatalog, toCommandCenterSkillList } from "./attach-skills.js";
 import { listAttachCommandCatalog, toCommandCenterCustomCommandList } from "./attach-commands.js";
@@ -550,6 +551,8 @@ export interface CreateAttachHandlerOptions {
   workspace: { workspacePath: string; workspaceKey: string; workspaceIdentity?: string };
   /** /new 的 session/create 与 /resume 的 session/resume 携带的灰度（缺省 disabled）。 */
   workflowMode?: DynamicWorkflowMode;
+  /** 测试注入：替换 /login 的本地浏览器打开（避免测试拉起真实 xdg-open/open）。 */
+  openBrowser?: (url: string) => Promise<ThinBrowserOpenResult>;
   deps?: Partial<CommandCenterDeps>;
   logger?: AttachRuntimeLogger;
 }
@@ -715,6 +718,11 @@ export function createAttachPromptHandler(
       const result = await current.setMode(mode as string);
       return (result.mode as never) ?? mode;
     },
+    // /login /logout /api-key 走 core 的 auth/* 方法：OAuth init/poll 与凭据
+    // 落盘都在共享 core 进程（与 standalone 账号面同一文件事实），attach 只做
+    // 协议调用 + 本地开浏览器 + URL 展示；core 侧写凭据会触发进程内
+    // credentialStore.onDidChange → Provider Registry 重建，无需重启。
+    ...createAttachAuthDeps({ openBrowser: options.openBrowser, request }),
     ...options.deps,
   });
 

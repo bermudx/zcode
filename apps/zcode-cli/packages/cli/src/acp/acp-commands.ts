@@ -9,6 +9,19 @@ import {
   type ZCodeSessionGoalAction,
 } from "@zcode/shared";
 import type { AttachSessionHandle } from "../attach/attach-session.js";
+import {
+  configureApiKeyViaAttachProtocol,
+  loginViaAttachProtocol,
+  logoutViaAttachProtocol,
+  type ThinAuthRequest,
+  type ThinBrowserOpenResult,
+} from "../attach/attach-auth.js";
+import {
+  formatLoginResult,
+  formatProviderSetupResult,
+  loginFailureResponse,
+  parseApiKeyLoginArgs,
+} from "../command-center/login-flow.js";
 import { buildManualSkillPrompt } from "../command-center/slash-commands.js";
 import { splitArgs } from "../command-center/utils.js";
 import type { SkillCatalogEntry } from "../skill-suggestions.js";
@@ -23,7 +36,9 @@ import {
 
 export type AcpLocalCommand =
   | { args: string; kind: "dwf" }
-  | { args: string; kind: "goal" };
+  | { args: string; kind: "goal" }
+  | { args: string; kind: "login" }
+  | { args: string; kind: "logout" };
 
 /** /dwf 消费的 handle 读面：命令层只依赖这三个成员，不持有整个 AttachSessionHandle。 */
 type DwfHandle = Pick<
@@ -39,9 +54,18 @@ export function parseLocalSlashCommand(text: string): AcpLocalCommand | null {
   const name = (
     commandEnd === -1 ? trimmed.slice(1) : trimmed.slice(1, commandEnd)
   ).toLowerCase();
-  if (name !== "goal" && name !== "target" && name !== "dwf") return null;
+  if (
+    name !== "goal" &&
+    name !== "target" &&
+    name !== "dwf" &&
+    name !== "login" &&
+    name !== "logout"
+  )
+    return null;
   const args = commandEnd === -1 ? "" : trimmed.slice(commandEnd + 1).trim();
-  return { args, kind: name === "dwf" ? "dwf" : "goal" };
+  const kind =
+    name === "dwf" ? "dwf" : name === "login" ? "login" : name === "logout" ? "logout" : "goal";
+  return { args, kind };
 }
 
 /** /goal 文本 → `session/goal` action 面；set-over-existing 的 replace 收敛由 core 裁定。 */
@@ -152,6 +176,104 @@ async function runDwfCancel(
   return `Cancelled dynamic workflow run ${targetRunId}.`;
 }
 
+export const ACP_LOGIN_USAGE =
+  "Usage: /login [zai-coding-plan|bigmodel-coding-plan|zai-coding-plan-api-key <api-key>|bigmodel-coding-plan-api-key <api-key>]";
+
+function isLoginAbort(error: unknown): boolean {
+  return (
+    (typeof DOMException !== "undefined" &&
+      error instanceof DOMException &&
+      error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
+/**
+ * ACP 的 /login：与 command-center 同一套参数语法，但 ACP 的 stdout 是 NDJSON
+ * 协议通道，URL 与结果只能经 agent_message_chunk 下发（emitLoginAuthorizeMessage
+ * 的 assistant_message 事件 ACP projector 会丢）。浏览器由本进程（client 侧）打开；
+ * OAuth init/poll 与凭据落盘全在共享 core。
+ */
+export async function runLoginCommand(input: {
+  args: string;
+  openBrowser?: (url: string) => Promise<ThinBrowserOpenResult>;
+  request: ThinAuthRequest;
+  send: (text: string) => void;
+  signal?: AbortSignal;
+}): Promise<void> {
+  const args = input.args.trim();
+  if (args === "zai-coding-plan" || args === "bigmodel-coding-plan") {
+    const providerId = args.startsWith("bigmodel") ? "bigmodel" : "zai";
+    const providerName = providerId === "bigmodel" ? "BigModel" : "Z.AI";
+    try {
+      const result = await loginViaAttachProtocol({
+        abortSignal: input.signal,
+        openBrowser: input.openBrowser,
+        providerId,
+        request: input.request,
+        onAuthorizeUrl: async (data) => {
+          input.send(
+            [
+              `Open this URL to sign in with ${providerName}:`,
+              "",
+              data.authorize_url,
+              "",
+              "After authorization, return here and I will finish the login automatically.",
+            ].join("\n"),
+          );
+        },
+      });
+      input.send(
+        providerId === "zai"
+          ? formatLoginResult(result)
+          : formatProviderSetupResult({
+              configPath: result.configPath,
+              model: result.model,
+              providerId,
+            }),
+      );
+    } catch (error) {
+      if (isLoginAbort(error)) throw error;
+      input.send(loginFailureResponse(error));
+    }
+    return;
+  }
+  const apiKeyCommand = parseApiKeyLoginArgs(args);
+  if (apiKeyCommand) {
+    // apiKey 只透传给协议请求：usage/usage-error 文案与日志都不得回显密钥。
+    if (!apiKeyCommand.apiKey) {
+      input.send(`Usage: /login ${apiKeyCommand.kind} <api-key>`);
+      return;
+    }
+    try {
+      const result = await configureApiKeyViaAttachProtocol({
+        apiKey: apiKeyCommand.apiKey,
+        providerId: apiKeyCommand.providerId,
+        request: input.request,
+      });
+      input.send(formatProviderSetupResult(result));
+    } catch (error) {
+      if (isLoginAbort(error)) throw error;
+      input.send(loginFailureResponse(error));
+    }
+    return;
+  }
+  input.send(ACP_LOGIN_USAGE);
+}
+
+export async function runLogoutCommand(input: {
+  request: ThinAuthRequest;
+  send: (text: string) => void;
+}): Promise<void> {
+  try {
+    const result = await logoutViaAttachProtocol({ request: input.request });
+    input.send(`Logged out from Coding Plan accounts. Credentials: ${result.credentialsPath}`);
+  } catch (error) {
+    if (isLoginAbort(error)) throw error;
+    input.send(loginFailureResponse(error));
+  }
+}
+
 /** core 目录投影：自定义 prompt 命令 + 可调用技能（裸名与 qualifiedName 并存，bundled 已滤）。 */
 export interface AcpSlashCatalog {
   commands: Array<{ argumentHint?: string; description: string; name: string }>;
@@ -165,9 +287,15 @@ const skillDisplayName = (skill: SkillCatalogEntry): string =>
 const LOCAL_COMMANDS = [
   { description: "Show, set, replace, pause, resume or clear the session goal", name: "goal" },
   { description: "List, cancel or resume dynamic workflow runs", name: "dwf" },
+  {
+    description: "Sign in to a Coding Plan (Z.AI or BigModel) in the shared core",
+    input: { hint: "[zai-coding-plan|bigmodel-coding-plan|…-api-key <key>]" },
+    name: "login",
+  },
+  { description: "Remove the shared Coding Plan credentials", name: "logout" },
   { description: "Load a skill for this turn", input: { hint: "<skill-name> [task]" }, name: "skill" },
 ];
-const RESERVED_LOCAL_NAMES = new Set(["goal", "target", "dwf", "skill"]);
+const RESERVED_LOCAL_NAMES = new Set(["goal", "target", "dwf", "login", "logout", "skill"]);
 
 /**
  * core 保留名（bootstrap slash-command-surface 的同一集合）：内置命令词表 +

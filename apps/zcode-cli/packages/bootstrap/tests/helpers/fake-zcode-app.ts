@@ -109,6 +109,7 @@ export function createFakeApp(
       },
       emitModelSelected: async () => undefined,
       setCompactContextWindowCap: () => undefined,
+      setMcpClientAttached: async () => {},
       getProjection: async () =>
         ({
           activeToolCalls: [],

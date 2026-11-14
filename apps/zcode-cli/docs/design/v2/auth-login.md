@@ -270,6 +270,56 @@ assistant transcript message for the same reason. If the browser is not on the
 machine running the CLI, the user may need to run the login in a local terminal
 or use a future callback-paste fallback.
 
+## Attach Thin-Client Login (`auth/*` protocol)
+
+The shared-core attach clients (terminal `zcode-attach` TUI and the ACP lane)
+perform login through protocol methods on the core, never through bootstrap or
+adapter imports. Five methods cover the surface:
+
+- `auth/loginStart` `{provider: "zai" | "bigmodel"}` →
+  `{flowId, authorizeUrl, expiresAt, pollIntervalSec}`. The core initializes the
+  OAuth flow without opening a browser (a shared core may have no display) and
+  keeps the flow state, OAuth client, and poll token in process. Clients only
+  hold the opaque `flowId`.
+- `auth/loginComplete` `{flowId}` → `{ok: true, provider, model, configPath,
+  credentialsPath, user} | {ok: false, error}`. The core polls until ready or
+  timeout and persists credentials and provider config exactly as
+  `zcode login` does. Login failures return in the result body, not as protocol
+  errors, so the client can render readable text plus the standalone fallback.
+- `auth/loginCancel` `{flowId}` → `{ok: true}`. Aborts the core-side poll for a
+  pending flow and removes it; idempotent for unknown or finished flow ids. The
+  thin client sends it best-effort when its abort signal fires after
+  `loginStart`, because a client-side cancel cannot reach the orphaned core
+  poll. An aborted `loginComplete` returns `{ok: false, error: "Login
+  cancelled."}`.
+- `auth/configureApiKey` `{provider, apiKey}` → `{ok: true, provider, model,
+  configPath} | {ok: false, error}`. Reuses the standalone API-key setup.
+- `auth/logout` `{provider?}` → `{ok: true, credentialsPath}`.
+
+`auth/loginStart`, `auth/loginComplete`, and `auth/loginCancel` bypass the
+per-connection serial request queue in the protocol transport (same pattern as
+the session-lifecycle concurrent set): a login poll can run for up to five
+minutes and must not head-of-line block `session/*` requests on the same
+connection, and `loginCancel` must reach the core without waiting for the poll
+it aborts. The shared flow state is confined to the core's pending-flow map
+keyed by `flowId`, so concurrent admission needs no ordering with session
+methods.
+
+Browser ownership stays with the client: after `loginStart` returns, the thin
+client spawns `open` (macOS), `cmd.exe /c start` (Windows), or `xdg-open`
+(other) detached with `stdio: "ignore"`, best-effort, and always emits the
+authorize URL to the user first — browser open failure never blocks login.
+Credential and provider-config writes happen inside the core process, so the
+process-local `SharedZCodeCredentialStore.onDidChange` subscription rebuilds
+the standalone account source and provider registry without a core restart.
+
+API keys, OAuth tokens, and poll tokens never appear in protocol results or
+logs; core logs only method, provider, and outcome. Attach TUI `/login`,
+`/login <provider>-coding-plan-api-key <key>`, and `/logout` route to these
+methods; ACP intercepts the same commands locally and emits the URL and result
+as `agent_message_chunk` updates instead of forwarding to the model. On any
+failure the visible reply ends with `Or run: zcode login zai`.
+
 ## Tests
 
 Required coverage:

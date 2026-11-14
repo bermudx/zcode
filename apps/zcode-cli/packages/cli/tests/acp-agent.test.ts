@@ -257,6 +257,14 @@ class FakeCore implements AcpCorePort {
     this.sessions.clear();
   }
 
+  coreRequests: Array<{ method: string; params?: unknown }> = [];
+  coreHandler?: (method: string, params?: unknown) => unknown;
+
+  async coreRequest(_sessionId: string, method: string, params?: unknown): Promise<unknown> {
+    this.coreRequests.push({ method, params });
+    return await this.coreHandler?.(method, params);
+  }
+
   catalog: Awaited<ReturnType<AcpCorePort["slashCatalog"]>> | Error = { commands: [], skills: [] };
 
   async slashCatalog(_sessionId: string) {
@@ -1155,7 +1163,18 @@ test("acp agent: available_commands_update advertises goal and dwf after new/res
         ? update.availableCommands.map((command) => command.name)
         : [],
     );
-    assert.deepEqual(commands.sort(), ["dwf", "dwf", "goal", "goal", "skill", "skill"]);
+    assert.deepEqual(commands.sort(), [
+      "dwf",
+      "dwf",
+      "goal",
+      "goal",
+      "login",
+      "login",
+      "logout",
+      "logout",
+      "skill",
+      "skill",
+    ]);
   });
 });
 
@@ -1176,7 +1195,15 @@ test("acp agent: advertised skill names route to the manual skill prompt; catalo
         ? update.availableCommands.map((command) => command.name)
         : [],
     );
-    assert.deepEqual(names, ["goal", "dwf", "skill", "review", "diff-review"]);
+    assert.deepEqual(names, [
+      "goal",
+      "dwf",
+      "login",
+      "logout",
+      "skill",
+      "review",
+      "diff-review",
+    ]);
     const session = core.sessions.get(created.sessionId)!;
     await ctx.request(methods.agent.session.prompt, {
       prompt: [{ text: "/diff-review main", type: "text" }],
@@ -1198,7 +1225,7 @@ test("acp agent: advertised skill names route to the manual skill prompt; catalo
         ? update.availableCommands.map((command) => command.name)
         : [],
     );
-    assert.deepEqual(fallback, ["goal", "dwf", "skill"]);
+    assert.deepEqual(fallback, ["goal", "dwf", "login", "logout", "skill"]);
   });
 });
 
@@ -1307,7 +1334,11 @@ test("acp agent: a failed catalog refetch drops the stale routing catalog", asyn
         ? update.availableCommands.map((command) => command.name)
         : [],
     );
-    assert.deepEqual(names, ["goal", "dwf", "skill"], "failed refetch advertises locals only");
+    assert.deepEqual(
+      names,
+      ["goal", "dwf", "login", "logout", "skill"],
+      "failed refetch advertises locals only",
+    );
     await ctx.request(methods.agent.session.prompt, {
       prompt: [{ text: "/diff-review go", type: "text" }],
       sessionId: created.sessionId,
@@ -1432,7 +1463,7 @@ test("acp agent: a superseded catalog fetch cannot overwrite the newer result", 
       ads[0]!.sessionUpdate === "available_commands_update"
         ? ads[0]!.availableCommands.map((command) => command.name)
         : [],
-      ["goal", "dwf", "skill", "fresh-skill"],
+      ["goal", "dwf", "login", "logout", "skill", "fresh-skill"],
     );
     const session = core.sessions.get(created.sessionId)!;
     await ctx.request(methods.agent.session.prompt, {
@@ -1667,5 +1698,122 @@ test("acp agent: unknown slash text keeps the verbatim forward path", async () =
       sessionId: created.sessionId,
     });
     assert.equal(session.text, "/notacommand hello");
+  });
+});
+
+test("acp agent: /login is intercepted locally, emits URL + result chunks, never reaches submitPrompt", async () => {
+  const core = new FakeCore();
+  core.coreHandler = (method) => {
+    if (method === "auth/loginStart") {
+      return {
+        authorizeUrl: "https://login.example.test/auth?state=s",
+        expiresAt: 1_800_000_000,
+        flowId: "flow-1",
+        pollIntervalSec: 1,
+      };
+    }
+    if (method === "auth/loginComplete") {
+      return {
+        configPath: "/x/cfg",
+        credentialsPath: "/x/creds",
+        model: "glm-5",
+        ok: true,
+        provider: "zai",
+        user: { user_id: "u-1", name: "Tester" },
+      };
+    }
+    return {};
+  };
+  const openedUrls: string[] = [];
+  const app = createAcpAgentApp({
+    openBrowser: async (url) => {
+      openedUrls.push(url);
+      return { command: "xdg-open", opened: true };
+    },
+    sessions: core,
+    version: "1.2.3",
+  });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    const result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/login zai-coding-plan", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(session.text, undefined, "/login must not be forwarded to the model");
+    assert.deepEqual(
+      core.coreRequests.map((r) => r.method),
+      ["auth/loginStart", "auth/loginComplete"],
+    );
+    const chunks = updates
+      .filter((update) => update.sessionUpdate === "agent_message_chunk")
+      .map((update) => (update.content as { text?: string }).text ?? "");
+    assert.ok(
+      chunks.some((text) => text.includes("https://login.example.test/auth?state=s")),
+      "authorize URL must surface as agent_message_chunk",
+    );
+    assert.ok(chunks.some((text) => text.includes("Configured Z.AI Coding Plan")));
+    assert.deepEqual(openedUrls, ["https://login.example.test/auth?state=s"]);
+  });
+});
+
+test("acp agent: /login api-key variant reaches auth/configureApiKey and never echoes the key", async () => {
+  const core = new FakeCore();
+  core.coreHandler = () => ({ configPath: "/x/cfg", model: "glm-5", ok: true, provider: "zai" });
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/login zai-coding-plan-api-key sk-secret-777", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, undefined);
+    assert.deepEqual(core.coreRequests[0]?.params, {
+      apiKey: "sk-secret-777",
+      provider: "zai",
+    });
+    const text = updates
+      .map((update) => JSON.stringify(update))
+      .join("\n");
+    assert.ok(!text.includes("sk-secret-777"), "api key must never reach ACP updates");
+  });
+});
+
+test("acp agent: /logout is intercepted locally and reports the credentials path", async () => {
+  const core = new FakeCore();
+  core.coreHandler = () => ({ credentialsPath: "/x/credentials.json", ok: true });
+  const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
+  const { app: client, updates } = collectUpdates(() => "");
+  await client.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+    const session = core.sessions.get(created.sessionId)!;
+    await ctx.request(methods.agent.session.prompt, {
+      prompt: [{ text: "/logout", type: "text" }],
+      sessionId: created.sessionId,
+    });
+    assert.equal(session.text, undefined);
+    assert.deepEqual(core.coreRequests.map((r) => r.method), ["auth/logout"]);
+    assert.ok(
+      updates.some((update) =>
+        update.sessionUpdate === "agent_message_chunk" &&
+        JSON.stringify(update).includes("Logged out from Coding Plan accounts"),
+      ),
+    );
   });
 });
