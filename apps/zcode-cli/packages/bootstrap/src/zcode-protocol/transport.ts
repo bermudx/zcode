@@ -46,6 +46,16 @@ const PLUGIN_READ_IMMEDIATE_METHODS = new Set<string>([
   zcodeProtocolMethods.pluginsList,
   zcodeProtocolMethods.pluginsOverview,
 ]);
+// auth/loginComplete 的 OAuth 轮询最长可达 5 分钟。若走串行队列，它之后同连接的
+// session/create、session/prompt、catalog 等普通请求全部被堵死；而 client 的取消
+// 只是本地 abort，孤儿轮询会继续占队。login flow 的共享状态只有 pendingFlows map
+// （flowId 自闭合，不依赖前序请求的执行结果），并发执行安全；loginCancel 也必须在
+// 队列外即时到达，才能中止在途 loginComplete，不能等它自然完成。
+const AUTH_FLOW_CONCURRENT_METHODS = new Set<string>([
+  zcodeProtocolMethods.authLoginStart,
+  zcodeProtocolMethods.authLoginComplete,
+  zcodeProtocolMethods.authLoginCancel,
+]);
 // MCP App 的请求由实例凭证和 callId 隔离；若与普通命令一起等待完成，
 // uiCallTool 会挡住自己的 cancel/close，真实 stdio 链路将死锁。
 const MCP_APP_CONCURRENT_METHODS = new Set<string>([
@@ -241,7 +251,8 @@ export class ZCodeProtocolNdjsonConnection {
       "id" in message &&
       "method" in message &&
       (PLUGIN_READ_IMMEDIATE_METHODS.has(message.method) ||
-        SESSION_LIFECYCLE_CONCURRENT_METHODS.has(message.method))
+        SESSION_LIFECYCLE_CONCURRENT_METHODS.has(message.method) ||
+        AUTH_FLOW_CONCURRENT_METHODS.has(message.method))
     ) {
       // Bugfix：插件详情与列表曾排在串行队列里，安装 A 下载期间打开详情卡在组件 loading，
       // 新建右侧标签页（新 store 首次加载 list/overview）卡在骨架屏。读请求不依赖前序请求的

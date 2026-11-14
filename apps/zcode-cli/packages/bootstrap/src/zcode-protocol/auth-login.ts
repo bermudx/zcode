@@ -3,6 +3,8 @@ import type { EnvRecord } from "@zcode/adapters/model";
 import {
   zcodeAuthConfigureApiKeyParamsSchema,
   zcodeAuthConfigureApiKeyResultSchema,
+  zcodeAuthLoginCancelParamsSchema,
+  zcodeAuthLoginCancelResultSchema,
   zcodeAuthLoginCompleteParamsSchema,
   zcodeAuthLoginCompleteResultSchema,
   zcodeAuthLoginStartParamsSchema,
@@ -10,6 +12,7 @@ import {
   zcodeAuthLogoutParamsSchema,
   zcodeAuthLogoutResultSchema,
   type ZCodeAuthConfigureApiKeyResult,
+  type ZCodeAuthLoginCancelResult,
   type ZCodeAuthLoginCompleteResult,
   type ZCodeAuthLoginStartResult,
   type ZCodeAuthLogoutResult,
@@ -51,6 +54,9 @@ export interface ProtocolAuthLoginDeps {
 }
 
 interface PendingOAuthFlow {
+  // client 侧取消只断它自己的等待，够不到 core 的轮询；每个 flow 持有独立
+  // AbortController，auth/loginCancel 才能精确中止在途 loginComplete。
+  abort: AbortController;
   env: EnvRecord;
   flow: CliOAuthLoginFlow;
 }
@@ -68,6 +74,15 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
     context.deps.env ?? process.env;
   const storeFor = (env: EnvRecord) =>
     deps.credentialStore ?? createSharedZCodeCredentialStore({ env });
+  // 轮询同时受两条取消源约束：client socket 断线（detach）与 auth/loginCancel。
+  // 缺 detach 的 context（测试/独立调用）只受 flow 自身 controller 控制。
+  const flowSignal = (
+    abort: AbortController,
+    context: ZCodeProtocolAgentServerContext,
+  ): AbortSignal => {
+    const detach = context.getClientDetachSignal?.();
+    return detach ? AbortSignal.any([detach, abort.signal]) : abort.signal;
+  };
   const sweepExpired = (now: () => number): void => {
     const nowSec = now() / 1_000;
     for (const [flowId, pending] of pendingFlows) {
@@ -82,14 +97,15 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
     const params = parseParams(zcodeAuthLoginStartParamsSchema, rawParams);
     const env = envFor(context);
     sweepExpired(deps.now ?? Date.now);
+    const abort = new AbortController();
     try {
       const flow = await startCliOAuthLoginFlow({
-        abortSignal: context.getClientDetachSignal?.(),
+        abortSignal: flowSignal(abort, context),
         env,
         httpClient: deps.httpClient,
         providerId: params.provider,
       });
-      pendingFlows.set(flow.initData.flow_id, { env, flow });
+      pendingFlows.set(flow.initData.flow_id, { abort, env, flow });
       context.logger?.info("coding plan oauth flow started", {
         event: "zcode_protocol.auth.login_start",
         outcome: "ok",
@@ -127,7 +143,7 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
     }
     try {
       const result = await completeCliOAuthLoginFlow({
-        abortSignal: context.getClientDetachSignal?.(),
+        abortSignal: flowSignal(pending.abort, context),
         apiKeyResolver: deps.apiKeyResolver,
         credentialStore: deps.credentialStore,
         env: pending.env,
@@ -166,6 +182,27 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
         ok: false,
       });
     }
+  };
+
+  const loginCancel = async (
+    context: ZCodeProtocolAgentServerContext,
+    rawParams: unknown,
+  ): Promise<ZCodeAuthLoginCancelResult> => {
+    const params = parseParams(zcodeAuthLoginCancelParamsSchema, rawParams);
+    const pending = pendingFlows.get(params.flowId);
+    if (pending) {
+      // abort reason 会成为在途 loginComplete 结果体的 error 文本，与 client 侧
+      // 取消文案保持一致；flow 立即摘除，防止取消后同 flowId 重新 complete。
+      pending.abort.abort(new Error("Login cancelled."));
+      pendingFlows.delete(params.flowId);
+    }
+    // 取消按目标状态幂等：flow 未知/已完成/已过期时同样回 ok。
+    context.logger?.info("coding plan oauth login cancel requested", {
+      event: "zcode_protocol.auth.login_cancel",
+      outcome: pending ? "ok" : "unknown_flow",
+      provider: pending?.flow.providerId ?? "unknown",
+    });
+    return zcodeAuthLoginCancelResultSchema.parse({ ok: true });
   };
 
   const configureApiKey = async (
@@ -231,6 +268,7 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
 
   return {
     configureApiKey,
+    loginCancel,
     loginComplete,
     loginStart,
     logout,
@@ -240,5 +278,6 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
 const defaultHandlers = createProtocolAuthLoginHandlers();
 export const authLoginStart = defaultHandlers.loginStart;
 export const authLoginComplete = defaultHandlers.loginComplete;
+export const authLoginCancel = defaultHandlers.loginCancel;
 export const authConfigureApiKey = defaultHandlers.configureApiKey;
 export const authLogout = defaultHandlers.logout;

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   zcodeAuthConfigureApiKeyParamsSchema,
   zcodeAuthConfigureApiKeyResultSchema,
+  zcodeAuthLoginCancelParamsSchema,
+  zcodeAuthLoginCancelResultSchema,
   zcodeAuthLoginCompleteParamsSchema,
   zcodeAuthLoginCompleteResultSchema,
   zcodeAuthLoginStartParamsSchema,
@@ -12,9 +14,10 @@ import {
 } from "../src/index.js";
 
 describe("zcode protocol auth/* contracts", () => {
-  it("exposes the four thin-client auth methods", () => {
+  it("exposes the five thin-client auth methods", () => {
     expect(zcodeProtocolMethods.authLoginStart).toBe("auth/loginStart");
     expect(zcodeProtocolMethods.authLoginComplete).toBe("auth/loginComplete");
+    expect(zcodeProtocolMethods.authLoginCancel).toBe("auth/loginCancel");
     expect(zcodeProtocolMethods.authConfigureApiKey).toBe("auth/configureApiKey");
     expect(zcodeProtocolMethods.authLogout).toBe("auth/logout");
   });
@@ -55,6 +58,17 @@ describe("zcode protocol auth/* contracts", () => {
     // 失败分支不允许携带成功字段。
     expect(() =>
       zcodeAuthLoginCompleteResultSchema.parse({ ...failed, model: "m" }),
+    ).toThrow();
+  });
+
+  it("round-trips loginCancel params and result", () => {
+    expect(zcodeAuthLoginCancelParamsSchema.parse({ flowId: "f" })).toEqual({ flowId: "f" });
+    expect(() => zcodeAuthLoginCancelParamsSchema.parse({ flowId: "" })).toThrow();
+    expect(() => zcodeAuthLoginCancelParamsSchema.parse({})).toThrow();
+    expect(zcodeAuthLoginCancelResultSchema.parse({ ok: true })).toEqual({ ok: true });
+    // 结果体只回 ok:true——取消按目标状态幂等，不带 error 字段。
+    expect(() =>
+      zcodeAuthLoginCancelResultSchema.parse({ error: "x", ok: true }),
     ).toThrow();
   });
 

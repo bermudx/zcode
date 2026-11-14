@@ -161,6 +161,30 @@ describe("zcode protocol auth/* handlers", () => {
     expect(complete.error.length).toBeGreaterThan(0);
   });
 
+  it("loginCancel aborts an in-flight loginComplete and removes the flow", async () => {
+    const f = await fixture();
+    const http = httpClientFixture();
+    // poll 永不返回：取消必须经 abort signal 打断，而不是等服务端响应。
+    http.poll = () => new Promise<HttpClientResponse>(() => {});
+    const handlers = createProtocolAuthLoginHandlers({
+      apiKeyResolver,
+      httpClient: http.httpClient,
+      sleep: async () => {},
+    });
+    const start = await handlers.loginStart(f.context, { provider: "zai" });
+    const completePromise = handlers.loginComplete(f.context, { flowId: start.flowId });
+    const cancel = await handlers.loginCancel(f.context, { flowId: start.flowId });
+    assert.equal(cancel.ok, true);
+    const complete = await completePromise;
+    assert.equal(complete.ok, false);
+    expect(complete.error).toBe("Login cancelled.");
+    // flow 已摘除：同 flowId 的 complete 走未知 flow 分支，不能复活已取消的登录。
+    const retry = await handlers.loginComplete(f.context, { flowId: start.flowId });
+    assert.equal(retry.ok, false);
+    expect(retry.error).toContain("Run /login again");
+    await rm(f.dir, { force: true, recursive: true });
+  });
+
   it("loginComplete rejects unknown flow ids", async () => {
     const f = await fixture();
     const handlers = createProtocolAuthLoginHandlers({ httpClient: httpClientFixture().httpClient });

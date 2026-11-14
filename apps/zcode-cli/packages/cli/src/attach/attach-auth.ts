@@ -120,6 +120,8 @@ export interface ThinLoginOptions {
 /**
  * auth/loginStart → 本地开浏览器 → auth/loginComplete。URL 永远先经
  * onAuthorizeUrl 暴露给调用方展示，浏览器打开失败不阻断登录。
+ * start 之后 abortSignal 触发会 best-effort 补发 auth/loginCancel，
+ * 中止 core 侧孤儿轮询。
  */
 export async function loginViaAttachProtocol(
   options: ThinLoginOptions,
@@ -132,29 +134,44 @@ export async function loginViaAttachProtocol(
       signal,
     ),
   );
-  await options.onAuthorizeUrl?.({
-    authorize_url: start.authorizeUrl,
-    expires_at: start.expiresAt,
-    flow_id: start.flowId,
-    poll_interval_sec: start.pollIntervalSec,
-  });
-  if (signal?.aborted) throw signal.reason ?? new Error("Login cancelled.");
-  const browser = await (options.openBrowser ?? openThinAuthUrl)(start.authorizeUrl);
-  const completed = zcodeAuthLoginCompleteResultSchema.parse(
-    await withAbort(
-      () => options.request(zcodeProtocolMethods.authLoginComplete, { flowId: start.flowId }),
-      signal,
-    ),
-  );
-  if (!completed.ok) throw new Error(completed.error);
-  return {
-    ...(browser ? { browser } : {}),
-    configPath: completed.configPath,
-    credentialsPath: completed.credentialsPath,
-    model: completed.model,
-    providerId: completed.provider,
-    user: completed.user,
+  // start 之后的本地 abort 只断 client 的等待：core 的孤儿轮询会继续跑，还会占住
+  // 该连接上的后续普通请求，必须显式发 auth/loginCancel 中止。best-effort——
+  // cancel 失败只让 flow 等 expires_at 惰性过期，不改变本地取消语义。
+  const cancelCoreFlow = () => {
+    void options
+      .request(zcodeProtocolMethods.authLoginCancel, { flowId: start.flowId })
+      .catch(() => {});
   };
+  signal?.addEventListener("abort", cancelCoreFlow, { once: true });
+  try {
+    await options.onAuthorizeUrl?.({
+      authorize_url: start.authorizeUrl,
+      expires_at: start.expiresAt,
+      flow_id: start.flowId,
+      poll_interval_sec: start.pollIntervalSec,
+    });
+    if (signal?.aborted) throw signal.reason ?? new Error("Login cancelled.");
+    const browser = await (options.openBrowser ?? openThinAuthUrl)(start.authorizeUrl);
+    const completed = zcodeAuthLoginCompleteResultSchema.parse(
+      await withAbort(
+        () => options.request(zcodeProtocolMethods.authLoginComplete, { flowId: start.flowId }),
+        signal,
+      ),
+    );
+    if (!completed.ok) throw new Error(completed.error);
+    return {
+      ...(browser ? { browser } : {}),
+      configPath: completed.configPath,
+      credentialsPath: completed.credentialsPath,
+      model: completed.model,
+      providerId: completed.provider,
+      user: completed.user,
+    };
+  } finally {
+    // 登录已结束（成功/失败/取消）后移除监听，避免晚到的 abort 对一个
+    // 已完结的 flowId 再发一次无意义 cancel。
+    signal?.removeEventListener("abort", cancelCoreFlow);
+  }
 }
 
 export async function configureApiKeyViaAttachProtocol(input: {

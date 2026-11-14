@@ -2859,6 +2859,21 @@ export type ZCodeAuthLoginCompleteResult = z.infer<
   typeof zcodeAuthLoginCompleteResultSchema
 >;
 
+// client 侧取消只是本地决定：core 的轮询仍在跑，需要显式 cancel 中止孤儿 flow。
+// 取消按目标状态（无 pending 登录）幂等：未知或已完成的 flowId 也回 ok。
+export const zcodeAuthLoginCancelParamsSchema = z
+  .object({
+    flowId: nonEmptyString,
+  })
+  .strict();
+export type ZCodeAuthLoginCancelParams = z.infer<typeof zcodeAuthLoginCancelParamsSchema>;
+export const zcodeAuthLoginCancelResultSchema = z
+  .object({
+    ok: z.literal(true),
+  })
+  .strict();
+export type ZCodeAuthLoginCancelResult = z.infer<typeof zcodeAuthLoginCancelResultSchema>;
+
 export const zcodeAuthConfigureApiKeyParamsSchema = z
   .object({
     apiKey: nonEmptyString,
@@ -4631,6 +4646,7 @@ export const zcodeProtocolMethods = {
   // 浏览器打开与 URL 展示归 client（core 可能无显示）。
   authLoginStart: "auth/loginStart",
   authLoginComplete: "auth/loginComplete",
+  authLoginCancel: "auth/loginCancel",
   authConfigureApiKey: "auth/configureApiKey",
   authLogout: "auth/logout",
   workspaceUpdateInteractionPreferences: "workspace/updateInteractionPreferences",

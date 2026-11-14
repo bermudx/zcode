@@ -211,6 +211,39 @@ test("loginViaAttachProtocol: 已 abort 的 signal 不发任何请求", async ()
   assert.equal(called, 0);
 });
 
+test("loginViaAttachProtocol: start 后 abort 会向 core 发 auth/loginCancel", async () => {
+  const calls: Array<{ method: string; params?: unknown }> = [];
+  const controller = new AbortController();
+  const completeSent = Promise.withResolvers<void>();
+  const cancelSent = Promise.withResolvers<void>();
+  const request = async (method: string, params?: unknown) => {
+    calls.push({ method, params });
+    if (method === zcodeProtocolMethods.authLoginStart) return loginStartResult;
+    if (method === zcodeProtocolMethods.authLoginComplete) {
+      completeSent.resolve();
+      return new Promise(() => {}); // core 仍在轮询，永不返回
+    }
+    if (method === zcodeProtocolMethods.authLoginCancel) {
+      cancelSent.resolve();
+      return { ok: true };
+    }
+    throw new Error(`unexpected ${method}`);
+  };
+  const pending = loginViaAttachProtocol({
+    abortSignal: controller.signal,
+    providerId: "zai",
+    request,
+    openBrowser: async () => ({ command: "xdg-open", opened: true }),
+  });
+  await completeSent.promise;
+  controller.abort();
+  // 本地依旧按取消拒绝；core 侧的孤儿轮询由 loginCancel 终止。
+  await assert.rejects(pending);
+  await cancelSent.promise;
+  const cancelCall = calls.find((c) => c.method === zcodeProtocolMethods.authLoginCancel);
+  assert.deepEqual(cancelCall?.params, { flowId: "flow-1" });
+});
+
 test("configureApiKeyViaAttachProtocol / logoutViaAttachProtocol 的 wire 形状", async () => {
   const calls: Array<{ method: string; params?: unknown }> = [];
   const request = async (method: string, params?: unknown) => {

@@ -130,6 +130,7 @@ import { updateInteractionPreferences } from "./interaction-preferences.js";
 import { refreshProviderRegistry, updateAccountProviderConfig } from "./account-provider-config.js";
 import {
   authConfigureApiKey,
+  authLoginCancel,
   authLoginComplete,
   authLoginStart,
   authLogout,
@@ -950,6 +951,8 @@ export class ZCodeProtocolAgentServer {
         return await authLoginStart(this.context, request.params);
       case zcodeProtocolMethods.authLoginComplete:
         return await authLoginComplete(this.context, request.params);
+      case zcodeProtocolMethods.authLoginCancel:
+        return await authLoginCancel(this.context, request.params);
       case zcodeProtocolMethods.authConfigureApiKey:
         return await authConfigureApiKey(this.context, request.params);
       case zcodeProtocolMethods.authLogout:

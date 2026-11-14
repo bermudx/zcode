@@ -82,3 +82,39 @@ describe("MCP App NDJSON admission", () => {
     expect(order).toEqual(["session/create", "mcp/uiCancelCall", "session/read"]);
   });
 });
+
+describe("auth/* NDJSON admission", () => {
+  it("admits session/create while a slow auth/loginComplete is pending", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const loginEntered = Promise.withResolvers<void>();
+    const finishLogin = Promise.withResolvers<void>();
+    const order: string[] = [];
+    const transport = new ZCodeProtocolNdjsonConnection({
+      input,
+      output,
+      async handleMessage(message) {
+        if (!("method" in message) || !("id" in message)) return;
+        if (message.method === "auth/loginComplete") {
+          order.push("login:start");
+          loginEntered.resolve();
+          await finishLogin.promise;
+          order.push("login:done");
+        }
+        if (message.method === "session/create") order.push("create:start");
+        return { id: message.id, result: {} };
+      },
+    });
+    transport.start();
+    input.write(
+      '{"id":1,"method":"auth/loginComplete"}\n{"id":2,"method":"session/create"}\n',
+    );
+    await loginEntered.promise;
+    finishLogin.resolve();
+    input.end();
+    await transport.waitForClose();
+    // loginComplete 的 OAuth 轮询可达 5 分钟：走串行队列时 session/create 只能
+    // 等它完成才进入 handler，队列外并发执行则立即开始。
+    expect(order).toEqual(["login:start", "create:start", "login:done"]);
+  });
+});

@@ -274,7 +274,7 @@ or use a future callback-paste fallback.
 
 The shared-core attach clients (terminal `zcode-attach` TUI and the ACP lane)
 perform login through protocol methods on the core, never through bootstrap or
-adapter imports. Four methods cover the surface:
+adapter imports. Five methods cover the surface:
 
 - `auth/loginStart` `{provider: "zai" | "bigmodel"}` →
   `{flowId, authorizeUrl, expiresAt, pollIntervalSec}`. The core initializes the
@@ -286,9 +286,24 @@ adapter imports. Four methods cover the surface:
   timeout and persists credentials and provider config exactly as
   `zcode login` does. Login failures return in the result body, not as protocol
   errors, so the client can render readable text plus the standalone fallback.
+- `auth/loginCancel` `{flowId}` → `{ok: true}`. Aborts the core-side poll for a
+  pending flow and removes it; idempotent for unknown or finished flow ids. The
+  thin client sends it best-effort when its abort signal fires after
+  `loginStart`, because a client-side cancel cannot reach the orphaned core
+  poll. An aborted `loginComplete` returns `{ok: false, error: "Login
+  cancelled."}`.
 - `auth/configureApiKey` `{provider, apiKey}` → `{ok: true, provider, model,
   configPath} | {ok: false, error}`. Reuses the standalone API-key setup.
 - `auth/logout` `{provider?}` → `{ok: true, credentialsPath}`.
+
+`auth/loginStart`, `auth/loginComplete`, and `auth/loginCancel` bypass the
+per-connection serial request queue in the protocol transport (same pattern as
+the session-lifecycle concurrent set): a login poll can run for up to five
+minutes and must not head-of-line block `session/*` requests on the same
+connection, and `loginCancel` must reach the core without waiting for the poll
+it aborts. The shared flow state is confined to the core's pending-flow map
+keyed by `flowId`, so concurrent admission needs no ordering with session
+methods.
 
 Browser ownership stays with the client: after `loginStart` returns, the thin
 client spawns `open` (macOS), `cmd.exe /c start` (Windows), or `xdg-open`
