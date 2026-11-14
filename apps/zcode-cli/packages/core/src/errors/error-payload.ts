@@ -281,10 +281,16 @@ const PROJECT_TOKEN_LOGIN_FAILED = "project_token_login_failed";
 // Bug 原因（issue #50）：Z.AI 换证失败只有内部码 project_token_login_failed，
 // 用户看不到过期/撤销原因也不知道要重新登录。这里统一映射为客户端可见文案，
 // 附加 envelope 的 code/msg 原因（仅当存在）；原始码仍留在 detail/underlying 字段。
+// issue #50 F1：runner 包装层（RuntimeHeadersRefreshError/AiSdkModelAdapterError）
+// 会把同一 message 复制到外层错误但不携带 loginFailure，第一个同文案帧可能没有
+// 原因；必须优先取携带结构化原因的同文案帧，原因才进客户端文案。
 function projectZaiLoginFailureMessage(
   frames: readonly ErrorPayloadFrame[],
 ): string | undefined {
-  const frame = frames.find((item) => item.originalMessage === PROJECT_TOKEN_LOGIN_FAILED);
+  const frame =
+    frames.find(
+      (item) => item.originalMessage === PROJECT_TOKEN_LOGIN_FAILED && item.loginFailure,
+    ) ?? frames.find((item) => item.originalMessage === PROJECT_TOKEN_LOGIN_FAILED);
   if (!frame) return undefined;
   const reason = [frame.loginFailure?.code, frame.loginFailure?.msg]
     .map((part) => sanitizeText(part))
