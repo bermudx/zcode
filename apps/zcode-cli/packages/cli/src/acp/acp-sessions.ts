@@ -47,6 +47,11 @@ type BoundAcpSession = AcpSession & {
 export interface AcpCorePort {
   closeAll(): Promise<void>;
   closeSession(sessionId: string): Promise<void>;
+  /**
+   * 进程级协议 op（auth/*、catalog 等非会话方法）：经该会话所属 workspace lane
+   * 的当前 client 直达共享 core；重连后自动跟随新连接。
+   */
+  coreRequest(sessionId: string, method: string, params?: unknown): Promise<unknown>;
   get(sessionId: string): AcpSession | undefined;
   /** client 注入 MCP（issue #31）：undefined=未声明；[]=显式清空。 */
   open(cwd: string, mcpServers?: ZCodeProtocolMcpServer[]): Promise<AcpSession>;
@@ -186,6 +191,13 @@ export class AcpCoreSessions implements AcpCorePort {
       // 按两者命中（issue #24）；展示名由 acp-commands 取 qualifiedName ?? name。
       skills: toSkillCatalogEntries(skills.skills),
     };
+  }
+
+  async coreRequest(sessionId: string, method: string, params?: unknown): Promise<unknown> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Unknown ACP session: ${sessionId}`);
+    const lane = await this.laneFor(session.cwd);
+    return await lane.runtime.currentClient().request(method, params);
   }
 
   /** ACP close = 真停止：先停当前回合，再让 core 释放 runtime（历史仍留存）。 */

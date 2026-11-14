@@ -27,12 +27,18 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 
-if (process.env.MCP_FIXTURE_PID_FILE) {
-  writeFileSync(process.env.MCP_FIXTURE_PID_FILE, String(process.pid));
-}
-if (process.env.MCP_FIXTURE_PID_DIR) {
-  mkdirSync(process.env.MCP_FIXTURE_PID_DIR, { recursive: true });
-  writeFileSync(join(process.env.MCP_FIXTURE_PID_DIR, `${process.pid}.pid`), String(process.pid));
+// SDK 2.0 auto/pin 协商会先派一个一次性 sibling 探针进程（同 env、只发
+// server/discover 后被回收），会话子进程随后才启动。启动即落 pid 会让探针
+// 先写同一文件，测试读到的是已回收的探针 pid；只有会话 transport 会收到
+// initialize，pid 记录改在收到 initialize 时落盘，文件只指向会话子进程。
+function recordPid() {
+  if (process.env.MCP_FIXTURE_PID_FILE) {
+    writeFileSync(process.env.MCP_FIXTURE_PID_FILE, String(process.pid));
+  }
+  if (process.env.MCP_FIXTURE_PID_DIR) {
+    mkdirSync(process.env.MCP_FIXTURE_PID_DIR, { recursive: true });
+    writeFileSync(join(process.env.MCP_FIXTURE_PID_DIR, `${process.pid}.pid`), String(process.pid));
+  }
 }
 const holdInitialize = process.env.MCP_FIXTURE_HOLD_INITIALIZE === "1";
 const initReleaseFile = process.env.MCP_FIXTURE_INITIALIZE_RELEASE_FILE;
@@ -68,6 +74,7 @@ process.stdin.on("data", (chunk) => {
     }
     if (message.id === undefined) continue; // notifications need no response
     if (message.method === "initialize") {
+      recordPid();
       if (holdInitialize) continue; // 握手永远不完成—— detach/close 必须中止它
       if (failInitialize) {
         respond({

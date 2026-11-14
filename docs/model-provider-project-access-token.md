@@ -72,6 +72,8 @@ Token 不写 Provider Config、Registry、Session、UI 快照、日志或 creden
 
 是否允许提前刷新复用旧 PAT 仍只看“临时故障”类别，与错误码细分无关；新增错误码只服务日志与 runtime headers 失败文本的诊断，不新增重试、回退或 UI 分支。
 
+例外：Standalone Z.ai 的 `/api/auth/z/login` 换证失败（HTTP 非 2xx，或 2xx 业务 code 非成功/缺 Token）在 `project_token_login_failed` 错误与 observe 事件上附带结构化原因 `{ httpStatus?, code?, msg? }`——只取 envelope 的 code/msg 字段与状态码，不保留响应体、请求头或 Token；observe 事件字段为 `httpStatus` / `zaiCode` / `zaiMessage`。客户端可见文案由 core 错误投影统一映射为提示重新登录的可操作消息（含原因时附 `(<code>: <msg>)`），原始错误码仍保留在 detail；各前端不各自解析该错误。
+
 ## 长任务与业务登录凭据刷新
 
 闲时模型每个物理 HTTP attempt 必须通过现有 Provider Runtime Headers 私有通道向 Host 换取当前 PAT。派发时仅冻结票据和账号作用域约束，不把派发时 PAT 当作整轮有效凭据。`requestAuth.accountScope` 是 Host 生成的不可逆作用域校验值（登录生命周期、family、个人/团队、组织/项目/产品），不作为账号身份、不包含短期 PAT、不持久化或写日志。后续请求带 `expectedAccountScope`；账号/套餐变化或换证期间作用域变化立即失败，不把原票据套到新账号。Mock 无真实 PAT，原静态注入保持。

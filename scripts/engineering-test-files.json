@@ -156,6 +156,7 @@
   "packages/shared/src/request-security-edition/contract.test.ts",
   "packages/shared/test/usageCodingPlanQuotaSchema.test.ts",
   "packages/shared/test/zcodeProtocol.test.ts",
+  "packages/shared/test/zcodeProtocolAuth.test.ts",
   "packages/web/test/viteConfigLoad.test.ts",
   "packages/zcode-server-cli/test/packaging.test.ts",
   "packages/zcode-server-cli/test/stageRemoteAssetsCli.test.ts",

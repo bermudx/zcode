@@ -18,6 +18,8 @@ import {
   resolveSkillInvocation,
   runDwfCommand,
   runGoalCommand,
+  runLoginCommand,
+  runLogoutCommand,
   slashCommandsUpdate,
   watchTurnSettlement,
   type AcpSkillResolution,
@@ -214,7 +216,7 @@ test("slashCommandsUpdate: local commands only when the core catalog is unavaila
   const update = slashCommandsUpdate();
   assert.equal(update.sessionUpdate, "available_commands_update");
   const names = update.availableCommands.map((command) => command.name).sort();
-  assert.deepEqual(names, ["dwf", "goal", "skill"]);
+  assert.deepEqual(names, ["dwf", "goal", "login", "logout", "skill"]);
   for (const command of update.availableCommands) {
     assert.ok(command.description.length > 0);
   }
@@ -238,7 +240,15 @@ test("slashCommandsUpdate: advertises custom commands and skills, first owner wi
   const update = slashCommandsUpdate(catalog);
   assert.equal(update.sessionUpdate, "available_commands_update");
   const rows = update.availableCommands.map((command) => [command.name, command.description]);
-  assert.deepEqual(rows.map(([name]) => name), ["goal", "dwf", "skill", "review", "diff-review"]);
+  assert.deepEqual(rows.map(([name]) => name), [
+    "goal",
+    "dwf",
+    "login",
+    "logout",
+    "skill",
+    "review",
+    "diff-review",
+  ]);
   assert.equal(rows.find(([name]) => name === "review")?.[1], "Review Guidelines");
 });
 
@@ -260,7 +270,7 @@ test("slashCommandsUpdate: case-colliding names dedupe to the routing winner", (
   const rows = update.availableCommands.map((command) => [command.name, command.description]);
   assert.deepEqual(
     rows.map(([name]) => name),
-    ["goal", "dwf", "skill", "Review", "diff-review"],
+    ["goal", "dwf", "login", "logout", "skill", "Review", "diff-review"],
   );
   assert.equal(rows.find(([name]) => name === "Review")?.[1], "command winner");
 });
@@ -508,4 +518,121 @@ test("watchTurnSettlement: abort and dispose release the sink", async () => {
     AbortSignal.abort(),
   );
   assert.equal(await alreadyAborted.promise, "aborted");
+});
+
+// ── /login /logout（issue #49）─────────────────────────────────────────
+// 本地路由：不进模型；URL 与结果走 send()（acp-agent 转 agent_message_chunk）。
+
+test("parseLocalSlashCommand: /login 与 /logout 进本地路由", () => {
+  assert.deepEqual(parseLocalSlashCommand("/login zai-coding-plan"), {
+    args: "zai-coding-plan",
+    kind: "login",
+  });
+  assert.deepEqual(parseLocalSlashCommand("/LOGIN bigmodel-coding-plan-api-key sk-x"), {
+    args: "bigmodel-coding-plan-api-key sk-x",
+    kind: "login",
+  });
+  assert.deepEqual(parseLocalSlashCommand("/logout"), { args: "", kind: "logout" });
+  assert.equal(parseLocalSlashCommand("/loginflow x"), null);
+});
+
+test("runLoginCommand zai-coding-plan: start → URL chunk → complete → 结果 chunk", async () => {
+  const calls: Array<{ method: string; params?: unknown }> = [];
+  const sent: string[] = [];
+  const urls: string[] = [];
+  await runLoginCommand({
+    args: "zai-coding-plan",
+    request: async (method, params) => {
+      calls.push({ method, params });
+      if (method === "auth/loginStart") {
+        return {
+          authorizeUrl: "https://login.example.test/auth?state=s",
+          expiresAt: 1_800_000_000,
+          flowId: "flow-1",
+          pollIntervalSec: 1,
+        };
+      }
+      return {
+        configPath: "/x/cfg",
+        credentialsPath: "/x/creds",
+        model: "glm-5",
+        ok: true,
+        provider: "zai",
+        user: { user_id: "u-1", name: "Tester" },
+      };
+    },
+    openBrowser: async (url) => {
+      urls.push(url);
+      return { command: "xdg-open", opened: true };
+    },
+    send: (text) => sent.push(text),
+  });
+  assert.deepEqual(calls[0]?.method, "auth/loginStart");
+  assert.deepEqual(calls[1]?.method, "auth/loginComplete");
+  assert.equal(sent.length, 2);
+  assert.match(sent[0] ?? "", /Open this URL to sign in with Z\.AI/);
+  assert.ok(sent[0]?.includes("https://login.example.test/auth?state=s"));
+  assert.match(sent[1] ?? "", /Configured Z\.AI Coding Plan as Tester/);
+  assert.deepEqual(urls, ["https://login.example.test/auth?state=s"]);
+});
+
+test("runLoginCommand api-key 变体：密钥只进协议 params，不进任何可见文案", async () => {
+  const sent: string[] = [];
+  let captured: unknown;
+  await runLoginCommand({
+    args: "bigmodel-coding-plan-api-key sk-secret-1234",
+    request: async (_method, params) => {
+      captured = params;
+      return { configPath: "/x/cfg", model: "glm-5", ok: true, provider: "bigmodel" };
+    },
+    send: (text) => sent.push(text),
+  });
+  assert.deepEqual(captured, { apiKey: "sk-secret-1234", provider: "bigmodel" });
+  assert.match(sent[0] ?? "", /Configured BigModel Coding Plan/);
+  assert.ok(!sent.join("\n").includes("sk-secret-1234"), "api key must not be echoed");
+});
+
+test("runLoginCommand 失败：结果 chunk 以 zcode login zai 收尾", async () => {
+  const sent: string[] = [];
+  await runLoginCommand({
+    args: "zai-coding-plan",
+    request: async (method) =>
+      method === "auth/loginStart"
+        ? {
+            authorizeUrl: "https://x.test/a",
+            expiresAt: 1_800_000_000,
+            flowId: "f",
+            pollIntervalSec: 1,
+          }
+        : { error: "Authorization timed out.", ok: false },
+    openBrowser: async () => ({ command: "xdg-open", opened: true }),
+    send: (text) => sent.push(text),
+  });
+  assert.match(sent.at(-1) ?? "", /Authorization timed out/);
+  assert.match(sent.at(-1) ?? "", /zcode login zai$/);
+});
+
+test("runLoginCommand 裸命令与未知参数 → usage 文案", async () => {
+  const sent: string[] = [];
+  const request = async () => {
+    throw new Error("must not be called");
+  };
+  await runLoginCommand({ args: "", request, send: (t) => sent.push(t) });
+  await runLoginCommand({ args: "weird", request, send: (t) => sent.push(t) });
+  assert.equal(sent.length, 2);
+  assert.match(sent[0] ?? "", /^Usage: \/login/);
+});
+
+test("runLogoutCommand 走 auth/logout 并回报凭据路径", async () => {
+  const sent: string[] = [];
+  const methods: string[] = [];
+  await runLogoutCommand({
+    request: async (method) => {
+      methods.push(method);
+      return { credentialsPath: "/x/credentials.json", ok: true };
+    },
+    send: (t) => sent.push(t),
+  });
+  assert.deepEqual(methods, ["auth/logout"]);
+  assert.match(sent[0] ?? "", /Logged out from Coding Plan accounts/);
 });

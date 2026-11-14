@@ -128,6 +128,13 @@ import {
 import { listPluginUiSurfaces } from "./plugin-ui-surfaces.js";
 import { updateInteractionPreferences } from "./interaction-preferences.js";
 import { refreshProviderRegistry, updateAccountProviderConfig } from "./account-provider-config.js";
+import {
+  authConfigureApiKey,
+  authLoginCancel,
+  authLoginComplete,
+  authLoginStart,
+  authLogout,
+} from "./auth-login.js";
 import { updateModelIoPreferences } from "./model-io-preferences.js";
 import { updateOffPeakToolPolicy } from "./off-peak-tool-policy.js";
 import { updateDynamicWorkflowPolicy } from "./dynamic-workflow-policy.js";
@@ -940,6 +947,16 @@ export class ZCodeProtocolAgentServer {
         return await updateAccountProviderConfig(this.context, request.params);
       case zcodeProtocolMethods.providerRefreshRegistry:
         return await refreshProviderRegistry(this.context, request.params);
+      case zcodeProtocolMethods.authLoginStart:
+        return await authLoginStart(this.context, request.params);
+      case zcodeProtocolMethods.authLoginComplete:
+        return await authLoginComplete(this.context, request.params);
+      case zcodeProtocolMethods.authLoginCancel:
+        return await authLoginCancel(this.context, request.params);
+      case zcodeProtocolMethods.authConfigureApiKey:
+        return await authConfigureApiKey(this.context, request.params);
+      case zcodeProtocolMethods.authLogout:
+        return await authLogout(this.context, request.params);
       case zcodeProtocolMethods.workspaceUpdateInteractionPreferences:
         return await updateInteractionPreferences(this.context, request.params);
       case zcodeProtocolMethods.workspaceUpdateModelIoPreferences:

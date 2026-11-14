@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHttpClientError, type HttpClientPort } from "@zcode/contracts";
-import { createCodingPlanApiKeyResolver } from "../src/auth/coding-plan-api-key.js";
+import {
+  CodingPlanApiKeyError,
+  createCodingPlanApiKeyResolver,
+} from "../src/auth/coding-plan-api-key.js";
 
 function fixture(options: { jwtTtl?: number; expiresIn?: number; failures?: number[] } = {}) {
   let logins = 0;
@@ -177,4 +180,79 @@ it.each([
   recovered = true;
   await expect(resolver.resolve(input)).resolves.toBe("valid-pat");
   expect(JSON.stringify(observe.mock.calls)).not.toMatch(/secret|business-jwt|valid-pat|oauth/);
+});
+
+describe("换证失败原因（issue #50）", () => {
+  it("2xx 业务拒绝：错误携带 z.ai code/msg，日志记录它们且不含 token", async () => {
+    const observe = vi.fn();
+    const request = vi.fn(async ({ url }: { url: string }) => {
+      if (url.endsWith("/api/auth/z/login"))
+        return {
+          status: 200,
+          body: new TextEncoder().encode(
+            JSON.stringify({ code: 1002, msg: "login expired" }),
+          ),
+        };
+      throw new Error("unexpected request");
+    });
+    const resolver = createCodingPlanApiKeyResolver({
+      httpClient: { request } as unknown as HttpClientPort,
+      observe,
+    });
+    const error = await resolver
+      .resolve({ family: "zai", accessToken: "oauth-secret-token", accountIdentity: "user" })
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(CodingPlanApiKeyError);
+    const failure = error as CodingPlanApiKeyError;
+    expect(failure.message).toBe("project_token_login_failed");
+    expect(failure.loginFailure).toEqual({ code: "1002", msg: "login expired" });
+    expect(observe).toHaveBeenCalledExactlyOnceWith({
+      family: "zai",
+      stage: "resolve",
+      code: "project_token_login_failed",
+      zaiCode: "1002",
+      zaiMessage: "login expired",
+    });
+    const logged = JSON.stringify(observe.mock.calls);
+    expect(logged).toContain("1002");
+    expect(logged).toContain("login expired");
+    expect(logged).not.toContain("oauth-secret-token");
+  });
+
+  it("HTTP 非 2xx 拒绝：错误与日志记录状态码和 envelope code/msg", async () => {
+    const observe = vi.fn();
+    const request = vi.fn(async ({ url }: { url: string }) => {
+      if (url.endsWith("/api/auth/z/login"))
+        return {
+          status: 401,
+          body: new TextEncoder().encode(
+            JSON.stringify({ code: "401", msg: "unauthorized" }),
+          ),
+        };
+      throw new Error("unexpected request");
+    });
+    const resolver = createCodingPlanApiKeyResolver({
+      httpClient: { request } as unknown as HttpClientPort,
+      observe,
+    });
+    const error = await resolver
+      .resolve({ family: "zai", accessToken: "oauth-secret-token", accountIdentity: "user" })
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(CodingPlanApiKeyError);
+    const failure = error as CodingPlanApiKeyError;
+    expect(failure.loginFailure).toEqual({
+      httpStatus: 401,
+      code: "401",
+      msg: "unauthorized",
+    });
+    expect(observe).toHaveBeenCalledExactlyOnceWith({
+      family: "zai",
+      stage: "resolve",
+      code: "project_token_login_failed",
+      httpStatus: 401,
+      zaiCode: "401",
+      zaiMessage: "unauthorized",
+    });
+    expect(JSON.stringify(observe.mock.calls)).not.toContain("oauth-secret-token");
+  });
 });
