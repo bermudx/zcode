@@ -3,7 +3,14 @@
 PR: https://github.com/bermudx/zcode/pull/57 (`patch/thin-client-login`)
 Finding: verifier FAIL on `29412e11` —
 https://github.com/bermudx/zcode/pull/57#issuecomment-6871897979 (P2, proven).
-Verification run: pending — updated after CI on the new head.
+Fix head: `da6c495d`.
+Verification run: https://github.com/bermudx/zcode/actions/runs/43558619257 —
+**success**; "Fork tests (selected)": 6045 results, 0 NEW FAILURES, 0 FLAKY,
+1 KNOWN (`zcode-protocol-telemetry-lifecycle`, pre-existing). Typecheck (piz
+gate), Lint (root + CLI), Architecture check (changed) all pass. Note: test (d)
+lives in `packages/shared/test/` which branch CI reports as "NOT COVERED (root
+workspace, run separately)" — a documented fork-tests limit; it runs on the
+main-branch full suite.
 
 ## Finding
 
