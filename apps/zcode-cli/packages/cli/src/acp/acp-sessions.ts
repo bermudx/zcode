@@ -7,6 +7,7 @@ import {
   resolveWorkspaceKey,
   zcodeProtocolMethods,
   zcodeSessionStateSnapshotSchema,
+  type DynamicWorkflowMode,
   type ZCodeProtocolMcpServer,
   type ZCodeSessionStateSnapshot,
 } from "@zcode/shared";
@@ -67,6 +68,12 @@ export interface AcpCoreSessionsOptions {
     debug?: (message: string, context?: Record<string, unknown>) => void;
     warn?: (message: string, context?: Record<string, unknown>) => void;
   };
+  /**
+   * 本进程 `--workflow-mode` 的解析结果（ACP 缺省 onDemand，issue #5）。必填：
+   * 每条 session/create 与 session/resume 都显式携带灰度字段，缺席会让 core 按
+   * 协议 fail-closed 关掉工具面——那正是本 issue 的故障形态。
+   */
+  workflowMode: DynamicWorkflowMode;
 }
 
 type WorkspaceLane = {
@@ -82,9 +89,18 @@ export class AcpCoreSessions implements AcpCorePort {
   private readonly options: AcpCoreSessionsOptions;
   private readonly lanes = new Map<string, Promise<WorkspaceLane>>();
   private readonly sessions = new Map<string, BoundAcpSession>();
+  /** 随每条 create/resume 显式下发的灰度门；进程级常量，构造时折叠一次。 */
+  private readonly workflowGate: {
+    dynamicWorkflowEnabled: boolean;
+    dynamicWorkflowMode: DynamicWorkflowMode;
+  };
 
   constructor(options: AcpCoreSessionsOptions) {
     this.options = options;
+    this.workflowGate = {
+      dynamicWorkflowEnabled: options.workflowMode !== "disabled",
+      dynamicWorkflowMode: options.workflowMode,
+    };
   }
 
   get(sessionId: string): AcpSession | undefined {
@@ -99,6 +115,7 @@ export class AcpCoreSessions implements AcpCorePort {
       // 与 attach 启动同规：首发前的空会话是 deferred 草稿，不污染 session/list。
       persistence: "deferred",
       workspace: lane.ref,
+      ...this.workflowGate,
       ...(replay !== undefined ? { mcpServers: replay } : {}),
     });
     return await this.bindSession(lane, asSnapshot(created), replay);
@@ -124,6 +141,9 @@ export class AcpCoreSessions implements AcpCorePort {
         await lane.runtime.currentClient().request(zcodeProtocolMethods.sessionResume, {
           sessionId: input.sessionId,
           workspace: lane.ref,
+          // warm record 的工具面 core 不回收（已物化 runtime），字段照常下发与
+          // create/cold-resume 同形，真消费只发生在冷物化那条。
+          ...this.workflowGate,
           mcpServers: replay,
         });
         // 仅在 core 确认后替换 replay 快照：失败的 resume 保留上一份已确认声明。
@@ -136,6 +156,7 @@ export class AcpCoreSessions implements AcpCorePort {
     const resumed = await lane.runtime.currentClient().request(zcodeProtocolMethods.sessionResume, {
       sessionId: input.sessionId,
       workspace: lane.ref,
+      ...this.workflowGate,
       ...(replay !== undefined ? { mcpServers: replay } : {}),
     });
     return await this.bindSession(lane, asSnapshot(resumed), replay);
@@ -249,6 +270,9 @@ export class AcpCoreSessions implements AcpCorePort {
         const declared = this.sessions.get(sessionId)?.clientMcpServers;
         return declared === undefined ? undefined : structuredClone(declared);
       },
+      // 冷恢复的 session/resume 会冷物化 record：不带灰度字段会让 core fail-closed，
+      // core 重启后已激活的会话丢掉工作流工具面。
+      recoveryDynamicWorkflow: this.workflowGate,
       locale: "en-US",
       logger: this.options.logger,
       socketPath,

@@ -1523,6 +1523,11 @@ exceptions:
       - packages/ui/src/settings/DynamicWorkflowModeSetting.tsx
       - packages/ui/src/store/dynamicWorkflowAvailabilityStore.ts
     reason: Admitted upstream files edited only to let the user's dynamic workflow mode choice always win and keep the settings row visible; adopting packages/shared/src and packages/ui/src needs a separate module boundary refactor.
+  - id: acp-workflow-mode-unmanaged-edit
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/cli/src/workflow-mode.ts
+    reason: Admitted upstream option parser gains only the ACP default mode constant (onDemand) so the ACP lane can override its fail-closed default; value validation, error text and module boundary are unchanged, adopting the whole zcode-cli directory needs a separate module boundary refactor.
   - id: tui-pi-frontend-seam-unmanaged-files
     rule: unmanaged-new-file
     paths:

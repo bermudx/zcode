@@ -90,6 +90,16 @@ export interface AttachRuntimeOptions {
   getSessionRecoveryMcpServers?: (
     sessionId: string,
   ) => ZCodeProtocolMcpServer[] | undefined;
+  /**
+   * 冷恢复 session/resume 回放的工作流灰度门（ACP lane 的 --workflow-mode 结论，
+   * issue #5）：core 冷物化 record 时缺这两个字段会按协议 fail-closed，已激活
+   * 的会话在 core 重启后丢掉工具面。attach TUI lane 不传——它的 create/resume
+   * 本就不带字段，冷恢复一致省略。
+   */
+  recoveryDynamicWorkflow?: {
+    dynamicWorkflowEnabled: boolean;
+    dynamicWorkflowMode: DynamicWorkflowMode;
+  };
 }
 
 export class AttachProtocolVersionError extends Error {
@@ -487,6 +497,8 @@ export class AttachRuntime {
           ),
           // core 重启/空闲回收后冷恢复会丢掉内存里的上限，随 resume 带回当前模型对应的值。
           ...(compactContextWindow !== undefined ? { compactContextWindow } : {}),
+          // 与初始 create/resume 同一份灰度门：冷物化走的是同一条 createRecord 判定。
+          ...(this.options.recoveryDynamicWorkflow ?? {}),
           // client MCP 声明仅存于本进程内存；core 侧 record 冷物化时随同一
           // session/resume 回放。省略与显式 [] 语义不同，hook 回 undefined 才省略。
           ...(mcpServers !== undefined ? { mcpServers } : {}),

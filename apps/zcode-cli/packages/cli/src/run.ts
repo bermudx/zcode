@@ -35,6 +35,7 @@ import { createWorkspacePathSuggestionProvider } from "./tui-workspace-paths.js"
 import { runAttachCommand } from "./attach/attach-command.js";
 import { runAcpCommand } from "./acp/acp-command.js";
 import {
+  DEFAULT_ACP_WORKFLOW_MODE,
   DEFAULT_CLI_WORKFLOW_MODE,
   normalizeWorkflowModeOption,
   WORKFLOW_MODE_SCOPE_ERROR,
@@ -588,19 +589,25 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
   }
 
   // app-server 的 mode 归 Host 决定（launch.md「The standalone CLI: `--workflow-mode`」），
-  // 其余子命令不建会话；作用域与 --force-mcs 相同：只有 --prompt、--target 与 TUI。
+  // 其余子命令不建会话；作用域是 --force-mcs 那套加 acp：ACP lane 同样无 Host，
+  // mode 归本进程参数（缺省 onDemand，与其他 lane 的 disabled 不同——见 workflow-mode.ts）。
   if (
     workflowModeOption !== undefined &&
     !isForceMcsSupportedInvocation({
       positionals: parsed.positionals,
       prompt: parsed.values.prompt as string | undefined,
       targetRequest,
-    })
+    }) &&
+    commandName(parsed.positionals) !== "acp"
   ) {
     ctx.stderr.write(`${WORKFLOW_MODE_SCOPE_ERROR}\n`);
     return 1;
   }
-  const workflowMode = workflowModeOption ?? DEFAULT_CLI_WORKFLOW_MODE;
+  const workflowMode =
+    workflowModeOption ??
+    (commandName(parsed.positionals) === "acp"
+      ? DEFAULT_ACP_WORKFLOW_MODE
+      : DEFAULT_CLI_WORKFLOW_MODE);
 
   if (
     (forceMcs || parsed.values["toolsearch-mode"] !== undefined) &&
@@ -749,6 +756,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
         options,
         commandDeps,
         version,
+        workflowMode,
       );
     case "tui":
       if (parsed.values["shared-core"] === true) {

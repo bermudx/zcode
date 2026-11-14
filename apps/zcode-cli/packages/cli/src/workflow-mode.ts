@@ -9,8 +9,12 @@ import {
 
 export const DEFAULT_CLI_WORKFLOW_MODE: DynamicWorkflowMode = "disabled";
 
+// ACP lane 没有 TUI/headless 的「显式开启」入口：ACP 客户端没有 --workflow-mode 之外的
+// 配置面，缺省 onDemand 才会让 `/workflow` 在会话首次使用时激活工具面（issue #5）。
+export const DEFAULT_ACP_WORKFLOW_MODE: DynamicWorkflowMode = "onDemand";
+
 export const WORKFLOW_MODE_SCOPE_ERROR =
-  "--workflow-mode can only be used with --prompt, --target, or tui.";
+  "--workflow-mode can only be used with --prompt, --target, tui, or acp.";
 
 export const WORKFLOW_DISABLED_NOTICE =
   "Dynamic workflows are disabled in this session. Restart with --workflow-mode onDemand or --workflow-mode alwaysOn to use them.";

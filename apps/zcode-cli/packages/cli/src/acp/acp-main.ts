@@ -2,6 +2,7 @@
 // 与 attach 共用同一套 share-core 连接层，不启动 TUI，也不带 bootstrap。
 import { setImmediate } from "node:timers/promises";
 import { ndJsonStream, type Stream } from "@agentclientprotocol/sdk";
+import type { DynamicWorkflowMode } from "@zcode/shared";
 import { createAcpAgentApp, type AcpAgentLogger } from "./acp-agent.js";
 import { AcpCoreSessions } from "./acp-sessions.js";
 
@@ -12,6 +13,8 @@ export interface AcpRunOptions {
   stdin: NodeJS.ReadableStream;
   stdout: NodeJS.WritableStream;
   version: string;
+  /** 本进程 `--workflow-mode` 的解析结果（ACP 缺省 onDemand，见 workflow-mode.ts）。 */
+  workflowMode: DynamicWorkflowMode;
 }
 
 /** 把 node 的 stdio 包成 ACP SDK 需要的 NDJSON Stream。 */
@@ -142,6 +145,7 @@ export async function runAcpStdio(options: AcpRunOptions): Promise<number> {
   const sessions = new AcpCoreSessions({
     env: options.env,
     logger: options.logger,
+    workflowMode: options.workflowMode,
   });
   const connectionFailure = Promise.withResolvers<Error>();
   let firstFailure: Error | undefined;

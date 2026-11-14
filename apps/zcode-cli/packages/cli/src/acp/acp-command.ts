@@ -1,6 +1,7 @@
 // `piz acp` / `zcode acp` 的命令入口：只做 stdio 边界与退出码，连接与协议
 // 在 acp-main。ACP 的 stdout 是严格协议通道，进程级 console 必须在加载
 // 任何 SDK 之前引导到 stderr。
+import type { DynamicWorkflowMode } from "@zcode/shared";
 import type { GlobalOptions, RunContext } from "@zcode/shared-types";
 import type { RunDependencies } from "../cli-types.js";
 import { installStderrConsoleBoundary } from "../protocol-console.js";
@@ -11,6 +12,7 @@ export async function runAcpCommand(
   _options: GlobalOptions,
   deps: RunDependencies,
   version: string,
+  workflowMode: DynamicWorkflowMode,
 ): Promise<number> {
   const restoreConsole = installStderrConsoleBoundary(ctx.stderr);
   try {
@@ -21,6 +23,7 @@ export async function runAcpCommand(
       stdin: ctx.stdin,
       stdout: ctx.stdout,
       version,
+      workflowMode,
     });
   } catch (error) {
     ctx.stderr.write(

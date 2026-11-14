@@ -124,6 +124,7 @@ export interface RunDependencies extends PluginsCommandOverrides {
     options: import("@zcode/shared-types").GlobalOptions,
     deps: RunDependencies,
     version: string,
+    workflowMode: import("@zcode/shared").DynamicWorkflowMode,
   ) => Promise<number>;
   skipUserConfig?: boolean;
   userConfigPath?: string;
