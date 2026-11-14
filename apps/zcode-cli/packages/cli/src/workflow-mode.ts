@@ -49,3 +49,20 @@ export function isWorkflowModeEnabled(mode: DynamicWorkflowMode | undefined): bo
   // 缺席 = 调用方没接入 mode（单测、嵌入方），不在命令面设门；CLI 入口总会传入解析后的值。
   return mode !== "disabled";
 }
+
+/**
+ * attach 车道（zcode-attach / tui --shared-core / piz）的会话级灰度参数：
+ * 瘦客户端没有 Host 下发 mode，由进程旗标决定，随 session/create 与每次
+ * session/resume 下发；服务端 resolveDynamicWorkflowRuntimeGate 参数优先。
+ * 不能走 workspace/updateDynamicWorkflowPolicy——单 core 跨 workspace/客户端
+ * 共享，进程级偏好会被别的 pane 覆盖或泄漏给别的 workspace。
+ * disabled 返回 {}：两字段缺席 = 今天的行为（未设 Host 结论时 fail-closed），
+ * 不发显式 false 避免与「缺席即关闭」的旧客户端语义出现第三种极性。
+ */
+export function workflowModeSessionParams(mode: DynamicWorkflowMode): {
+  dynamicWorkflowEnabled?: true;
+  dynamicWorkflowMode?: DynamicWorkflowMode;
+} {
+  if (mode === "disabled") return {};
+  return { dynamicWorkflowEnabled: true, dynamicWorkflowMode: mode };
+}

@@ -1606,3 +1606,7 @@ exceptions:
     paths:
       - packages/zcode-cua/src/**
     reason: The whole zcode-cua producer package (broker, native adapters, tools) entered the repo after the gate timestamp as pre-existing code moved from a separate repository; adopting its internal layers needs a dedicated CONTRACT pass (it has known internal cycles by design), not a mechanical split in this branch.
+  - id: attach-workflow-mode-session-params-unmanaged-edit
+    rule: unmanaged-new-file
+    paths: [apps/zcode-cli/packages/cli/src/workflow-mode.ts]
+    reason: 已准入的 workflow-mode 归一化模块只新增 workflowModeSessionParams，把 CLI 旗标映射为 session/create 与 session/resume 参数（attach lane 无 Host 进程偏好，bermudx/zcode#4，docs/dynamic-workflow/launch.md）；归一化、默认值与模块边界不变，接管整个 CLI src 顶层目录不在本次范围内。

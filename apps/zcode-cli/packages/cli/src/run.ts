@@ -760,6 +760,9 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
           tuiFrontend,
           resumeRequest,
           parsed.values.model as string | undefined,
+          // monolith 入口不是 piz：herdr/OSC 位留空，mode 走末位参数。
+          undefined,
+          workflowMode,
         );
       }
       return await runTuiCommand(

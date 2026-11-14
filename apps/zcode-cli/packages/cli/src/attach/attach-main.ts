@@ -15,6 +15,7 @@ const usage = `zcode-attach — pi-tui thin client for a shared ZCode core
 Usage:
   zcode-attach [--locale <en-US|zh-CN|auto>] [--no-color] [--verbose]
                [-c|--continue] [--resume <sessionId>] [--model <model|provider/model>]
+               [--workflow-mode <disabled|onDemand|alwaysOn>]
                [--version] [-h|--help]
   zcode-attach acp   stdio Agent Client Protocol (ACP v1) adapter
 
@@ -29,6 +30,11 @@ Model selection:
                   ignore case and prefer the session's current provider
                   when ambiguous. Other ambiguity requires provider/model.
                   Quote a $effort suffix, e.g. --model 'glm-5.3$high'.
+
+Dynamic workflows:
+  --workflow-mode <disabled|onDemand|alwaysOn>
+                  dynamic workflow tool surface for the sessions this client
+                  creates or resumes (default: disabled).
 
 Environment:
   ZCODE_SERVER_BIN   core 二进制（缺省 PATH 里的 zcode），core 不存在时
@@ -52,7 +58,7 @@ const main = async (): Promise<number> => {
       __CLI_VERSION__,
     );
   }
-  const { action, initialModel, options, resume } = parseAttachEntryArgs(
+  const { action, initialModel, options, resume, workflowMode } = parseAttachEntryArgs(
     process.argv.slice(2),
   );
   if (action === "help") {
@@ -77,6 +83,7 @@ const main = async (): Promise<number> => {
     resume,
     initialModel,
     "piz",
+    workflowMode,
   );
 };
 
