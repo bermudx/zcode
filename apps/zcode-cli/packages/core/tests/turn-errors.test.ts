@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { SessionEventType } from "@zcode/contracts";
+import { ModelErrorCode, SessionEventType } from "@zcode/contracts";
+import { AiSdkModelAdapterError } from "../../adapters/src/model/errors.js";
+import { RuntimeHeadersRefreshError } from "../../adapters/src/model/runner-runtime-headers.js";
 import { appendEvent } from "../src/runtime/methods/events.js";
 import {
   appendTurnOutcomeEvent,
@@ -365,5 +367,58 @@ describe("projectExecutionErrorPayload", () => {
 
     expect(projection.code).toBe("3007");
     expect(projection.message).toContain("verify token was rejected");
+  });
+
+  // issue #50：换证失败的客户端文案统一在这里映射，lane 不各自解析错误码。
+  it("maps project_token_login_failed to a re-login hint with the z.ai reason", () => {
+    const loginError = Object.assign(new Error("project_token_login_failed"), {
+      name: "CodingPlanApiKeyError",
+      loginFailure: { httpStatus: 401, code: "1002", msg: "login expired" },
+    });
+    const turnError = createTurnFailureError(loginError, undefined, "Turn execution failed");
+
+    const projection = projectExecutionErrorPayload(turnError);
+
+    expect(projection.message).toBe(
+      "Z.AI login expired or was rejected (1002: login expired). Run: /login zai-coding-plan",
+    );
+    // 原始错误码保留在 detail 供诊断，不被友好文案吞掉。
+    expect(projection.detail).toContain("project_token_login_failed");
+  });
+
+  // issue #50 F1：真实 turn 路径里 RuntimeHeadersRefreshError/AiSdkModelAdapterError
+  // 把内部码复制成自己的 message 但不携带 loginFailure；投影必须越过同文案包装帧，
+  // 取携带结构化原因的帧，客户端才看得到 (<code>: <msg>)。
+  it("keeps the z.ai reason when real runner wrappers copy the login failure message", () => {
+    const loginError = Object.assign(new Error("project_token_login_failed"), {
+      name: "CodingPlanApiKeyError",
+      loginFailure: { httpStatus: 401, code: "1002", msg: "login expired" },
+    });
+    const refreshError = new RuntimeHeadersRefreshError(loginError);
+    const adapterError = new AiSdkModelAdapterError(
+      ModelErrorCode.ModelRequestFailed,
+      refreshError.message,
+      { cause: refreshError },
+    );
+    const turnError = createTurnFailureError(adapterError, undefined, "Turn execution failed");
+
+    const projection = projectExecutionErrorPayload(turnError);
+
+    expect(projection.message).toBe(
+      "Z.AI login expired or was rejected (1002: login expired). Run: /login zai-coding-plan",
+    );
+    expect(projection.detail).toContain("project_token_login_failed");
+  });
+
+  it("maps project_token_login_failed without a reason to the plain re-login hint", () => {
+    const turnError = createTurnFailureError(
+      new Error("project_token_login_failed"),
+      undefined,
+      "Turn execution failed",
+    );
+
+    expect(projectExecutionErrorPayload(turnError).message).toBe(
+      "Z.AI login expired or was rejected. Run: /login zai-coding-plan",
+    );
   });
 });
