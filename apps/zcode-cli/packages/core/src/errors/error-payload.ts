@@ -36,6 +36,7 @@ interface ErrorPayloadFrame {
   contextCode?: string;
   detail?: string;
   isWrapper: boolean;
+  loginFailure?: { httpStatus?: number; code?: string; msg?: string };
   message?: string;
   originalMessage?: string;
   retryable?: boolean;
@@ -56,7 +57,11 @@ export function projectExecutionErrorPayload(
 ): ExecutionErrorPayloadProjection {
   const frames = collectErrorPayloadFrames(error);
   const primaryFrame = selectPrimaryErrorFrame(frames);
-  const message = primaryFrame?.message ?? sanitizeText(fallbackMessage) ?? fallbackMessage;
+  const message =
+    projectZaiLoginFailureMessage(frames) ??
+    primaryFrame?.message ??
+    sanitizeText(fallbackMessage) ??
+    fallbackMessage;
   const code = selectErrorCode(primaryFrame, frames);
   const detail = buildErrorDetail(frames, message);
   // 保留最深层非 wrapper frame 的原始 message/detail，供 UI telemetry 定位具体失败原因；
@@ -255,6 +260,7 @@ function toErrorPayloadFrame(entry: Record<string, unknown>): ErrorPayloadFrame 
     sanitizeText(readString(entry.details));
   const isWrapper = role === ErrorPayloadRole.Wrapper;
   const retryable = typeof entry.retryable === "boolean" ? entry.retryable : undefined;
+  const loginFailure = readZaiLoginFailureFrame(entry.loginFailure);
 
   return {
     ...(code ? { code } : {}),
@@ -262,11 +268,49 @@ function toErrorPayloadFrame(entry: Record<string, unknown>): ErrorPayloadFrame 
     ...(contextCode ? { contextCode } : {}),
     ...(detail ? { detail } : {}),
     isWrapper,
+    ...(loginFailure ? { loginFailure } : {}),
     ...(message ? { message } : {}),
     ...(originalMessage ? { originalMessage } : {}),
     ...(retryable !== undefined ? { retryable } : {}),
     ...(role ? { role } : {}),
   };
+}
+
+const PROJECT_TOKEN_LOGIN_FAILED = "project_token_login_failed";
+
+// Bug 原因（issue #50）：Z.AI 换证失败只有内部码 project_token_login_failed，
+// 用户看不到过期/撤销原因也不知道要重新登录。这里统一映射为客户端可见文案，
+// 附加 envelope 的 code/msg 原因（仅当存在）；原始码仍留在 detail/underlying 字段。
+function projectZaiLoginFailureMessage(
+  frames: readonly ErrorPayloadFrame[],
+): string | undefined {
+  const frame = frames.find((item) => item.originalMessage === PROJECT_TOKEN_LOGIN_FAILED);
+  if (!frame) return undefined;
+  const reason = [frame.loginFailure?.code, frame.loginFailure?.msg]
+    .map((part) => sanitizeText(part))
+    .filter((part): part is string => Boolean(part))
+    .join(": ");
+  return reason
+    ? `Z.AI login expired or was rejected (${reason}). Run: /login zai-coding-plan`
+    : "Z.AI login expired or was rejected. Run: /login zai-coding-plan";
+}
+
+/** loginFailure 是 adapter 放在错误上的结构化原因；逐字段校验，异常值不进入投影。 */
+function readZaiLoginFailureFrame(
+  value: unknown,
+): ErrorPayloadFrame["loginFailure"] | undefined {
+  if (!isRecord(value)) return undefined;
+  const httpStatus =
+    typeof value.httpStatus === "number" &&
+    Number.isInteger(value.httpStatus) &&
+    value.httpStatus >= 100 &&
+    value.httpStatus <= 599
+      ? value.httpStatus
+      : undefined;
+  const code = readString(value.code);
+  const msg = readString(value.msg);
+  if (httpStatus === undefined && !code && !msg) return undefined;
+  return { ...(httpStatus !== undefined ? { httpStatus } : {}), ...(code ? { code } : {}), ...(msg ? { msg } : {}) };
 }
 
 function selectPrimaryErrorFrame(
