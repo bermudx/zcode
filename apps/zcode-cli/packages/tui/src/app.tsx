@@ -1,6 +1,6 @@
 import type { ModelUsageSummary, TodoItem, TurnId } from "@zcode/contracts";
 import { getZCodeCopy } from "@zcode/i18n";
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppView } from "./app-view.js";
 import type { PromptInputEditor } from "./app-input-pane.js";
 import { useTuiCopyActions, type SelectionCopyResult } from "./app-copy.js";
@@ -234,6 +234,12 @@ export function TuiApp({
   });
 
   const requestPermission = useTuiPermissionRequester({ setApprovalQueue, setStatus });
+  const registerPermissionRequester = options.registerPermissionRequester;
+  // 挂载期间审批入口一直有效：主会话回合之外的询问（后台会话、通知驱动的回合）也进同一队列。
+  useEffect(
+    () => registerPermissionRequester?.(requestPermission),
+    [registerPermissionRequester, requestPermission],
+  );
 
   const resolveSubmittedText = useCallback(
     (submittedValue: string) => {
@@ -261,7 +267,6 @@ export function TuiApp({
     emptyPromptStatus: copy.tui.input.typePrompt,
     messageInsertIndex: messages.length,
     options,
-    requestPermission,
     resolveSubmittedText,
     resolveSubmittedModel: (value) => modelCommand.selectedOption(value)?.ref,
     setActiveTurnStartedAtMs,

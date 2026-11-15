@@ -82,6 +82,9 @@ Slash Commands:
       reconnected: "已重新连接共享 core",
       reconnectedSessionUnavailable: "已重新连接共享 core——会话暂不可用，正在重试…",
     },
+    approval: {
+      fromSession: (sessionId) => `来自后台会话 ${sessionId}`,
+    },
     copy: {
       copied: "已复制选中文本到剪贴板。",
       failed: "无法复制选中文本。",

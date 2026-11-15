@@ -1125,3 +1125,115 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
   confirmed); no duplicate `config_option_update` on own changes.
 - Not verified live: another client's effort change reaching T3 (finding 3);
   T3 UI rendering itself.
+
+### 2026-11-15 — upstream sync 3.18.2 (sync/2026-11-15-fec97590)
+
+- Base `b66c16d0` → `fec97590` ("chore: sync ZCode source v3.18.2",
+  2026-11-13). Primary driver is issue #64: desktop 3.18.2 stores
+  `~/.zcode/v2/credentials.json` values as `enc:v2:` ciphertext with an
+  OS-keyring key; the fork CLI read them raw and logged the user out.
+  Upstream ships `packages/shared/src/credential-security/` (system
+  credential cipher + bridge) and the CLI-side integration.
+- The merge was handed off as a written working tree (no MERGE_HEAD).
+  Verification found the merge-write was incomplete beyond the 28 marked
+  conflict files: ~710 upstream-changed/upstream-added paths under
+  `packages/ui`, `packages/web`, `packages/zcode-server-cli`, `apps/dev-docs`
+  and others had been left at fork content, empty, or absent. All were
+  restored to upstream content (verified file-by-file against the
+  `fec97590` blobs); `packages/ui/src/App.tsx` had been left as a 0-byte
+  file. 749 `D` entries audited — all upstream deletions of fork-untouched
+  files, none unexplained. Fork-deletion policy applied to the two paths
+  the merge-write resurrected: `.agents/skills/ai-elements` and
+  `.agents/skills/e2e-case-lifecycle` are deleted again.
+- 28 conflicted files resolved by hand, both-sides intent kept unless
+  noted. Highlights:
+  - `adapters`/`bootstrap` auth: upstream's credential cipher is threaded
+    through `auth-login.ts`, `zcode-protocol-entrypoint.ts` (official-MCP
+    cipher bridge now follows the owner-tracked `latestProtocolServer`
+    auth context — same owner the fork already used) and
+    `server-operations.ts`; `LoginZCodeCliOptions` carries
+    `credentialStore` through `startCliOAuthLoginFlow` to
+    `completeCliOAuthLoginFlow` (upstream's pre-init guard capture lives
+    at flow start).
+  - `workspace-model-runtime.ts`: both propagations kept — fork
+    `noPlugins` and upstream `workspaceKey`.
+  - `server-operations.ts`: upstream's `mapSnapshotMessages` kept (it
+    wraps the fork's `mapMessageWithParts` #52 fix — a superset); cold
+    forward-read fallback, visible-message filtering, cursor validation
+    and head pagination retained.
+  - `core/src/subagent/runner.ts`: fork `takeUndeliveredMessages`/
+    redelivery kept inside upstream's claim/terminal-state registry flow;
+    the fork's restore-on-finalize-failure was dropped — upstream's
+    committed-killed semantics makes resurrection break the executionId
+    guard; artifact-write failure handling and background-only
+    abort/notification kept.
+  - TUI permission lifecycle moved to upstream's mount-time
+    `registerPermissionRequester`/persistent `permissionBroker` in
+    `tui-prompt-handler.ts`, `app-submit-controller.ts`, `app-submit.ts`,
+    `app.tsx`, `types.ts`; fork's in-process `delivery:"queue"` rejection
+    and `steer`→`steer_active_turn` mapping kept. The attach path
+    (P004-owned) needed the same wiring: `mountPromptRequestPermission`
+    on the attach handle + `registerPermissionRequester` on its prompt
+    handler, with per-submit fallback preserved; tui-pi `app.ts` now
+    registers/unregisters the requester at construct/dispose instead of
+    passing the now-deleted `requestPermission` submit option.
+  - `cli/scripts/build.mjs`: `@zcode/tui-pi` external kept, upstream
+    `@napi-rs/keyring` external added.
+  - `plugins.ts`: upstream async `resolveZCodePlugins` kept inside the
+    fork's `config.plugins.enabled` no-plugins gate.
+  - `AGENTS.md`: fork (English) side kept per policy.
+  - i18n `en-US`/`zh-CN`/`types`: fork `connection` cluster + upstream
+    `approval` cluster merged (missing `},` fixed in all three).
+  - `architecture-policy.yaml`, `package.json`, `cli/package.json`,
+    test manifests: union merges.
+- `pnpm-lock.yaml` rebuilt surgically: upstream v3.18.2 lockfile as base
+  + fork-only importers (`apps/zcode-cli/packages/tui-pi`), fork deps
+  (`@agentclientprotocol/sdk`, `@zcode/tui-pi`, `zod` devDep on
+  `packages/cli`, `node-forge ^1.4.1` on `packages/{desktop,server,services}`),
+  fork overrides pin (`zod@>=4 <5: 4.6.5`), and 123 fork-only
+  `packages:`/`snapshots:` entries (Sentry, OpenTelemetry extras, pi-tui,
+  playwright-core, vitest 4, vite 8, typescript 6.0.3, …). Post-merge
+  validation: YAML parses, every importer version resolves to a snapshot
+  key, every merged `package.json` specifier matches its lockfile importer
+  (the 18 remaining diffs are pre-existing upstream quirks — React
+  override specifiers and the `packages/ui` peer — identical in
+  upstream's own lockfile). `packages/web` gained `core-js` and
+  `packages/zcode-server-cli` `@napi-rs/keyring` per upstream manifests.
+- Patch dispositions:
+  - P001 (signing/extra-usage): retained — request-security-edition and
+    adapters signing untouched by conflicts; credential-read path now
+    decrypts via upstream cipher.
+  - P002 (TUI projection/transcript): retained — tui merged with upstream
+    permission-broker lifecycle, fork queue/steer semantics kept.
+  - P003 (tui-pi/shell escape): retained — tui-pi seam adapted to the
+    broker registration model.
+  - P004 (shared core/attach/socket/no-plugins): retained — socket
+    listener, attach option-builder broker wiring, no-plugin gate and
+    `standalone` account source all preserved.
+  - P005 (unresolved-slash forward): retained — prompt-handler prompt
+    routing unchanged.
+  - P006-adjacent (ACP frontend): retained — ACP command routing not
+    touched by conflicts.
+- Credential audit for #64: the only `credentials.json` file read in CLI
+  code is `readRawCredentialRecord` inside
+  `adapters/src/auth/shared-credentials.ts` — every value passes
+  `cipher.decrypt` (`createSystemCredentialCipher`, `enc:v2:` handled
+  upstream). All `oauth:zai:access_token` consumers go through
+  `SharedZCodeCredentialStore` (`load`/`loadMany`) or the services-side
+  `credentialService` (its own `createSystemCredentialCipher`). No raw
+  bypass found.
+- Open problems / unverified:
+  - No local builds/typecheck/lint/tests run (repo rule: CI only; this
+    sync ran on the sidekick lane without toolchain). The attach-side
+    permission-broker addition and the tui-pi register/dispose lifecycle
+    are type-correct on inspection but compiler-unverified — CI is the
+    first gate.
+  - `enc:v2:` decryption not exercised against a real keyring/desktop
+    credential file; verified by code-path audit only.
+  - `git merge-tree` self-check used for both-changed files; two files
+    (`scripts/engineering-test-files.json`, `third-party/copied-components.json`,
+    `pnpm-lock.yaml`) were union-merged manually — `merge-file` output
+    was verified-equivalent or intentionally different.
+  - `pnpm-lock.yaml` not verified against `pnpm install
+    --frozen-lockfile` locally; the structural checks above are the
+    pre-CI evidence.

@@ -101,6 +101,7 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
     try {
       const flow = await startCliOAuthLoginFlow({
         abortSignal: flowSignal(abort, context),
+        credentialStore: deps.credentialStore,
         env,
         httpClient: deps.httpClient,
         providerId: params.provider,
