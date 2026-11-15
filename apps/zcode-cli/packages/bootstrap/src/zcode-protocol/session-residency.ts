@@ -15,6 +15,9 @@ import { SessionLifecycleController } from "../session-lifecycle/index.js";
 import { activateSessionRuntime, validateSessionActivationWorkspace } from "./server-operations.js";
 import { abortMcpUiToolCallsForSession, clearMcpUiAppToolsForSession } from "./mcp-ui/index.js";
 
+// [TEMPDIAG] client-MCP timeout diagnostics — revert before merge.
+let tempDiagSeq = 0;
+
 export function getSessionLifecycle(
   context: ZCodeProtocolAgentServerContext,
 ): SessionLifecycleController {
@@ -206,7 +209,14 @@ async function releaseSessionRecord(
   // 一个清理步骤失败不能跳过 app.close；最终错误仍由生命周期 owner 隔离。
   let runtimeClosed = false;
   try {
+    const tempDiagOp = ++tempDiagSeq;
+    process.stderr.write(
+      `[TEMPDIAG] app.close.start op=${tempDiagOp} sid=${sessionId} mode=${mode} t=${Date.now()}\n`,
+    );
     await record.app.close?.();
+    process.stderr.write(
+      `[TEMPDIAG] app.close.end op=${tempDiagOp} sid=${sessionId} t=${Date.now()}\n`,
+    );
     runtimeClosed = true;
   } catch (error) {
     failed("runtime_close", error);
