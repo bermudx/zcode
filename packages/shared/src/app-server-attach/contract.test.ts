@@ -7,7 +7,11 @@ import { appServerAttachModule } from "./module.js";
 describe("app-server-attach contract", () => {
   it("declares its module manifest", () => {
     expect(appServerAttachModule.id).toBe("app-server-attach");
-    expect(appServerAttachModule.requires).toEqual(["shared", "zcode-cli"]);
+    expect(appServerAttachModule.requires).toEqual([
+      "shared",
+      "zcode-cli",
+      "cli-arguments",
+    ]);
   });
 
   it("pins the singleton user-scope info metadata", () => {
