@@ -4,7 +4,7 @@
  */
 export const appServerAttachModule = {
   id: "app-server-attach",
-  requires: ["shared", "zcode-cli"],
+  requires: ["shared", "zcode-cli", "cli-arguments"],
   provides: ["app-server-attach"],
   publicEntrypoints: [
     "packages/shared/src/app-server-attach/contract.ts",

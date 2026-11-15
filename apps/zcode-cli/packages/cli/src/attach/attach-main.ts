@@ -49,8 +49,9 @@ const main = async (): Promise<number> => {
     let workflowMode: DynamicWorkflowMode;
     try {
       // 与 run.ts 同一个 normalizeWorkflowModeOption：非法值报三值清单 + exit 1。
+      // argv 含 `acp` 子命令位，与 monolith 的 ctx.argv 同形，parse 语义一致。
       workflowMode =
-        normalizeWorkflowModeOption(acpWorkflowModeOption(process.argv.slice(3))) ??
+        normalizeWorkflowModeOption(acpWorkflowModeOption(process.argv.slice(2))) ??
         DEFAULT_ACP_WORKFLOW_MODE;
     } catch (error) {
       process.stderr.write(
