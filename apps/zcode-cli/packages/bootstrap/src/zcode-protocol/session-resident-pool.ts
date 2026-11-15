@@ -55,6 +55,14 @@ interface ResidencyCandidate {
   sessionId: string;
 }
 
+// [TEMPDIAG] client-MCP timeout diagnostics — revert before merge.
+let tempDiagSeq = 0;
+function tempDiag(point: string, sessionId: string, extra = ""): void {
+  process.stderr.write(
+    `[TEMPDIAG] ${point} op=${++tempDiagSeq} sid=${sessionId} t=${Date.now()}${extra}\n`,
+  );
+}
+
 export class SessionResidentPool {
   private readonly highWaterCount: number;
   private readonly idleTimeoutMs: number;
@@ -125,11 +133,15 @@ export class SessionResidentPool {
       this.rebalance();
     };
 
+    tempDiag("pool.acquire.enter", sessionIds.join(","));
     try {
       for (const sessionId of sessionIds) {
+        tempDiag("pool.waitDeact.wait", sessionId);
         await this.waitForDeactivation(sessionId);
+        tempDiag("pool.waitDeact.done", sessionId);
         this.touch(sessionId);
       }
+      tempDiag("pool.acquire.acquired", sessionIds.join(","));
       return release;
     } catch (error) {
       release();

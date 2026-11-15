@@ -1,6 +1,9 @@
 import type { AgentRuntimeInternal } from "../internal.js";
 import { getOffPeakExecution } from "../off-peak/runtime.js";
 
+// [TEMPDIAG] client-MCP timeout diagnostics — revert before merge.
+let tempDiagSeq = 0;
+
 /**
  * 登记会越过当前同步调用栈的 runtime-owned work。
  *
@@ -12,11 +15,18 @@ export function trackResidencyBlockingWork<T>(
   this: AgentRuntimeInternal,
   work: Promise<T>,
 ): Promise<T> {
+  const tempDiagOp = ++tempDiagSeq;
   this.residencyBlockingWork.add(work);
   this.residencyBlockingWorkCount = this.residencyBlockingWork.size;
+  process.stderr.write(
+    `[TEMPDIAG] rbw.add op=${tempDiagOp} sid=${String(this.sessionId)} count=${this.residencyBlockingWorkCount} t=${Date.now()}\n`,
+  );
   return work.finally(() => {
     this.residencyBlockingWork.delete(work);
     this.residencyBlockingWorkCount = this.residencyBlockingWork.size;
+    process.stderr.write(
+      `[TEMPDIAG] rbw.settle op=${tempDiagOp} sid=${String(this.sessionId)} count=${this.residencyBlockingWorkCount} t=${Date.now()}\n`,
+    );
     for (const notify of this.workChanged) notify();
   });
 }
