@@ -339,7 +339,11 @@ describe("bundled official plugin cache resilience", () => {
     vi.useFakeTimers();
     const preparation = createOfficialPluginPreparation({ startupTimeoutMs: 3_000 });
     const seed = Promise.withResolvers<[]>();
-    const prepare = vi.spyOn(preparation, "prepare").mockImplementation(() => seed.promise);
+    const prepareEntered = Promise.withResolvers<void>();
+    const prepare = vi.spyOn(preparation, "prepare").mockImplementation(() => {
+      prepareEntered.resolve();
+      return seed.promise;
+    });
     const discoverPlugins = vi.fn();
     const options = {
       pluginStorageRoot: storageRoot,
@@ -349,6 +353,10 @@ describe("bundled official plugin cache resilience", () => {
       pluginDiscovery: { discoverPlugins },
     };
     const first = resolveZCodePlugins(options);
+    // 等 resolve() 真正抵达 prepare 再推进假时钟：resolve() 在 resolveOfficialPluginRoots
+    // 之前还有真实配置 IO，高负载 CI 上假预算可能先到期——prepare 从未被调用时 seed 的
+    // 迟到 reject 也无人消费，会被 Vitest 记为 unhandled rejection。
+    await prepareEntered.promise;
     await vi.advanceTimersByTimeAsync(3_000);
     expect((await first).diagnostics).toEqual([
       expect.objectContaining({ code: "plugin_startup_timeout" }),
