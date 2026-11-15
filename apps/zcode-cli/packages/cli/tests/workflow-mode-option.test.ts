@@ -6,7 +6,13 @@ import type { RunDependencies } from "../src/run.js";
 import { createCommandCenter, listSlashCommandSuggestions } from "../src/command-center.js";
 import type { CommandCenterApp, CommandCenterDeps } from "../src/command-center.js";
 import { createTuiSubmitPrompt } from "../src/tui-prompt-handler.js";
-import { WORKFLOW_DISABLED_NOTICE, WORKFLOW_MODE_SCOPE_ERROR } from "../src/workflow-mode.js";
+import { acpWorkflowModeOption } from "../src/attach/attach-entry-args.js";
+import {
+  DEFAULT_ACP_WORKFLOW_MODE,
+  normalizeWorkflowModeOption,
+  WORKFLOW_DISABLED_NOTICE,
+  WORKFLOW_MODE_SCOPE_ERROR,
+} from "../src/workflow-mode.js";
 
 /**
  * 独立 CLI 的 `--workflow-mode`（docs/dynamic-workflow/launch.md「The standalone CLI:
@@ -226,6 +232,111 @@ test("acp without --workflow-mode reaches runAcpCommand with the onDemand defaul
     0,
   );
   assert.equal(seen, "onDemand");
+});
+
+// ── verifier F1/F-A/F-B：acp lane argv 解析，两个入口同一条 parseArgs 管线 ──
+// monolith 的 parseArgs 对重复 string 旗标是 last-wins，且只校验生效值；
+// `--` 之后的 token 是位置参数不再解析；值 token 是旗标形状时报 ambiguous。
+// zcode-attach acp 曾用手写扫描：F1 取第一个值（disabled bogus → exit 0），
+// F-A 把 `-x` 当值吞掉（→ exit 0），F-B 不认 `--`（bogus → exit 1、
+// disabled → 错发 disabled）。两边一致：
+// 末位非法 → exit 1；合法重复 → 末位生效；被覆盖的非法值不单独报错；
+// `--` 之后的 --workflow-mode 不生效（ACP 缺省 onDemand）。
+
+test("acp --workflow-mode disabled --workflow-mode bogus exits 1 (monolith)", async () => {
+  const ctx = createContext(["acp", "--workflow-mode", "disabled", "--workflow-mode", "bogus"]);
+  assert.equal(await run(ctx, {}), 1);
+  assert.match(
+    ctx.stderr.output(),
+    /Unsupported --workflow-mode value: bogus\. Supported modes: disabled, onDemand, alwaysOn\./,
+  );
+});
+
+test("acp repeated --workflow-mode is last-wins on the monolith, even over a bogus first value", async () => {
+  const seen: string[] = [];
+  const deps: RunDependencies = {
+    runAcpCommand: async (_ctx, _options, _deps, _version, workflowMode) => {
+      seen.push(workflowMode);
+      return 0;
+    },
+  };
+  assert.equal(
+    await run(
+      createContext(["acp", "--workflow-mode", "onDemand", "--workflow-mode", "alwaysOn"]),
+      deps,
+    ),
+    0,
+  );
+  assert.equal(
+    await run(
+      createContext(["acp", "--workflow-mode", "bogus", "--workflow-mode", "disabled"]),
+      deps,
+    ),
+    0,
+  );
+  assert.deepEqual(seen, ["alwaysOn", "disabled"]);
+});
+
+// F-A：`--workflow-mode` 的值 token 是旗标形状 → parseArgs 报 ambiguous，两边 exit 1。
+test("acp --workflow-mode -x --workflow-mode alwaysOn exits 1 on both entries", async () => {
+  const argv = ["acp", "--workflow-mode", "-x", "--workflow-mode", "alwaysOn"];
+  const ctx = createContext(argv);
+  assert.equal(await run(ctx, {}), 1);
+  assert.match(ctx.stderr.output(), /argument is ambiguous/);
+  assert.throws(() => acpWorkflowModeOption(argv), /argument is ambiguous/);
+});
+
+// F-B：`--` 之后的 --workflow-mode 是位置参数，两边都不生效 → ACP 缺省 onDemand。
+test("acp -- --workflow-mode <value> is positional on both entries", async () => {
+  const seen: string[] = [];
+  const deps: RunDependencies = {
+    runAcpCommand: async (_ctx, _options, _deps, _version, workflowMode) => {
+      seen.push(workflowMode);
+      return 0;
+    },
+  };
+  for (const value of ["bogus", "disabled"]) {
+    const ctx = createContext(["acp", "--", "--workflow-mode", value]);
+    assert.equal(await run(ctx, deps), 0);
+  }
+  assert.deepEqual(seen, ["onDemand", "onDemand"]);
+  // attach 侧同一 resolve 组合：位置参数里的旗标取不到值 → 缺省 onDemand。
+  const resolve = (argv: string[]) =>
+    normalizeWorkflowModeOption(acpWorkflowModeOption(argv)) ?? DEFAULT_ACP_WORKFLOW_MODE;
+  assert.equal(resolve(["acp", "--", "--workflow-mode", "bogus"]), "onDemand");
+  assert.equal(resolve(["acp", "--", "--workflow-mode", "disabled"]), "onDemand");
+});
+
+test("zcode-attach acp resolves --workflow-mode repeats exactly like the monolith", () => {
+  // 与 attach-main 同一组合：acpWorkflowModeOption → normalize → ACP 缺省 onDemand。
+  // argv 与 monolith 的 ctx.argv 同形（含 `acp` 子命令位）。
+  const resolve = (argv: string[]) =>
+    normalizeWorkflowModeOption(acpWorkflowModeOption(argv)) ?? DEFAULT_ACP_WORKFLOW_MODE;
+  assert.equal(
+    resolve(["acp", "--workflow-mode", "disabled", "--workflow-mode", "alwaysOn"]),
+    "alwaysOn",
+  );
+  assert.equal(
+    resolve(["acp", "--workflow-mode=onDemand", "--workflow-mode", "disabled"]),
+    "disabled",
+  );
+  // F1 回归：末位非法必须与 monolith 一样拒绝（曾取第一个值 → 静默 exit 0）。
+  assert.throws(
+    () => resolve(["acp", "--workflow-mode", "disabled", "--workflow-mode", "bogus"]),
+    /Unsupported --workflow-mode value: bogus\. Supported modes: disabled, onDemand, alwaysOn\./,
+  );
+  assert.throws(
+    () => resolve(["acp", "--workflow-mode", "disabled", "--workflow-mode=bogus"]),
+    /Unsupported --workflow-mode value: bogus/,
+  );
+  // parseArgs 同款 last-wins：被覆盖的非法值不单独报错。
+  assert.equal(
+    resolve(["acp", "--workflow-mode", "bogus", "--workflow-mode", "disabled"]),
+    "disabled",
+  );
+  // parseArgs 同款缺值/未知旗标报错（措辞来自 node:util，不再是手写文案）。
+  assert.throws(() => acpWorkflowModeOption(["acp", "--workflow-mode"]), /argument missing/);
+  assert.throws(() => acpWorkflowModeOption(["acp", "--not-a-flag"]), /Unknown option/);
 });
 
 // ── DWG-17：headless ─────────────────────────────────────────────────────────

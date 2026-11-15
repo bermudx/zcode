@@ -1017,6 +1017,7 @@ modules:
     requires:
       - shared
       - zcode-cli
+      - cli-arguments
     publicEntrypoints:
       - packages/shared/src/app-server-attach/index.ts
       - packages/shared/src/app-server-attach/contract.ts

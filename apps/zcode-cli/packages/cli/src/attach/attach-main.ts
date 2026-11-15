@@ -4,7 +4,7 @@
 // core 缺失时仍由 attach-command 经 PATH `zcode`（或 ZCODE_SERVER_BIN）拉起。
 import type { DynamicWorkflowMode } from "@zcode/shared";
 import { runAttachCommand } from "./attach-command.js";
-import { parseAttachEntryArgs } from "./attach-entry-args.js";
+import { acpWorkflowModeOption, parseAttachEntryArgs } from "./attach-entry-args.js";
 import { runAcpCommand } from "../acp/acp-command.js";
 import {
   DEFAULT_ACP_WORKFLOW_MODE,
@@ -47,26 +47,6 @@ Environment:
                      由 ensureServer 经 user 服务管理器拉起（--socket --no-plugins）。
 `;
 
-/** `zcode-attach acp` 后的旗标只认 --workflow-mode；其余沿用入口惯例忽略。 */
-const acpWorkflowModeOption = (argv: readonly string[]): string | undefined => {
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--workflow-mode") {
-      const value = argv[i + 1];
-      if (value === undefined || value === "") {
-        throw new Error(
-          "--workflow-mode requires a value: --workflow-mode <disabled|onDemand|alwaysOn>",
-        );
-      }
-      return value;
-    }
-    if (arg?.startsWith("--workflow-mode=")) {
-      return arg.slice("--workflow-mode=".length);
-    }
-  }
-  return undefined;
-};
-
 const main = async (): Promise<number> => {
   process.title = ATTACH_PROCESS_NAME;
   // `piz acp`：同一份瘦客户端二进制里的 ACP stdio 入口。必须在 TUI argv
@@ -75,8 +55,9 @@ const main = async (): Promise<number> => {
     let workflowMode: DynamicWorkflowMode;
     try {
       // 与 run.ts 同一个 normalizeWorkflowModeOption：非法值报三值清单 + exit 1。
+      // argv 含 `acp` 子命令位，与 monolith 的 ctx.argv 同形，parse 语义一致。
       workflowMode =
-        normalizeWorkflowModeOption(acpWorkflowModeOption(process.argv.slice(3))) ??
+        normalizeWorkflowModeOption(acpWorkflowModeOption(process.argv.slice(2))) ??
         DEFAULT_ACP_WORKFLOW_MODE;
     } catch (error) {
       process.stderr.write(
