@@ -88,6 +88,10 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   cli `tsconfig.json` covers only `src/**` — test files are never typechecked
   (tsx strips types at run time), so type-level changes in `tests/` need an
   explicit throwaway `tsc --noEmit` over those files to be verified.
+- GitHub CLI: always pass `-R bermudx/zcode` to `gh pr`/`gh issue`. On
+  2026-11-15 `gh pr create` without it failed with "does not have the correct
+  permissions to execute CreatePullRequest"; the same call with `-R` worked.
+  Root cause not confirmed (the repo has no GitHub parent).
 - Fix comments explaining bugs should follow upstream's Chinese-comment rule.
   Preserve license and upstream attribution. No inherited release/upload command
   is authorized for a fork release.
