@@ -862,7 +862,7 @@ compact/plan.md M2.1). No conflicts. Battery on merged main, all green:
   create/resume ops + setCompactContextWindow dispatch incl. -32601 on old
   cores); core `compact-policy` + `runtime-compact-context-window-cap`
   33/33; cli `attach-adapter` + `attach-model-option` 67/67 under
-  `env -u ZCODE_WORKSPACE_IDENTITY` (new: GLM predicate, 262000下发 on
+  `env -u ZCODE_WORKSPACE_IDENTITY` (new: GLM predicate, 262000 sent on
   create/resume/setModel, null-clear on non-GLM, single-sync dedupe,
   mid-switch cap follow with silent -32601); shared `zcodeProtocol.test.ts`
   85/85 (root vitest; new field schema).
@@ -1002,7 +1002,7 @@ path, memory matrix) remains open and unchanged.
 Branch `patch/subagent-sendmessage-queue` from `main` `610d1fd3` (not merged,
 not promoted — `piz` still runs the previous frozen pair; no core restarted).
 Spec: [tool/07-subagent.md](../../apps/zcode-cli/docs/design/v2/tool/07-subagent.md)
-"被拒收的消息与终态收口（fork）".
+"Rejected messages and terminal-state close-out (fork)".
 
 Defect (from reading the code, not observed live): a SendMessage steer that the
 winding-down child turn rejected (`turn_not_steerable` / `no_active_turn`) was

@@ -260,7 +260,7 @@ function validateFixtureProtocolShapes(db, sessionId) {
   for (const row of partRows) {
     const data = parseJson(row.data, `part ${row.id}`, errors);
     if (!data) continue;
-    // 这里覆盖 UI 打开时的协议校验失败点，避免 SQLite 写入成功但会话恢复失败。
+    // This covers the protocol validation failure point when the UI opens, so a successful SQLite write does not end in a failed session restore.
     if (!internalPartTypes.has(data.type)) {
       errors.push(`${row.id}: unsupported internal part type ${String(data.type)}`);
     }

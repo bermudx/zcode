@@ -65,7 +65,7 @@ Completed results before interruption:
 | contracts | 346 results; 0 new, 0 known, 0 flaky |
 
 The failed CLI test is
-`zcode-attach.cjs 在真实 pty 中发出 OSC 7501 idle（绑定 + 干净退出）`
+`zcode-attach.cjs 在真实 pty 中发出 OSC 7501 idle（绑定 + 干净退出）` ("zcode-attach.cjs emits OSC 7501 idle in a real pty (bind + clean exit)")
 in `tests/attach-binary.smoke.test.ts:210`.
 Its double-Ctrl-C exit assertion expected **0** but observed **130**. The
 separate PTY boot/render test passed. The OSC smoke file is unchanged from the

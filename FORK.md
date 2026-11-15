@@ -354,7 +354,7 @@ identity or enable inherited upload/update paths without a separate audit.
   inline attachment mapper deleted. Envelope/ACK/upload schemas shared with
   `@zcode/shared/zcode-protocol-v4` (no private wire shapes). Design notes:
   [tui-attach-shared-core.md](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md)
-  「输入提交迁移到 v4」.
+  "Input submission migration to v4".
 - Verification (worktree, dev build only — installed `piz` pair NOT touched):
   `@zcode/cli` typecheck + oxlint clean; `architecture:check --changed` 0 new;
   attach-adapter suite 43/46 pass — 3 failures spawn a real app-server binary
@@ -367,7 +367,7 @@ identity or enable inherited upload/update paths without a separate audit.
   row on first input; v4 admission trusted the record and wrote the ledger
   first. Admission now also runs first-persistence when
   `runtime.isSessionPersisted?.() === false` (absent method = no trigger).
-  Spec bullet in 「输入提交迁移到 v4」 不变量; regression
+  Spec bullet in the "Input submission migration to v4" invariants; regression
   `bootstrap/tests/v4-legacy-create-admission.test.ts` (fails without the fix).
   Live e2e (dev build on sync+v4 combo, scratch workspace, GLM-5.3): idle
   submit, guide steer, Ctrl+Q queue/replay, double-Esc stop + new turn,
@@ -493,42 +493,55 @@ identity or enable inherited upload/update paths without a separate audit.
 ### 2026-11-02 — review fix-pass on patch/shell-escape-aliases
 
 Two independent subagent reviews (no blockers). Accepted + fixed:
-- 噪声剔除改为**流首限位**（带 shell 名前缀的已知诊断行、至多 2 行）：
-  旧的全文行过滤会把用户输出里长得像诊断的行无声吃掉（`!echo 'no job
-  control in this shell'` 丢行、无 spill 时彻底丢失），与 spec「启动期
-  诊断」承诺相悖。本地化措辞不匹配时漏删属外观问题，反向才是数据丢失。
-- 直接调 runShellCommand 的 16 处用例统一 `CHAIN_ENV`（SHELL=""）：此前
-  会随跑测试者的真实 rc 走交互分支，greenness 宿主相关。
-- 补回归：空串 `$SHELL` 回退（旧变体覆盖、移植时丢失）、诊断长相行存活、
-  spill 保留流首噪声、`!!cmd` 交互 alias + 不进上下文；PATH 测试更名
-  （继承 PATH，非 profile）。
-- Spec 措辞收敛：「rc 全量加载」→ 交互 rc（.zshrc/.bashrc，login rc 不读）；
-  P003 行补「non-executable」回退条件。
-Accepted as-is（记录在案）：噪声正则仅英文（本地化漏删为外观问题，限位
-后不再可能误删）；`$SHELL` 相对路径/basename 子串匹配与旧变体逐字一致。
-tui-pi 262/262，typecheck + oxlint 清洁。
+- Noise stripping changed to a **stream-head cap** (known diagnostic lines
+  prefixed with the shell name, at most 2 lines): the old full-text line filter
+  silently ate user-output lines that looked like diagnostics (`!echo 'no job
+  control in this shell'` dropped the line; with no spill it was lost
+  entirely), contradicting the spec's "startup diagnostics" promise. Missing
+  a strip on localized wording is cosmetic; the reverse is data loss.
+- The 16 cases calling runShellCommand directly are unified on `CHAIN_ENV`
+  (SHELL=""): previously they took the interactive branch depending on the
+  runner's real rc, making greenness host-dependent.
+- Added regressions: empty-string `$SHELL` fallback (covered by the old
+  variant, lost in the port), diagnostic-looking lines surviving, spill keeps
+  stream-head noise, `!!cmd` interactive alias + stays out of context; PATH
+  test renamed (inherited PATH, not profile).
+- Spec wording tightened: "full rc loading" → interactive rc (.zshrc/.bashrc,
+  login rc not read); the P003 row gains a "non-executable" fallback
+  condition.
+Accepted as-is (on record): the noise regex is English-only (a localized miss
+is cosmetic; with the cap in place a false strip is no longer possible);
+`$SHELL` relative-path/basename substring matching is verbatim identical to
+the old variant.
+tui-pi 262/262, typecheck + oxlint clean.
 
 ### 2026-11-02 — review fix-pass on patch/footer-compact-gauge
 
 Subagent review (no blockers; branch rebased onto the aliases fix-pass,
 records SHAs repointed). Accepted + fixed:
-- 第三份 spec（tui-attach-shared-core.md 的 GLM 压缩窗口上限节）仍写着
-  「此上限不改页脚 ctx 分母」——与本 patch 直接矛盾，按 M2.1 修订口径
-  改写（谓词唯一来源 @zcode/shared；页脚/信息面板客户端侧收紧）。
-- compact/plan.md 里「attach-compact-cap.ts 唯一来源」的括注改指
-  @zcode/shared（原文件是 re-export）。
-- 「触发线落在 ~87% warning 区」加限定：已知窗口 ≥ cap 时成立；窗口
-  未知 cap-only 分支里 core 对缺失窗口回退 200K 默认，比例更低且仅在
-  首个 model_complete 前存在。
-- 信息面板 ctx 行 used 未知渲染 `?/262000`（原 `0/262000` 伪造；与页脚
-  `?/{win}` 同口径）+ 回归；无窗口 GLM 会话由此 cap-only 分母可见。
-- 补 provider 前缀负例：`glm-labs/claude-x` 不 cap（谓词作用于剥前缀后
-  bare modelId）；modelId 自身含斜杠的极端边界记录为已知限制。
-Accepted as-is：tui-pi 首次值引入 @zcode/shared barrel（打包由 promotion
-矩阵的 bundle/no-plugin startup 检查把关）；status-line.test.ts 811 vs
-基线 812 的 off-by-one 为既有状态，非本 patch。
-tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
-0 新增违规。
+- The third spec (the GLM compact window cap section of
+  tui-attach-shared-core.md) still said "this cap does not change the footer
+  ctx denominator" — in direct contradiction with this patch; rewritten to the
+  M2.1 revised wording (sole predicate source @zcode/shared; footer/info-panel
+  tightening is client-side).
+- The parenthetical in compact/plan.md naming attach-compact-cap.ts the sole
+  source now points to @zcode/shared (the original file is a re-export).
+- "The trigger line falls in the ~87% warning zone" gains a qualifier: it
+  holds when the window is known and ≥ cap; in the window-unknown cap-only
+  branch the core falls back to a 200K default for a missing window, the
+  ratio is lower, and it exists only before the first model_complete.
+- The info panel ctx line renders `?/262000` when used is unknown (the old
+  `0/262000` was fabricated; same convention as the footer `?/{win}`) + a
+  regression; window-less GLM sessions thereby show the cap-only denominator.
+- Added a provider-prefix negative case: `glm-labs/claude-x` is not capped
+  (the predicate applies to the bare modelId after the prefix is stripped); a
+  modelId containing slashes itself is recorded as a known limitation.
+Accepted as-is: tui-pi's first value introduces the @zcode/shared barrel
+(bundling is gated by the promotion matrix's bundle/no-plugin startup
+checks); the status-line.test.ts 811 vs baseline 812 off-by-one is a
+pre-existing state, not this patch.
+tui-pi 265/265, typecheck + oxlint clean, `architecture:check --changed`
+0 new violations.
 
 ### 2026-11-02 — merges + promotion of f1a0c45e (spill / aliases / footer gauge)
 
@@ -696,7 +709,7 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   cause not investigated). cli without a built `dist/` is reported NOT RUN,
   never pass. Root-workspace changes are reported NOT COVERED.
 - Policy and measurements: [verification.md](docs/fork/verification.md)
-  「Selected vs full runs」.
+  "Selected vs full runs".
 
 ### 2026-11-03 — merges + promotion of e37ed9d9 (session health + lean test gates)
 
@@ -769,7 +782,7 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   worker landed `patch/acp-reasoning-effort` `99e5646d` in the same checkout
   mid-battery; promotion was rebuilt from clean `main` and grep-verified free
   of that branch's code) are recorded in
-  [verification](docs/fork/verification.md) 「Promotion a68e1a1d」. That ACP
+  [verification](docs/fork/verification.md) "Promotion a68e1a1d". That ACP
   branch is merged nowhere and not promoted — its merge is a separate
   operator decision.
 - Environment lesson: T3 Code AppImage mounts (`/tmp/.mount_t3code*`) on PATH
@@ -837,7 +850,7 @@ tui-pi 265/265，typecheck + oxlint 清洁，`architecture:check --changed`
   `session/resume` could adopt another workspace's active record and write
   its cap. The fast path now validates first (mismatch →
   `project.session-lineage-invalid`, no cap write; workspace absent stays
-  passthrough). Spec: tui-attach-shared-core.md 「GLM 压缩窗口上限」.
+  passthrough). Spec: tui-attach-shared-core.md "GLM compact window cap".
   Regression `bootstrap/tests/resume-active-lineage.test.ts` — mismatch
   cases verified red without the fix, green with it (4/4).
 - Patch inventory: P001–P006 and the later carried behaviors all retained;
@@ -898,56 +911,69 @@ mapped), fork-behavior preservation (10 must-keeps). Consensus:
 
 Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents.
 
-### 2026-11-08 — OSC 7501 程序状态上报（patch/osc7501-status）
+### 2026-11-08 — OSC 7501 program status reporting (patch/osc7501-status)
 
 - Operator brief: "piz reports status through OSC 7501"
-  （[mitchellh.com/writing/program-status-osc7501](https://mitchellh.com/writing/program-status-osc7501)）。
-  piz attach 客户端把生命周期经终端带内 `ESC ] 7501 ; … ESC \` 报告：
-  idle（绑定/换绑/用户取消）、working（turn_started）、done（turn_complete
-  success）、blocked（kind=permission/question，interaction 面板渲染期）、
-  error（turn_error、`error_*` resultType、启动失败）；正常退出先发 idle 再打
-  退出续接提示。spec 先行（tui-attach-shared-core.md「OSC 7501 程序状态
-  上报」+ 根 GLOSSARY 词条）。
-- 实现与 herdr reporter 同一裁决（状态所有权在会话事件流 + interaction
-  路由，reporter 只翻译）：新 `osc-status-reporter.ts`（带内字节不丢不
-  乱序→无重试/心跳，(state,kind,msg) 去重，msg 160 字符截断后 base64，
-  写失败一次性禁用）；`AttachRuntime` 新增可选 `interactionStatus` 端口
-  （routePermission/routeUserInput 围绕 serveInteraction——blocked 的真相
-  在面板渲染，不在 permission_requested 事件，自动应答未渲染不计）；
-  attach-command 仅 piz 入口 + `ctx.stdout.isTTY` 激活，monolith/管道零
-  字节。herdr execFile 通道保留不动（herdr 当前只认那条路）。
-- Verification：cli **709/709 + attach-resume-target 11/11**（fork-tests
-  selected，全绿）；adapters signing 13/13；bootstrap socket-listener 4/4；
-  cli `tsc --noEmit` 0 错、oxlint 0/0；`architecture:check --changed --base
-  a971df4e` 0 违规。真实 pty 冒烟（util-linux `script` + 隔离
-  ZCODE_DATA_BASE_DIR + 真实 core spawn）：绑定 idle 字节落在终端流、双
-  Ctrl-C 干净退出 0 后退出 idle 先于续接提示（新回归
-  `attach-binary.smoke.test.ts` 第二用例）。
-- 新 worktree bootstrap 教训（本分支在全新 worktree 上完成）：只做 root
-  `pnpm install --frozen-lockfile`（文档已写明 nested 安装必败）；中途失败
-  的 `--dir apps/zcode-cli` 安装会**损坏包级链接**（contracts/node_modules
-  丢 zod → tui-pi tsc 出 implicit-any 假错），frozen 重装即修复，root TS
-  6.0.2 无需 5.9.3 遮蔽。SEA 资产测试还需 root `packages/shared`、
-  `packages/model-option-map` dist 与 `@zcode/node-repl-host`、
-  `@zcode/browser-use-plugin` 构建，全新 worktree 缺这些输出时 3 个 SEA
-  测试红（clean main 同红，环境性）。`architecture:check` 默认 origin/main
-  base 在本仓是分叉线，会把 attach-session.ts 813 行误报为新增——须显式
-  `--base <分支点>`。
-- Not exercised live（unverified）：真实 GLM 回合的 working/done、真实
-  审批/AskUserQuestion 的 blocked（翻译层由单测 + 路由测试覆盖，idle 字节
-  由 pty 冒烟覆盖）、Ghostty 端到端角标渲染。Not promoted；待 review +
-  merge 决定。
-- Review fix-pass（两个独立 subagent review，无 blocker；finding 均已
-  在分支修复）：① `finish` 后 reporter 完全静默——原实现只退订事件
-  sink，runtime.close() 窗口里迟到的 interaction settle/换绑仍可把
-  exit idle 覆盖成 stale working（`finished` 门禁在 emit 层，端口、
-  换绑、事件一律挡住）；② msg 单行化——换行折叠为空格、160 截断改按
-  code point（不劈代理对），对齐协议与 spec 的「单行」承诺。补钉：
-  catch 路径 `finish("error")` 的接线回归（--resume 未知会话驱动）、
-  permission 侧无 handler 早退不触发端口、晚到 settle 守卫的 error
-  半边、astral 截断/换行折叠字节回归、pty 冒烟 boot/exit 各自独享
-  45s 预算。已知限制记入 spec（并发面板、grace 期 re-announce 闪烁）；
-  spec 勘误：`script` 是 pty、照常发射，非「零字节」路径。
+  ([mitchellh.com/writing/program-status-osc7501](https://mitchellh.com/writing/program-status-osc7501)).
+  The piz attach client reports the lifecycle in-band over the terminal via
+  `ESC ] 7501 ; … ESC \`: idle (bind/rebind/user cancel), working
+  (turn_started), done (turn_complete success), blocked
+  (kind=permission/question, while the interaction panel renders), error
+  (turn_error, `error_*` resultType, spawn failure); a normal exit emits idle
+  first, then prints the exit resume hint. Spec first (tui-attach-shared-core.md
+  "OSC 7501 program status reporting" + a root GLOSSARY entry).
+- The implementation makes the same ruling as the herdr reporter (state
+  ownership lives in the session event stream + interaction routing; the
+  reporter only translates): new `osc-status-reporter.ts` (in-band bytes are
+  neither dropped nor reordered → no retries/heartbeats, (state,kind,msg)
+  dedup, msg truncated to 160 chars then base64, one-shot disable on write
+  failure); `AttachRuntime` gains an optional `interactionStatus` port
+  (routePermission/routeUserInput wrap serveInteraction — the truth of blocked
+  lives in panel rendering, not the permission_requested event, and
+  auto-answers that never rendered don't count); attach-command activates only
+  on the piz entry + `ctx.stdout.isTTY`, zero bytes on the monolith/pipe
+  paths. The herdr execFile channel stays untouched (that is the only path
+  herdr currently recognizes).
+- Verification: cli **709/709 + attach-resume-target 11/11** (fork-tests
+  selected, all green); adapters signing 13/13; bootstrap socket-listener 4/4;
+  cli `tsc --noEmit` 0 errors, oxlint 0/0; `architecture:check --changed --base
+  a971df4e` 0 violations. Real pty smoke (util-linux `script` + isolated
+  ZCODE_DATA_BASE_DIR + real core spawn): bind idle bytes land on the terminal
+  stream, and after a double Ctrl-C with a clean exit 0 the exit idle precedes
+  the resume hint (new regression `attach-binary.smoke.test.ts` second case).
+- New-worktree bootstrap lesson (this branch was completed on a fresh
+  worktree): run only the root `pnpm install --frozen-lockfile` (the docs
+  already state that nested installs fail); a mid-run failure of the
+  `--dir apps/zcode-cli` install **corrupts package-level links**
+  (contracts/node_modules loses zod → tui-pi tsc reports implicit-any false
+  errors); a frozen reinstall fixes it, and root TS 6.0.2 needs no 5.9.3
+  shadowing. The SEA asset tests additionally need the root `packages/shared`,
+  `packages/model-option-map` dist and the `@zcode/node-repl-host`,
+  `@zcode/browser-use-plugin` builds; a fresh worktree missing those outputs
+  has 3 SEA tests red (clean main is red the same way — environmental).
+  `architecture:check`'s default origin/main base is the fork line in this
+  repo and misreports attach-session.ts's 813 lines as new — pass an explicit
+  `--base <branch point>`.
+- Not exercised live (unverified): working/done on a real GLM turn, blocked on
+  a real approval/AskUserQuestion (the translation layer is covered by unit
+  tests + routing tests, idle bytes by the pty smoke), Ghostty end-to-end
+  badge rendering. Not promoted; awaits review + merge decision.
+- Review fix-pass (two independent subagent reviews, no blockers; all findings
+  fixed on the branch): (1) the reporter is fully silent after `finish` — the
+  original implementation only unsubscribed from the event sink, and a late
+  interaction settle/rebind inside the runtime.close() window could still
+  overwrite the exit idle with a stale working (the `finished` gate sits at
+  the emit layer and blocks the port, rebinds and events alike); (2) msg
+  single-lining — newlines collapse to spaces and the 160 truncation now
+  counts code points (no splitting surrogate pairs), aligning with the
+  protocol and the spec's "single line" promise. Added regressions: wiring of
+  the catch-path `finish("error")` (driven by --resume of an unknown session),
+  the permission side's no-handler early return not triggering the port, the
+  error half of the late-settle guard, astral truncation/newline-collapse byte
+  regressions, and separate 45s budgets for the pty smoke boot and exit runs.
+  Known limitations are recorded in the spec (concurrent panels, re-announce
+  flicker during the grace period); spec erratum: `script` is a pty and emits
+  as usual, not a "zero byte" path.
 
 ### 2026-11-08 — merge reviewed sync and OSC branches (no promotion)
 
@@ -970,8 +996,8 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
 - Operator goal: "full support of `/goal` and `/dwf` over ACP". ACP clients have no
   command center, so these commands previously hit the model as literal text (P005)
   and never touched the goal state machine or the dwf journal.
-- Spec first ([acp-frontend.md](docs/design/v2/acp-frontend.md) 「Local slash
-  commands」), then implementation: `session/prompt` intercepts `/goal`/`/target`/`/dwf`
+- Spec first ([acp-frontend.md](docs/design/v2/acp-frontend.md) "Local slash
+  commands"), then implementation: `session/prompt` intercepts `/goal`/`/target`/`/dwf`
   (same word-boundary parse as the TUI) and routes through core ops; core stays the
   single owner of goal wording/state and of dwf facts. Response text is emitted as one
   `agent_message_chunk`; goal `set`/`replace`/`resume` keeps the prompt request open
