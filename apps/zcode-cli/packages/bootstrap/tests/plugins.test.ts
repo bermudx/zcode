@@ -66,8 +66,8 @@ describe("plugin discovery IO boundary", () => {
         pluginStorageRoot: join(root, "plugins"),
       };
       const configResult = createConfig(options);
-      const direct = resolveZCodePlugins({ ...options, configResult });
-      const startup = resolveStartupPlugins({
+      const direct = await resolveZCodePlugins({ ...options, configResult });
+      const startup = await resolveStartupPlugins({
         ...options, configResult, cliStorageRoot: root, options,
         startupTimer: createNoopStartupTimer(),
       });
@@ -100,8 +100,8 @@ describe("plugin discovery IO boundary", () => {
         pluginStorageRoot: join(root, "plugins"),
         workingDirectory: root,
       };
-      const direct = resolveZCodePlugins(options);
-      const startup = resolveStartupPlugins({
+      const direct = await resolveZCodePlugins(options);
+      const startup = await resolveStartupPlugins({
         ...options,
         cliStorageRoot: root,
         options,

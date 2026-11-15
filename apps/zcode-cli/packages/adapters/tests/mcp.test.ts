@@ -1,5 +1,5 @@
 import { delimiter, dirname } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UnauthorizedError } from "@modelcontextprotocol/client";
 import { ZCODE_TOOL_ENV_PASSTHROUGH_ENV_KEY } from "@zcode/shared";
 import type { SharedZCodeCredentialStore } from "../src/auth/shared-credentials.js";
@@ -176,6 +176,9 @@ async function observePromiseWithin<T>(
 
 describe("createMcpAdapter", () => {
   beforeEach(() => {
+    // 无头 CI 没有 keyring；3.18.2 起 cipher 需要显式托管 secret 来源，
+    // 否则 OAuth token 存取抛 CREDENTIAL_SECURE_STORAGE_UNAVAILABLE。
+    vi.stubEnv("ZCODE_CREDENTIAL_SECRET", "mcp-test-credential-secret");
     capturedClientInfo.length = 0;
     capturedHttpOptions.length = 0;
     capturedSseOptions.length = 0;
@@ -198,6 +201,10 @@ describe("createMcpAdapter", () => {
     clientCallToolMock.mockResolvedValue({
       content: [{ type: "text", text: "ok" }],
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("close waits for cancelled handshake resource cleanup before returning", async () => {

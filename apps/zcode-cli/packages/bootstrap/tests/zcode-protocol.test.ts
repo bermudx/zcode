@@ -695,6 +695,7 @@ describe("ZCodeProtocolAgentServer", () => {
       { sessionId },
       {
         runtime: {
+          getPlanEnabled: () => false,
           getSessionModelSelection: () => undefined,
           getProjection: async () =>
             ({

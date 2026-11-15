@@ -327,6 +327,7 @@ describe("session facade callMcpToolForUi (the path plugins/mentionItems uses)",
       configResult: { config: DefaultRuntimeConfig },
       mcpPort,
       runtime: {
+        getMcpPort: () => mcpPort,
         getToolExecutor: () => ({ authorizeAppTool }),
         getToolRegistry: () => ({ list: () => [], get: () => undefined }),
       },

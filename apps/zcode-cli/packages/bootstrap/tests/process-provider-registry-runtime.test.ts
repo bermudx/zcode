@@ -72,14 +72,18 @@ describe("process provider registry runtime", () => {
       await wait;
       return new Response(JSON.stringify(builtin));
     });
-    const credentialStore = createSharedZCodeCredentialStore({
-      env: { ZCODE_DATA_BASE_DIR: root },
-    });
+    // 无头 CI 无 keyring；fixture 与 runtime 共享同一托管 secret，密文才可互通。
+    const credentialEnv = {
+      ZCODE_CREDENTIAL_SECRET: "process-registry-runtime-test-secret",
+      ZCODE_DATA_BASE_DIR: root,
+    };
+    const credentialStore = createSharedZCodeCredentialStore({ env: credentialEnv });
     await credentialStore.save("zcodejwttoken", "fixture-cli-config");
     const env = {
       [ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]: active,
       [ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]: join(root, "personal.json"),
       ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE: bundled,
+      ZCODE_CREDENTIAL_SECRET: credentialEnv.ZCODE_CREDENTIAL_SECRET,
     };
     const runtime = await startProcessProviderRegistryRuntime(env, {
       standalone: {

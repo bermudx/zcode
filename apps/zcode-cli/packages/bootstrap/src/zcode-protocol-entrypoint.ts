@@ -667,9 +667,10 @@ export async function runZCodeProtocolAgent(
         });
       }
     };
-    mcpTelemetryTracker?.start();
 
     if (socketPath) {
+      // socket 模式客户端随后才 attach；这里启动 tracker，让后续采样到达晚接入的连接。
+      mcpTelemetryTracker?.start();
       const attachSocket = (socket: Socket): void => {
         if (socket.destroyed || socket.closed) return;
         attachInFlight += 1;
@@ -766,6 +767,9 @@ export async function runZCodeProtocolAgent(
       );
     } else {
       const entry = await attachConnection(input, output);
+      // stdio 的 tracker 必须等连接 attached 再启动：首发采样只发给 attachedConnections，
+      // 先启动会把首批 mcpResourceSamples 丢进空集合（上游顺序即 connection.start 先于 tracker）。
+      mcpTelemetryTracker?.start();
       startupTimer.complete("ZCode Protocol agent startup completed", {
         event: "zcode_protocol.startup.completed",
         stage: "total",

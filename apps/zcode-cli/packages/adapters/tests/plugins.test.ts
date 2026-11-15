@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as asyncFs from "node:fs/promises";
-import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -577,6 +577,10 @@ describe("NodePluginAdapter", () => {
       const inFlight = cache.reader("scope");
       await inFlight.json(path);
       await writeFile(path, '{"value":2}');
+      // 同尺寸改写只靠 mtime/ctime 区分；CI 文件系统上两次写入可能落进同一精度
+      // 窗口使指纹不变，固定一个确定的过去 mtime 让失效判定可复现。
+      const staleStamp = new Date("2024-01-02T00:00:00Z");
+      await utimes(path, staleStamp, staleStamp);
       expect(await inFlight.validate()).toBe(false);
       expect(await cache.reader("scope").json(path)).toEqual({ value: 2 });
     } finally {
@@ -669,6 +673,9 @@ describe("NodePluginAdapter", () => {
     try {
       await entered.promise;
       await writePluginManifest(root, { name: "changing", version: "2.0.0" });
+      // 同上：同尺寸 manifest 改写需固定 mtime，否则缓存指纹不变、重读旧版本。
+      const changedStamp = new Date("2024-01-03T00:00:00Z");
+      await utimes(manifestPath, changedStamp, changedStamp);
       release.resolve();
       expect((await pending).plugins[0]?.version).toBe("2.0.0");
       adapter.dispose();

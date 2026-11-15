@@ -2389,6 +2389,10 @@ function createBackgroundStoppedTask(
   const totalDurationMs = Math.max(0, completedAt.getTime() - current.startedAt.getTime());
   const stopped: RuntimeTaskSnapshot = {
     ...withoutRuntimeMessageState(current),
+    // stopTask 先把 stopped 快照同步提交进 registry，再由 finalizeBackgroundStopped 做 drain；
+    // withoutRuntimeMessageState 会剥掉 pendingMessages，必须补回，否则 drain 只读到空队列，
+    // killed 通知丢失"有消息未投递"的说明（合并把 drain 挪到提交之后引入的回归）。
+    pendingMessages: current.pendingMessages,
     status: BACKGROUND_AGENT_STOPPED_STATE.registryStatus,
     completedAt,
     error: BACKGROUND_AGENT_STOPPED_STATE.message,

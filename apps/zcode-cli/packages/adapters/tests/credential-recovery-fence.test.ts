@@ -14,6 +14,12 @@ import {
 } from "@zcode/shared/node";
 import { createSharedZCodeCredentialStore } from "../src/auth/shared-credentials.js";
 
+// 无头 CI 没有 keyring/secret 来源，默认 cipher 会抛 CREDENTIAL_SECURE_STORAGE_UNAVAILABLE；
+// 固定托管 secret 只提供可用 cipher，围栏语义的断言不变。
+const TEST_CREDENTIAL_ENV = {
+  ZCODE_CREDENTIAL_SECRET: "credential-recovery-fence-test-secret-32",
+};
+
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual, readFile: vi.fn(actual.readFile), mkdir: vi.fn(actual.mkdir) };
@@ -22,7 +28,7 @@ vi.mock("node:fs/promises", async (original) => {
 it("正常读取不等待另一进程的写锁", async () => {
   const root = await mkdtemp(join(tmpdir(), "credential-read-lock-"));
   const file = join(root, "credentials.json");
-  const store = createSharedZCodeCredentialStore({ filePath: file });
+  const store = createSharedZCodeCredentialStore({ env: TEST_CREDENTIAL_ENV, filePath: file });
   await store.save("healthy", "value");
   const unlock = await acquireFileLock(file, [], 0, 10000);
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -45,7 +51,7 @@ it("恢复推进代次但尚未替换时，损坏原件不能被读为有效凭�
   const unlock = await acquireFileLock(file, [], 0, 10000);
   try {
     await writeFile(`${file}.recovery-generation`, "new");
-    const store = createSharedZCodeCredentialStore({ filePath: file });
+    const store = createSharedZCodeCredentialStore({ env: TEST_CREDENTIAL_ENV, filePath: file });
     await expect(store.load("old")).rejects.toThrow();
     await writeFile(file, "{}");
     expect(await store.load("old")).toBeNull();
@@ -58,7 +64,7 @@ it("恢复推进代次但尚未替换时，损坏原件不能被读为有效凭�
 it("非法 UTF-8 的容器不能返回有效字段或被写回覆盖", async () => {
   const root = await mkdtemp(join(tmpdir(), "credential-utf8-"));
   const file = join(root, "credentials.json");
-  const store = createSharedZCodeCredentialStore({ filePath: file });
+  const store = createSharedZCodeCredentialStore({ env: TEST_CREDENTIAL_ENV, filePath: file });
   try {
     await store.save("ok", "valid-value");
     const valid = await readFile(file);
@@ -85,7 +91,7 @@ it("恢复前开始的流程不能在网络返回后重新取得新库的写入�
     await writeFile(file, "{}");
     const guard = await captureCredentialFileGuard(file);
     await writeFile(`${file}.recovery-generation`, "new-flow-generation");
-    const store = createSharedZCodeCredentialStore({ filePath: file });
+    const store = createSharedZCodeCredentialStore({ env: TEST_CREDENTIAL_ENV, filePath: file });
     await expect(guard(async () => store.save("old-flow", "old-value"))).rejects.toThrow(
       "Credential store changed",
     );
@@ -163,7 +169,7 @@ it("恢复后的并发 CLI 保存继续锁内合并，不丢失独立 key", asyn
   try {
     await writeFile(file, "{}");
     await writeFile(`${file}.recovery-generation`, "recovered");
-    const store = createSharedZCodeCredentialStore({ filePath: file });
+    const store = createSharedZCodeCredentialStore({ env: TEST_CREDENTIAL_ENV, filePath: file });
     await Promise.all([store.save("first", "one"), store.save("second", "two")]);
     expect(await store.loadMany(["first", "second"])).toEqual({ first: "one", second: "two" });
   } finally {
@@ -200,7 +206,7 @@ it("确认恢复之后，已接收但尚未取得文件锁的 CLI 保存必须�
   try {
     await writeFile(file, "{}");
     await writeFile(generationFile, "old");
-    const store = createSharedZCodeCredentialStore({ filePath: file });
+    const store = createSharedZCodeCredentialStore({ env: TEST_CREDENTIAL_ENV, filePath: file });
     const save = store.save("late", "must-not-return");
     const rejected = expect(save).rejects.toThrow("Credential store changed");
     await ready;
