@@ -2160,7 +2160,7 @@ nodes:
   - id: "evidence.desktop-startup-critical-path-tests"
     kind: "evidence"
     label: "Desktop runtime env, Host deadline, and tab restore tests"
-    codeSeeds: [] # App 单测已退役，当前没有该层自动化证据。
+    codeSeeds: [] # App unit tests have been retired; this layer currently has no automated-test evidence.
 
   - id: "surface.app-usage-dashboard"
     kind: "ui-surface"
@@ -2938,7 +2938,7 @@ nodes:
     label: "Plugin scope projection and search tests"
     docs:
       - "docs/plugin-capabilities-settings.md"
-    codeSeeds: [] # App 单测已退役，当前没有该层自动化证据。
+    codeSeeds: [] # App unit tests have been retired; this layer currently has no automated-test evidence.
 
   - id: "capability.skill-catalog-discovery"
     kind: "capability"
@@ -3061,7 +3061,7 @@ nodes:
     label: "Command Workspace scope selection tests"
     docs:
       - "docs/settings-command-list.md"
-    codeSeeds: [] # App 单测已退役，当前没有该层自动化证据。
+    codeSeeds: [] # App unit tests have been retired; this layer currently has no automated-test evidence.
 
   - id: "surface.project-memory-settings"
     kind: "ui-surface"
@@ -4963,7 +4963,7 @@ nodes:
     label: "Desktop Chromium Session network policy target and certificate tests"
     docs:
       - "docs/testing/browser-use-coverage-matrix.md"
-    codeSeeds: [] # App 单测已退役，当前没有该层自动化证据。
+    codeSeeds: [] # App unit tests have been retired; this layer currently has no automated-test evidence.
 
   - id: "evidence.host-api-network-policy-tests"
     kind: "evidence"
@@ -5057,7 +5057,7 @@ nodes:
       - "docs/conversation-session-case-catalog.md"
       - "docs/testing/conversation-session-e2e-coverage-matrix.md"
       - "docs/testing/browser-use-coverage-matrix.md"
-    codeSeeds: [] # App 单测已退役，当前没有该层自动化证据。
+    codeSeeds: [] # App unit tests have been retired; this layer currently has no automated-test evidence.
 
   - id: "capability.project-creation-folder-confirmation"
     kind: "capability"

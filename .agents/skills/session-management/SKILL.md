@@ -1,95 +1,95 @@
 ---
 name: session-management
-description: 修改 ZCode 会话管理（左侧任务列表、tasks-index.sqlite、sessions-index、CLI session store、标题/状态/置顶/归档/未读/删除、虚拟项目与 roots、workspace 身份、相关 migration）之前必读。它把 2026-09 「虚拟项目与数据归属收口」重构及分组恢复的设计理由、历史 bug 根因与不变量蒸馏成检查清单，让后来者知道为什么这样设计、哪些线不能踩。
+description: Required reading before modifying ZCode session management (left-side task list, tasks-index.sqlite, sessions-index, CLI session store, title/status/pinned/archived/unread/deleted, virtual projects and roots, workspace identity, related migrations). It distills the design rationale, historical bug root causes and invariants of the 2026-09 "virtual project and data-ownership consolidation" refactor and the grouping restore into a checklist, so future maintainers know why it was designed this way and which lines must not be crossed.
 ---
 
-# Session 管理设计蒸馏
+# Session Management Design Distillation
 
-改动范围命中下列任一项时使用本 skill：`packages/services/src/session/taskIndexRepo.ts`、`packages/services/src/zcode-agent/zcodeTaskIndexSyncer.ts`、`zcodeTaskServiceAdapter.ts`、`packages/ui` 侧栏 / 任务列表 / 项目树、`apps/zcode-cli/packages/adapters/src/storage/session-store/*`、sessions-index 协议、workspace / project / roots 数据结构、两库 migration。
+Use this skill when the change touches any of the following: `packages/services/src/session/taskIndexRepo.ts`, `packages/services/src/zcode-agent/zcodeTaskIndexSyncer.ts`, `zcodeTaskServiceAdapter.ts`, the `packages/ui` sidebar / task list / project tree, `apps/zcode-cli/packages/adapters/src/storage/session-store/*`, the sessions-index protocol, workspace / project / roots data structures, or migrations in either database.
 
-权威 spec：`docs/superpowers/specs/2026-09-09-virtual-project-design.md` 与 `docs/ui/task-grouped-view.md`。2026-10-13 分组恢复裁决覆盖历史 Group 合并 Project 方案。本 skill 不重复 spec，只讲「为什么」和「怎么不踩坑」。
+Authoritative specs: `docs/superpowers/specs/2026-09-09-virtual-project-design.md` and `docs/ui/task-grouped-view.md`. The 2026-10-13 grouping-restore ruling supersedes the earlier plan of merging Groups into Projects. This skill does not repeat the specs; it only explains the "why" and "how to avoid the pitfalls".
 
-## 1. 一句话原则
+## 1. One-Sentence Principle
 
-**会话事实归 CLI，组织态归 Host；每个字段只有一个写者。**
+**Session facts belong to the CLI; organization state belongs to the Host; every field has exactly one writer.**
 
 ```text
-CLI  db.sqlite      存在性(软删除 time_deleted)、title+title_source、time_created/updated、last_outcome、正文、goal、fork、trace
-Host tasks-index    project_id、pinned、archived、unread_at(+CAS)、sort_order、projects/roots/hosts、定时/闲时；控制端另存跨设备分组成员与顺序
-                    cli_* 列 = CLI 事实的只读镜像，唯一写者 taskIndexSyncer
-禁止：CLI 写 app 库；Host 写 db.sqlite；Host 对任何 cli_* 列写 Date.now() 或从 snapshot 推导的值
+CLI  db.sqlite      existence (soft-delete time_deleted), title+title_source, time_created/updated, last_outcome, message body, goal, fork, trace
+Host tasks-index    project_id, pinned, archived, unread_at(+CAS), sort_order, projects/roots/hosts, scheduled/idle-time; the controller separately stores cross-device group members and their order
+                    cli_* columns = read-only mirror of CLI facts, sole writer taskIndexSyncer
+Forbidden: CLI writes the app DB; Host writes db.sqlite; Host writes Date.now() or snapshot-derived values into any cli_* column
 ```
 
-### 为什么
+### Why
 
-重构前 title / status 相关 Bugfix 注释有 30 多处（`rg "Bugfix" packages/services/src/zcode-agent/zcodeTaskIndexSyncer.ts packages/services/src/session/taskIndexRepo.ts`），几乎全部属于两类：
+Before the refactor there were 30+ Bugfix comments around title / status (`rg "Bugfix" packages/services/src/zcode-agent/zcodeTaskIndexSyncer.ts packages/services/src/session/taskIndexRepo.ts`), almost all in two categories:
 
-1. Host 替 CLI 写会话事实：`updated_at = Date.now()`（rename / 状态变更）与 CLI 的 `time_updated` 分叉，导致排序跳动，UI 被迫只信 sessions-index 的 `lastActivityAt`；rename 先写本地再 best-effort 通知 CLI，失败只 warn，两边「是否手动标题」不一致；`task_status` 从 snapshot 反推，冷启动恒为 completed，残留 running 只能靠 UI 规则吸收。
-2. CLI 替 Host 决定行集合：3.4.0 曾因 sessions-index 快照缺 summary 导致历史任务在 Grouped 视图消失（`docs/superpowers/specs/2026-07-20-sidebar-task-row-authority-design.md`）；CLI 冷种子会复活 app 已删的 session，app 只能靠 tombstone 压制。
+1. The Host writing session facts on the CLI's behalf: `updated_at = Date.now()` (rename / status changes) diverged from the CLI's `time_updated`, causing sort-order jitter and forcing the UI to trust only sessions-index `lastActivityAt`; rename wrote locally first and then notified the CLI best-effort, warning only on failure, so the two sides disagreed on "is this a manual title"; `task_status` was inferred backwards from the snapshot, always completed after cold start, with leftover running states absorbed only by UI rules.
+2. The CLI deciding the row set on the Host's behalf: in 3.4.0 a sessions-index snapshot missing summary made historical tasks disappear from the Grouped view (`docs/superpowers/specs/2026-07-20-sidebar-task-row-authority-design.md`); the CLI cold seed resurrected sessions the app had deleted, and the app could only suppress them with tombstones.
 
-结论：不是「哪个库更好」，而是「谁第一手知道这个事实」。会话发生了什么只有 CLI 知道；用户对列表做了什么只有 Host/UI 知道；CLI 是每 workspace 一进程且可不在线，跨 workspace 的列表必须有 Host 侧落盘（`onDynamicWorkspaceEvent` 注释明确禁止为列表拉起 Agent）。
+Conclusion: the question is not "which database is better" but "who knows this fact first-hand". What happened in a session is known only to the CLI; what the user did to the list is known only to the Host/UI; the CLI is one process per workspace and may be offline, so a cross-workspace list must be persisted on the Host side (the `onDynamicWorkspaceEvent` comment explicitly forbids spinning up an Agent just to build the list).
 
-## 2. 不变量（改代码前逐条对照）
+## 2. Invariants (check each one before changing code)
 
-| #   | 不变量                                                                                                                                                                      | 违反时的典型症状                                                    |
+| #   | Invariant                                                                                                                                                                   | Typical symptom when violated                                       |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| I1  | `workspaceKey = workspaceIdentity?.trim() \|\| workspacePath` 只表达身份隔离；执行路径永远用 `workspacePath` / `root_path`                                                  | 远程 identity 被写进 cwd（3.4.2 事故）                              |
-| I2  | session 绑定目录（cwd）创建后永不变；项目移动只改 `project_id`，分组移动只改成员与顺序                                                                                      | 冷启动后 provider / memory / permissions 找不到                     |
-| I3  | 项目其余 roots 只作为 `additionalDirectories` 供 skills / commands / subagents / 可写范围；AGENTS.md、settings、MCP、hooks、plugins、memory、permissions 只按绑定目录链解析 | 另一目录的可执行配置混进当前会话；同名 MCP/hook 冲突                |
-| I4  | CLI 不感知项目；协议里只有目录列表                                                                                                                                          | CLI 出现 project 概念 = 设计漂移                                    |
-| I5  | 行集合由 app 库决定，sessions-index 只补实时字段（phase、lastActivityAt、pending interaction）                                                                              | 任务在列表里消失 / 复活                                             |
-| I6  | 排序时间只取 CLI 创建/活动时间镜像；沿用 running/prewarming 优先、运行层创建时间稳定排序及普通层创建/更新时间偏好；pin / archive / rename / 未读不改时间                    | 重命名后跳到顶部                                                    |
-| I7  | 未读用 CAS（`expectedUnreadAt`），只有 Host 显式 `unreadSignal` 才制造未读                                                                                                  | 手机已读被桌面覆盖；每轮完成全表闪烁                                |
-| I8  | 标题优先级：用户 override(`title_source=custom`) > 模型生成 > 首条 prompt > 占位 "New session"；快照永不覆盖 override                                                       | 手动标题闪回                                                        |
-| I9  | 删除 = CLI 软删除（`time_deleted`），app `deleted` 是镜像；冷种子 / listSessions / TUI 必须过滤                                                                             | 已删 session 复活                                                   |
-| I10 | 两库 schema 只加不删不改旧列语义；新列可空或带默认；`ON CONFLICT(workspace_key, task_id)` 的唯一约束必须保留                                                                | 降级后旧版本崩溃                                                    |
-| I11 | 派生目录 hash（`sessions/{hash}`、`agent-config/{provider}/{hash}`、CLI memory）输入是真实目录 + identity，与项目无关，不迁移                                               | 升级后配置 / 记忆丢失                                               |
-| I12 | 手机远控 bridge / queue / snapshot key 只用 workspaceKey；桌面 continuous 与手机 replayable 边界不变                                                                        | 远控串会话                                                          |
-| I13 | Host 组织态只存在原列，不做副本；旧列 `deleted` / `title_overridden` 是「待交接给 CLI 的意图」，每次启动全表对账，不能只补 NULL                                             | 降级期删除 / 重命名在再升级后丢失                                   |
-| I14 | sessions-index snapshot 缺席不等于删除；删除只能来自 `session.removed` 或 `sessionsIndex/reconcile` 返回 deleted                                                            | 事件丢失后任务复活或误删                                            |
-| I15 | 恢复 CLI 库备份必须关闭外键并校验行数 / 哈希；`message`/`part` 对 `session` 是 ON DELETE CASCADE，裸 DELETE 会清空正文                                                      | 恢复后消息全丢                                                      |
-| I16 | 附加目录由 Host 统一解析并贯穿 create / 显式 resume / V4 subscribe 冷恢复；排除的是 session cwd 不是主要目录；运行实例存在时不刷新                                          | 桌面打开历史任务拿不到附加目录；换主要目录后老会话目录范围错乱      |
-| I17 | 空归属 session 只在首次发现时判定一次归位（bit 8）；不自动建项目；不归入者在任务区、时间线或分组中可见。app 行缺失 = 未归类 `[]`，项目缺失 / 读取失败 = 显式报错            | 已移除的 workspace 复活；会话后来被悄悄挪进项目；TUI 新建会话打不开 |
+| I1  | `workspaceKey = workspaceIdentity?.trim() \|\| workspacePath` expresses identity isolation only; execution paths always use `workspacePath` / `root_path`                   | remote identity written into cwd (the 3.4.2 incident)               |
+| I2  | a session's bound directory (cwd) never changes after creation; moving a project only changes `project_id`; a group move only changes members and order                     | provider / memory / permissions missing after cold start            |
+| I3  | other roots = `additionalDirectories` only (skills / commands / subagents / writable scope); AGENTS.md/settings/MCP/hooks/plugins/memory/permissions follow bound dir chain | another directory's executable config leaks in; MCP/hook clashes    |
+| I4  | the CLI knows nothing about projects; the protocol carries only directory lists                                                                                             | a project concept in the CLI = design drift                         |
+| I5  | the app DB decides the row set; sessions-index only fills in live fields (phase, lastActivityAt, pending interaction)                                                       | tasks vanish from / reappear in the list                            |
+| I6  | sort time = CLI create/activity mirror; running/prewarming first; running: stable by create time; normal: prefers create/update; pin/archive/rename/unread don't move it    | a renamed task jumps to the top                                     |
+| I7  | unread uses CAS (`expectedUnreadAt`); only an explicit Host `unreadSignal` may create unread                                                                                | phone read state overwritten by desktop; list flickers each turn    |
+| I8  | title priority: user override(`title_source=custom`) > model-generated > first prompt > placeholder "New session"; snapshots never overwrite an override                    | manual title flashes back                                           |
+| I9  | delete = CLI soft delete (`time_deleted`); the app's `deleted` is a mirror; cold seed / listSessions / TUI must filter it                                                   | a deleted session resurrects                                        |
+| I10 | schemas are add-only: never drop columns or change old column semantics; new columns nullable/defaulted; keep the `ON CONFLICT(workspace_key, task_id)` unique constraint   | old version crashes after downgrade                                 |
+| I11 | derived directory hashes (`sessions/{hash}`, `agent-config/{provider}/{hash}`, CLI memory) take real dir + identity, project-independent, never migrate                     | config / memory lost after upgrade                                  |
+| I12 | phone remote-control bridge / queue / snapshot keys use only workspaceKey; the desktop-continuous vs phone-replayable boundary never changes                                | remote control crosses sessions                                     |
+| I13 | Host org state lives only in original columns; `deleted` / `title_overridden` = "intent pending handoff to CLI", reconciled table-wide at startup, not just NULL backfill   | downgrade-window deletes / renames lost after re-upgrade            |
+| I14 | a missing sessions-index snapshot is not a deletion; deletion can come only from `session.removed` or from `sessionsIndex/reconcile` returning deleted                      | tasks resurrect or get wrongly deleted after lost events            |
+| I15 | restoring a CLI DB backup must disable foreign keys and verify row counts / hashes; `message`/`part` are ON DELETE CASCADE on `session`, so a bare DELETE wipes bodies      | all messages lost after restore                                     |
+| I16 | Host resolves additional dirs centrally across create / explicit resume / V4 subscribe cold recovery; exclusion targets session cwd, not primary; no refresh while one runs | history tasks miss additional dirs; sessions mis-scoped after swap  |
+| I17 | unassigned sessions: placed once at first discovery (bit 8); no auto projects; unplaced stay visible in tasks area/timeline/groups; missing app row = unassigned `[]`; missing project / read failure = explicit error | a removed workspace resurrects; a session later gets quietly moved into a project; new TUI sessions fail to open |
 
-## 3. 关键裁决速查（详见 spec 第 3 节）
+## 3. Key Rulings at a Glance (details in spec section 3)
 
-- 2026-10-10 远程裁决：本地/远程项目平铺，Host 不作为分组；远程先建单目录项目再建会话，不允许无项目创建或拖拽追加目录。统一项目顺序归控制端侧栏偏好。详见 `docs/superpowers/specs/2026-10-10-session-manage-upstream-integration.md`。
-- 侧栏 = 全局置顶区（session + 置顶项目）→ 项目区 → 任务区（`project_id IS NULL`，任意 cwd）；`~/.zcode/workspace/*` 只作为全局新建任务的默认执行目录。筛选含按项目 / 按分组 / 最近更新；真实目录不是节点，不恢复旧两级切换器。
-- 项目：本地 0..n 个同 host 的 roots + 一个主要目录，远程恰好一个固定目录；同一目录可属多个项目；新建 session cwd = 主要目录；仅本地 0 root 时自动建 `~/.zcode/workspace/<ts>` 并加为主要 root。
-- 本地项目及在线远端权威项目删除 = 软删除容器，session 保留归属，时间线可见；新建 roots 集合完全相等的项目时提示恢复；不提供彻底删除。远程项目离线删除只移除本机入口与缓存，不触发远端软删除或恢复。
-- 本地项目移除 root / 换主要目录不影响已创建 session、定时任务、闲时任务、Bots（它们在创建时固化 cwd 与附加目录）；roots 变更对运行中 session 下次 resume 生效。
-- 同名 skill / subagent 来自不同 root 时并存，由 CLI 赋限定名 `<rootName>/<name>`。
-- 分组：控制端 Host 唯一持有跨设备分组，手机复用该 Host；不按 workspace 建组，不将分组转换为项目。分组不改变 cwd、项目、CLI 时间、配置或权限。读取只读，单节点移动在事务内复检来源/锚点，缺席不删除；系统任务只首次归组，手工移出后不拉回。
-- 展示偏好：有效新版 view 优先，否则沿用旧 organizeBy；旧 grouped 默认进入按分组。新建任务固化 draft 的分组 placement，首次发送后幂等提交，不在导航时猜测。
-- 远程：项目与任务组织态留在远端 app 库；本机持久化 host 连接记录、用户已添加的项目入口及基础信息缓存。离线不可展开、改名或编辑 roots，项目操作仅允许移除本机入口与缓存，远端项目与会话保留，无待同步删除队列。远程只允许创建时确定的一个固定 root，host 上限 20，启动自动连接已保存 host。
-- 重连只刷新本机仍存在的入口，迟到响应不得 upsert 已移除入口；setting.json 从本机入口列表派生，不反向重建已移除入口。重新添加远程项目须由用户主动选择，或由在线创建成功显式添加；删除本机 host 只移除连接及所属入口。
-- 设置页 agent 配置管理按真实目录（roots 去重平铺）；定时 / 闲时 / Bots 选虚拟项目。
+- 2026-10-10 remote ruling: local and remote projects are flat; the Host is not a group. For remote, create a single-directory project first, then the session; creating without a project or dragging in extra directories is not allowed. Unified project order belongs to the controller's sidebar preferences. See `docs/superpowers/specs/2026-10-10-session-manage-upstream-integration.md`.
+- Sidebar = global pinned area (sessions + pinned projects) → projects area → tasks area (`project_id IS NULL`, any cwd); `~/.zcode/workspace/*` serves only as the default working directory for globally created tasks. Filters include by project / by group / recently updated; real directories are not nodes, and the old two-level switcher is not coming back.
+- Projects: local projects have 0..n same-host roots plus one primary directory, remote projects exactly one fixed directory; the same directory can belong to multiple projects; a new session's cwd = the primary directory; only a local project with 0 roots gets `~/.zcode/workspace/<ts>` auto-created and added as the primary root.
+- Deleting a local project or an authoritative online remote project = soft-deleting the container; sessions keep their membership and stay visible in the timeline; creating a new project whose roots set is exactly equal prompts a restore; permanent deletion is not offered. Deleting a remote project while offline removes only the local entry and cache; it does not trigger remote soft delete or restore.
+- Removing a root from a local project or changing its primary directory does not affect already-created sessions, scheduled tasks, idle-time tasks or Bots (they freeze cwd and additional directories at creation time); roots changes take effect for running sessions at their next resume.
+- Same-named skills / subagents from different roots coexist; the CLI assigns the qualified name `<rootName>/<name>`.
+- Groups: the controller-side Host is the sole owner of cross-device groups, and the phone reuses that Host; groups are not built per workspace and groups are not converted into projects. Grouping changes no cwd, project, CLI time, config or permission. Reads are read-only; a single-node move re-checks source/anchor inside the transaction, and absence does not delete; system tasks are grouped only on first discovery and are not pulled back after a manual removal.
+- Display preferences: a valid new-format view wins, otherwise fall back to the old organizeBy; the old grouped default opens in by-group mode. New tasks freeze the draft's group placement and commit it idempotently after the first send; never guess it during navigation.
+- Remote: project and task organization state stays in the remote app DB; the local machine persists host connection records, project entries the user has added, and basic-info caches. While offline, projects cannot be expanded, renamed or have roots edited; the only project operation allowed is removing the local entry and cache — the remote project and its sessions remain, with no pending-deletion sync queue. A remote project allows only the single fixed root determined at creation; hosts are capped at 20, and saved hosts auto-connect at startup.
+- Reconnection refreshes only entries that still exist locally; late responses must not upsert removed entries. setting.json is derived from the local entry list and never rebuilds removed entries in reverse. Re-adding a remote project requires explicit user choice, or explicit addition after a successful online creation; deleting a local host removes only the connection and its entries.
+- Agent config management in settings works on real directories (roots deduplicated and flattened); scheduled / idle-time / Bots select virtual projects.
 
-## 4. 数据与迁移纪律
+## 4. Data and Migration Discipline
 
-- 版本化 migration runner 两库共用（抽自 `apps/zcode-cli/.../session-store/migration-runner.ts`）：`schema_migration(id, checksum, app_version)`，checksum 不可变，未知 id 忽略。
-- 每条 migration 显式声明 `touchedTables`；runner 在同一读事务里只备份这些表（`ATTACH + CREATE TABLE AS SELECT`）；备份只为迁移失败恢复，正常流程只产生不消费，不做整库快照（本机整库 770MB vs 表级 16MB）。
-- 每条 migration 都需验证 fixture 前后全部表的内容哈希，只允许 `touchedTables` 变化。App 使用 E2E 或可重复运行时验收，不再新增业务单测；CLI 迁移保留独立单测。`schema.baseline.sql` 由 CI 做只增 diff。
-- 兼容退场三阶段：V1 只读新列、旧列只写不读；V2 写 `schema_floor` 并停双写；V3 物理删退场列 / `time_archived` 并重建主键。分组表已恢复为运行态，不能按旧计划删除。不要在任何阶段引入「永久」兼容分支。
-- 降级靠加法 schema，不靠备份；首次迁移遗留、旧版本新增或 CLI 首次发现的未归属 session 只判定一次：目录唯一匹配同 host 下未删除项目才归入，零个或多个匹配保留 NULL 并进入任务区，不自动建项目。唯一例外是远端 Source Server 的首次迁移：远端自身没有旧 workspace 清单，按历史任务目录建单 root 项目（虚拟项目 spec 2026-10-15 裁决）。旧 group、空组、系统组、颜色、成员和顺序继续读取；旧 Group → Project 转换取消，workspace → Project 保留。
-- `project_id IS NULL` 是合法未归类状态，不是待迁移标记。启动时先识别 `host_id IS NULL` 的旧版本新增行，再在同一事务补齐身份与首次归属；新版本创建或首次插入行时原子写入身份和归属。已处理的 NULL 行不因启动、对账或新增同目录项目而自动归入；全局新建任务显式保持未归类。
-- 迁移复用同一 SQL / Repo，启动门禁在 Host Worker 完成后才初始化业务服务；异步等待锁，迁移事务提交后再发布 ready，失败 fail-closed（重试 / 打开备份目录）。不得另造迁移实现。
+- A versioned migration runner is shared by both databases (extracted from `apps/zcode-cli/.../session-store/migration-runner.ts`): `schema_migration(id, checksum, app_version)`, checksums are immutable, unknown ids are ignored.
+- Every migration declares `touchedTables` explicitly; the runner backs up only those tables inside the same read transaction (`ATTACH + CREATE TABLE AS SELECT`); backups exist only to recover from migration failure — the normal flow produces them and never consumes them, and no whole-DB snapshot is taken (770MB for the whole local DB vs 16MB at table level).
+- Every migration must verify content hashes of all tables before and after on fixtures, with only `touchedTables` allowed to change. The app uses E2E or repeatable runtime acceptance and gains no new business unit tests; CLI migrations keep standalone unit tests. CI keeps `schema.baseline.sql` append-only via diff.
+- Compatibility retirement has three phases: V1 reads only the new columns and old columns become write-only; V2 writes `schema_floor` and stops dual writes; V3 physically drops the retired columns / `time_archived` and rebuilds the primary key. The grouping tables have been restored to runtime state and cannot be dropped as the old plan intended. Do not introduce a "permanent" compatibility branch at any phase.
+- Downgrade relies on the additive schema, not on backups; unassigned sessions left over from the first migration, added by old versions, or first discovered by the CLI are judged exactly once: they are assigned only if the directory uniquely matches a non-deleted project on the same host; with zero or multiple matches they keep NULL and stay in the tasks area, and no project is auto-created. The only exception is the remote Source Server's first migration: the remote has no old workspace manifest of its own, so single-root projects are created from historical task directories (virtual project spec 2026-10-15 ruling). Old groups, empty groups, system groups, colors, members and order keep being read; the old Group → Project conversion is cancelled, while workspace → Project stays.
+- `project_id IS NULL` is a legitimate unassigned state, not a pending-migration marker. At startup, first identify rows added by old versions with `host_id IS NULL`, then backfill identity and first-time assignment in the same transaction; rows created or first inserted by the new version get identity and assignment written atomically. Already-processed NULL rows are not auto-assigned by startup, reconciliation, or the arrival of another project on the same directory; globally created tasks stay explicitly unassigned.
+- Migrations reuse the same SQL / Repo; the startup gate initializes business services only after the Host Worker completes. Wait for the lock asynchronously and publish ready only after the migration transaction commits; on failure, fail closed (retry / open the backup directory). Do not build a second migration implementation.
 
-## 5. 改动前检查清单
+## 5. Pre-Change Checklist
 
-1. 这个字段的**唯一写者**是谁？如果你要在另一侧写它，先回到第 1 节重新判断，通常应改为发命令（`renameSession` / `deleteSession`）再等镜像。
-2. 你写入的时间戳来自 CLI 事件还是 `Date.now()`？后者只允许写 Host 组织态自己的时间列（`pinned_at`、`meta_updated_at`），不允许进任何排序依据。
-3. 是否会让 sessions-index 决定行的存在或消失？不允许。
-4. 是否用 `workspacePath` 做了身份判等或建 key？远程必须带 `workspaceIdentity`。
-5. 新增列 / 表是否可空或带默认、是否更新了 `schema.baseline.sql` 与 migration 的 `touchedTables`、是否有逐表哈希验证证据？
-6. 改了 CLI 配置发现逻辑？只允许在 skills / subagents / 路径策略三处消费 `additionalDirectories`；其余保持只按 `workingDirectory`。
-7. 涉及标题 / 状态 / 未读 / 归档 / 删除的行为变化，e2e 是否覆盖了「桌面 + 手机远控」「本地 + SSH/WSL」两组交叉？
-8. 涉及 schema 的改动，是否跑过「旧 fixture 升级 → 旧代码路径读写（含修改既有行：删除、重命名）→ 再升级」的 e2e？
-9. 触碰删除 / 标题的代码，是否保持了「意图位 → 惰性交接 → 镜像回写」三段，以及 orphan 的处理？
+1. Who is the **sole writer** of this field? If you are about to write it from the other side, go back to section 1 and re-judge; usually you should instead send a command (`renameSession` / `deleteSession`) and wait for the mirror.
+2. Does your timestamp come from a CLI event or from `Date.now()`? The latter may only be written to the Host organization state's own time columns (`pinned_at`, `meta_updated_at`) and must never enter any sort basis.
+3. Would this let sessions-index decide whether a row appears or disappears? Not allowed.
+4. Are you using `workspacePath` for identity equality or key building? Remote must carry `workspaceIdentity`.
+5. Are new columns / tables nullable or defaulted, were `schema.baseline.sql` and the migration's `touchedTables` updated, and is there per-table hash-verification evidence?
+6. Changed CLI config discovery logic? `additionalDirectories` may be consumed only in three places: skills / subagents / path policy; everything else keeps resolving from `workingDirectory` only.
+7. For behavior changes to title / status / unread / archive / delete, does the e2e coverage include both crosses: "desktop + phone remote control" and "local + SSH/WSL"?
+8. For schema changes, has the e2e been run that upgrades an old fixture → reads/writes through the old code path (including modifying existing rows: delete, rename) → upgrades again?
+9. For code touching delete / title, are the three stages — intent bit → lazy handoff → mirror write-back — preserved, along with orphan handling?
 
-## 6. 参考实现与文档
+## 6. Reference Implementations and Docs
 
-- 现状事实：`docs/task/task-sqlite-index.md`、`docs/v4-refactor/14-sessions-index.md`、`docs/ui/task-title-authority.md`、`docs/ui/task-unread-state.md`、`docs/task-list-refresh-semantics.md`、`docs/wsl-task-status-inconsistency.md`（订阅被静默替换的根因）。
-- 历史决策：`docs/superpowers/specs/2026-07-13-v4-sidebar-task-state-authority-design.md`、`2026-07-20-sidebar-task-row-authority-design.md`、`docs/local-workspace-path-cold-resume-identity.md`。
-- 当前分组与视图：`docs/ui/task-grouped-view.md`、`docs/ui/sidebar-task-view-switcher.md`。
-- 已废弃（保留仅供降级理解）：`docs/grouped-task-workspace-bootstrap.md`、`apps/zcode-cli/docs/design/v2/multi-workspace.md`。
+- Current-state facts: `docs/task/task-sqlite-index.md`, `docs/v4-refactor/14-sessions-index.md`, `docs/ui/task-title-authority.md`, `docs/ui/task-unread-state.md`, `docs/task-list-refresh-semantics.md`, `docs/wsl-task-status-inconsistency.md` (root cause of subscriptions being silently replaced).
+- Historical decisions: `docs/superpowers/specs/2026-07-13-v4-sidebar-task-state-authority-design.md`, `2026-07-20-sidebar-task-row-authority-design.md`, `docs/local-workspace-path-cold-resume-identity.md`.
+- Current grouping and views: `docs/ui/task-grouped-view.md`, `docs/ui/sidebar-task-view-switcher.md`.
+- Deprecated (kept only for understanding the downgrade path): `docs/grouped-task-workspace-bootstrap.md`, `apps/zcode-cli/docs/design/v2/multi-workspace.md`.

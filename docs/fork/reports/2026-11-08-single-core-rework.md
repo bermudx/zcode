@@ -53,7 +53,7 @@ Artifacts: `/tmp/piz-single-core-rework/` (all logs + retained configs below).
    `AcpCoreSessionsOptions` (`runAttachCommand`'s `version` stays — it feeds
    TuiOptions, not the launcher). `attach-command.ts` top comment now
    describes service-manager launch. Shared-core ASCII diagram corrected to
-   one shared user core (was "每 workspace 一个"). AGENTS.md product
+   one shared user core (was "one per workspace"). AGENTS.md product
    paragraph: candidate implemented on this branch, isolated live
    verification pending, nothing installed. systemd **>= 254**
    (`--expand-environment=no`, per local `man systemd-run` v262.1 — added in
