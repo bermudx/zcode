@@ -4,7 +4,7 @@
 // core 缺失时仍由 attach-command 经 PATH `zcode`（或 ZCODE_SERVER_BIN）拉起。
 import type { DynamicWorkflowMode } from "@zcode/shared";
 import { runAttachCommand } from "./attach-command.js";
-import { parseAttachEntryArgs } from "./attach-entry-args.js";
+import { acpWorkflowModeOption, parseAttachEntryArgs } from "./attach-entry-args.js";
 import { runAcpCommand } from "../acp/acp-command.js";
 import {
   DEFAULT_ACP_WORKFLOW_MODE,
@@ -40,26 +40,6 @@ Environment:
   ZCODE_SERVER_BIN   core 二进制（缺省 PATH 里的 zcode），core 不存在时
                      由 ensureServer 经 user 服务管理器拉起（--socket --no-plugins）。
 `;
-
-/** `zcode-attach acp` 后的旗标只认 --workflow-mode；其余沿用入口惯例忽略。 */
-const acpWorkflowModeOption = (argv: readonly string[]): string | undefined => {
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--workflow-mode") {
-      const value = argv[i + 1];
-      if (value === undefined || value === "") {
-        throw new Error(
-          "--workflow-mode requires a value: --workflow-mode <disabled|onDemand|alwaysOn>",
-        );
-      }
-      return value;
-    }
-    if (arg?.startsWith("--workflow-mode=")) {
-      return arg.slice("--workflow-mode=".length);
-    }
-  }
-  return undefined;
-};
 
 const main = async (): Promise<number> => {
   process.title = ATTACH_PROCESS_NAME;
