@@ -83,6 +83,11 @@ import type {
 } from "./methods/dynamic-workflow-run-settings.js";
 import { createRuntimeCommandQueue } from "./command-queue.js";
 import type { RuntimeCommandQueue } from "./command-queue.js";
+import {
+  closeMcpClientGate,
+  closeRuntimeBrowserSession,
+  installMcpClientDetachGate,
+} from "./mcp-client-detach.js";
 import type {
   ModelConnectivityTestInput,
   WorkspaceGenerateTextInput,
@@ -154,7 +159,6 @@ import type { ProjectMemoryUpdate } from "./helpers/project-memory-dream.js";
 import { projectPersistentAgentMemoryTools } from "../subagent/persistent-memory.js";
 import { RuntimeTelemetryFacade } from "../telemetry/runtime-telemetry.js";
 import type { WorkspaceHookRuntimeAdmissionPort } from "../hooks/workspace-hook-runtime-admission.js";
-import { disposeNodeReplSession } from "../tool/handlers/node-repl.js";
 import { cloneModelSelection } from "./model-selection.js";
 
 // oxlint-disable typescript-eslint/no-unsafe-declaration-merging
@@ -162,10 +166,7 @@ export class AgentRuntime {
   controlOffPeakExecution(
     input: import("@zcode/shared").OffPeakControlParams,
   ): Promise<import("@zcode/shared").OffPeakControlResult> {
-    return controlOffPeakRuntime(
-      this as unknown as import("./internal.js").AgentRuntimeInternal,
-      input,
-    );
+    return controlOffPeakRuntime(this as unknown as AgentRuntimeInternal, input);
   }
   private sessionId: SessionId;
   private turnNumber: number;
@@ -368,10 +369,7 @@ export class AgentRuntime {
     this.providerRuntimeHeadersPort = deps.providerRuntimeHeadersPort;
     this.browserControlPort = deps.browserControlPort;
     this.modelRequestAdmission = deps.modelRequestAdmission;
-    configureOffPeakRuntime(
-      this as unknown as import("./internal.js").AgentRuntimeInternal,
-      deps.onOffPeakLifecycleEvent,
-    );
+    configureOffPeakRuntime(runtime, deps.onOffPeakLifecycleEvent);
     // 旧会话的选择缺失不能阻断历史恢复；不在这里制造默认模型。
     this.sessionModelSelection =
       config.modelSelection && cloneModelSelection(config.modelSelection);
@@ -415,29 +413,11 @@ export class AgentRuntime {
     // client attachment 闸门必须在 startMcpStartup 之前落定（评审 R1）：
     // factory 物化横跨 detach 的会话出生即 detached，startup 不得放行 stdio；
     // 信号后到的由订阅回调走现有 suspend 路径。
-    const mcpClientDetachSignal = deps.mcpClientDetachSignal;
-    if (mcpClientDetachSignal !== undefined) {
-      if (mcpClientDetachSignal.aborted) {
-        this.mcpClientAttached = false;
-        this.mcpAttachEpoch += 1;
-        this.mcpReconnectNeeded = true;
-      } else {
-        const onClientDetach = () => {
-          this.mcpDetachUnsubscribe = undefined;
-          void runtime.setMcpClientAttached(false).catch((error: unknown) => {
-            this.logger?.warn("MCP detach suspend via attachment signal failed", {
-              errorKind: error instanceof Error ? error.name : typeof error,
-              event: "mcp.detach_suspend.failed",
-              module: "core.runtime",
-              status: "failed",
-            });
-          });
-        };
-        mcpClientDetachSignal.addEventListener("abort", onClientDetach, { once: true });
-        this.mcpDetachUnsubscribe = () =>
-          mcpClientDetachSignal.removeEventListener("abort", onClientDetach);
-      }
-    }
+    const detachGate = installMcpClientDetachGate(deps.mcpClientDetachSignal, runtime, this.logger);
+    this.mcpClientAttached = detachGate.attached;
+    this.mcpAttachEpoch += detachGate.epochBump;
+    this.mcpReconnectNeeded = detachGate.reconnectNeeded;
+    this.mcpDetachUnsubscribe = detachGate.unsubscribe;
     runtime.startMcpStartup(this.rootTraceContext);
   }
 
@@ -528,37 +508,16 @@ export class AgentRuntime {
 
   async closeBrowserSession(): Promise<void> {
     this.beginShutdown();
-    disposeNodeReplSession(this.sessionId);
-    try {
-      await this.browserControlPort?.closeSession?.({
-        sessionId: this.sessionId,
-        traceContext: this.rootTraceContext,
-      });
-    } catch (error) {
-      // 上层并行关闭各资源；这里必须传播失败，防止生命周期把未释放的浏览器视为安全。
-      this.logger?.warn("Browser session cleanup failed", {
-        error: error instanceof Error ? error.message : String(error),
-        event: "browser.session_cleanup.failed",
-      });
-      throw error;
-    }
+    await closeRuntimeBrowserSession(this as unknown as AgentRuntimeInternal);
   }
 
   beginShutdown(): void {
     // ExecutionPort.close() 会把后台 Bash 收口为 cancelled；若允许
     // teardown terminal event 再唤醒模型，并与随后关闭的 session store 竞态。
     this.shuttingDown = true;
-    // client MCP 闸门同步落下：迟到的连接结果不得再向本 runtime 落地（issue #31）。
-    this.mcpClosed = true;
-    this.mcpClientAttached = false;
-    // attachment 订阅只留退订函数；shutdown 时 owner 信号可能再也用不到。
-    this.mcpDetachUnsubscribe?.();
-    this.mcpDetachUnsubscribe = undefined;
-    const closedReason = new Error("Session runtime closed");
-    // 在飞的 client connect（startup/apply 可有多条登记记录）逐个 abort——close 等
-    // residencyBlockingWork 收尾，不 abort 会让卡在握手的 connect 死等。
-    for (const op of this.mcpInFlightConnects) op.controller.abort(closedReason);
-    this.shutdownController.abort(closedReason);
+    this.shutdownController.abort(
+      closeMcpClientGate(this as unknown as AgentRuntimeInternal),
+    );
     // 同一条理由：会话在关，提醒钟不能再到点唤起一轮。
     this.workflowBlockedReminder.stop();
     this.subagentStallReminder?.dispose();

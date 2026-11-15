@@ -2464,3 +2464,8 @@ exceptions:
     paths:
       - packages/ui/src/root/GlobalDatabaseStartupLoading.tsx
     reason: 启动失败页在现有复制诊断/重试/退出旁增加导出日志按钮（docs/desktop/database-migration-startup-gate-plan.md）。只扩展既有失败页交互，不新增文件、不改变启动状态 owner 或模块边界；接管 packages/ui/src/root 不在本次范围内。
+  - id: mcp-client-detach-gate-runtime-split
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/core/src/runtime/mcp-client-detach.ts
+    reason: 把 agent-runtime.ts 的 client attachment 闸门装配、beginShutdown 的 MCP 闸门收尾与 closeBrowserSession 收尾体原样搬出（issue #31 闸门与日志字段不变），只为把该文件收回 800 行上限内；无行为变化、无新 owner 或模块边界，接管整个 runtime 目录不在本次范围内。
