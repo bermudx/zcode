@@ -65,6 +65,12 @@
     "clean": {
       "cache": false
     },
+    "@zcode/browser-use-plugin#build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.turbo/**"],
+      "outputs": ["dist/**", "scripts/browser-client.mjs"],
+      "cache": true
+    },
     "@zcode/cli#build": {
       "dependsOn": ["^build"],
       "inputs": [
