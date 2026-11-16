@@ -11,4 +11,3 @@
 # 2026-11-09: the v4-gateway entry passed on ci run 42566679771 (blacksmith-4vcpu,
 # --max-workers 2) — reported STALE by the runner and removed.
 
-@zcode/bootstrap :: tests/zcode-protocol-telemetry-lifecycle.test.ts :: ZCode Protocol telemetry lifecycle > MCP 资源数组从入口发到新通知，旧 memory 内部事实不再发上协议
