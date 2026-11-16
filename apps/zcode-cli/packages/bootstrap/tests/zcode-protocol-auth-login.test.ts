@@ -113,6 +113,10 @@ function httpClientFixture(init?: Partial<{ authorizeUrl: string; expiresAt: num
 }
 
 const apiKeyResolver = {
+  async exchangeZaiBusinessToken(accessToken: string) {
+    assert.equal(accessToken, "test-oauth-token");
+    return "test-business-token";
+  },
   async resolveMaterial() {
     return TEST_PROJECT_MATERIAL;
   },

@@ -51,10 +51,16 @@ describe("Z.ai business token", () => {
 
     expect(requests.some(({ url }) => url.endsWith("/api/auth/z/login"))).toBe(false);
     expect(requests.length).toBeGreaterThan(0);
-    for (const downstream of requests)
-      expect(new Headers(downstream.headers).get("authorization")).toBe(
-        "stored-business-token",
+    for (const downstream of requests) {
+      const authorization = new Headers(downstream.headers).get("authorization");
+      // ProjectAccessTokenClient 鉴权约定：customerInfo 用裸业务 token，
+      // 个人 Key 管理与令牌签发用 Bearer，两种格式都必须是已存业务 token。
+      expect(authorization).toBe(
+        downstream.url.endsWith("getCustomerInfo")
+          ? "stored-business-token"
+          : "Bearer stored-business-token",
       );
+    }
   });
 
   it("keeps issue #50 structured reasons on login-exchange failures", async () => {
