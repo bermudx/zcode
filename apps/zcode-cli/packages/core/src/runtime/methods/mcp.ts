@@ -26,7 +26,7 @@ function tempDiagOpen(point: string, sessionId: unknown, extra = ""): number {
 }
 function tempDiagAt(point: string, op: number, sessionId: unknown, extra = ""): void {
   process.stderr.write(
-    `[TEMPDIAG] ${point} op=${op} sid=${String(sessionId)} t=${Date.now()}${extra}\n`,
+    `[TEMPDIAG] ${point} test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${op} sid=${String(sessionId)} t=${Date.now()}${extra}\n`,
   );
 }
 

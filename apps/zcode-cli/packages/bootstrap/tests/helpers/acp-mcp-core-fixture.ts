@@ -73,6 +73,8 @@ export interface AcpMcpRawClient {
   readonly closed: Promise<void>;
 }
 
+let tempDiagClientSeq = 0;
+
 export async function createAcpMcpCoreFixture(
   options: AcpMcpCoreFixtureOptions = {},
 ): Promise<AcpMcpCoreFixture> {
@@ -261,10 +263,25 @@ export async function createAcpMcpCoreFixture(
         request: <T,>(method: string, params?: unknown) => {
           const id = nextId;
           nextId += 1;
+          const op = ++tempDiagClientSeq;
+          const test = process.env.TEMPDIAG_TEST ?? "unknown";
+          process.stderr.write(
+            `[TEMPDIAG] client.request.start test=${test} op=${op} method=${method} requestId=${id} t=${Date.now()}\n`,
+          );
           return new Promise<T>((resolve, reject) => {
             pending.set(id, {
-              resolve: resolve as (value: unknown) => void,
-              reject,
+              resolve: (value) => {
+                process.stderr.write(
+                  `[TEMPDIAG] client.request.end test=${test} op=${op} method=${method} requestId=${id} outcome=resolved t=${Date.now()}\n`,
+                );
+                resolve(value as T);
+              },
+              reject: (error) => {
+                process.stderr.write(
+                  `[TEMPDIAG] client.request.end test=${test} op=${op} method=${method} requestId=${id} outcome=rejected t=${Date.now()}\n`,
+                );
+                reject(error);
+              },
             });
             socket.write(`${JSON.stringify({ id, method, params })}\n`);
           });

@@ -78,9 +78,8 @@ jobs:
           for dir in /tmp/piz-fork-tests-run-* /dev/shm/piz-fork-tests-run-*; do
             for log in "$dir"/_zcode_*.log; do
               echo "===== $log"
-              tail -150 "$log"
-              echo "----- TEMPDIAG (full) $log"
-              grep -E "TEMPDIAG|FAIL|Test timed out" "$log" || true
+              echo "----- failing-test TEMPDIAG $log"
+              grep -E 'TEMPDIAG.*(CMCP07|CMCP08|CMCP09|CMCP-R1a|CMCP-R2|late port apply in-flight)' "$log" || true
             done
           done
       # Runs only after every check above is green: an uploaded artifact is

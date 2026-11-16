@@ -1,4 +1,5 @@
 import { configureOffPeakRuntime, controlOffPeakRuntime } from "./off-peak/runtime.js";
+let tempDiagSeq = 0;
 import {
   createTurnAgentDefinitions,
   createAgentDefinitionsReader,
@@ -483,7 +484,12 @@ export class AgentRuntime {
   closeOwnedWork(): Promise<void> {
     this.beginShutdown();
     this.stopActiveForegroundExecution({ reason: "session_closed" });
+    let tempDiagOp = 0;
     this.ownedWorkClose ??= (async () => {
+      tempDiagOp = ++tempDiagSeq;
+      process.stderr.write(
+        `[TEMPDIAG] closeOwnedWork.start test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${String(this.sessionId)} t=${Date.now()}\n`,
+      );
       const results = await Promise.allSettled([
         this.subagentPort?.close?.(),
         this.cancelRunningRuntimeBackgroundTasks({ reason: "session_closed" }),
@@ -502,6 +508,10 @@ export class AgentRuntime {
       // 子 owner 保留失败句柄；重试必须重新进入它，而不是永久返回旧 rejection。
       this.ownedWorkClose = undefined;
       throw error;
+    }).finally(() => {
+      process.stderr.write(
+        `[TEMPDIAG] closeOwnedWork.end test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${String(this.sessionId)} t=${Date.now()}\n`,
+      );
     });
     return this.ownedWorkClose;
   }
