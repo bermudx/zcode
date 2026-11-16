@@ -22,7 +22,11 @@ had burned 1,490/3,000 free-tier minutes by mid-month). `*.tsbuildinfo` is
 deliberately **not** cached: the root `tsc -b` dist outputs it describes are
 not in the cache, and a restored tsbuildinfo makes tsc report TS6305
 (observed in run 43939000283); turbo replays outputs together with its cache
-and is safe.
+and is safe. Generated runtime assets outside `dist/` must be declared as
+package-specific build `outputs` or a cache hit restores a tree without them:
+`@zcode/browser-use-plugin#build` declares `scripts/browser-client.mjs`
+(issue #85, run 43974790321 — the SEA plugin-asset test failed on an otherwise
+green cache-replayed build; pinned by cli `tests/turbo-build-outputs.test.mjs`).
 
 `dist-runtime-<sha>` is assembled and uploaded **only on manual dispatch**
 (issue #81): a dispatched run executes every check first, so its artifact is
@@ -159,8 +163,9 @@ written that file, pass `--base <last promoted sha>` (FORK.md names it).
   list is an allowlist, so unrecognised paths land here.
 - **Build first, or results mean nothing.** Full mode refuses to start without
   the workspace build (`turbo run build`), `browser-use-plugin` output
-  (`scripts/browser-client.mjs`; `turbo --force` if a cached build skipped it)
-  and root `tsc -b packages/shared packages/model-option-map`.
+  (`scripts/browser-client.mjs`, declared as a turbo build output since #85, so
+  cached builds restore it) and root `tsc -b packages/shared
+  packages/model-option-map`.
 - **Load changes results.** On 2026-11-06 bootstrap at `--max-workers 2` had no
   new failures in about 8 minutes; the default worker count gave 31, with
   `STACK_TRACE_ERROR` and count mismatches. Use `--max-workers 2` before calling a failure real.

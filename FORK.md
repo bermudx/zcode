@@ -198,7 +198,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh` / `scripts/promote-piz-from-ci.sh`, both of which refuse anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `78d9ba69` pair — shipped code identical to the promoted `2dd6f16a` pair (the range is docs/tests only), promoted 2026-11-16 from the ci workflow's sha-keyed artifact after a green rerun — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh` / `scripts/promote-piz-from-ci.sh`, both of which refuse anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `92c8c465` pair — ACP image-prompt forwarding (`patch/acp-image-input`, #80) plus the ci runner-minute cuts (#82/#81), promoted 2026-11-16 from the ci workflow's sha-keyed artifact (dispatch run 43942275993, green first pass) — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -1352,3 +1352,25 @@ carries all patches.
   and the key prefix `turbo-` deliberately severs the poisoned
   `buildstate-` entries. `*.tsbuildinfo` stays out — lesson recorded in
   ci.yml (Chinese bug-comment rule) and verification.md.
+
+### 2026-11-16 — promotion of 92c8c465 (ACP image input + ci cuts, CI artifact)
+
+- Operator: "can you promote head?". HEAD = main = origin/main =
+  `92c8c465`. Range from the promoted `78d9ba69`:
+  `patch/acp-image-input` (#80, `08bc4d77` forwards ACP image prompts
+  through shared-core attachments — the only shipped-code change) and
+  `fix/skip-core-client-main-builds` (#82: dispatch-only dist-runtime
+  artifact, per-ref concurrency cancel, turbo cache; docs otherwise).
+  No lockfile/manifest change — no post-promote `pnpm install` needed;
+  `core.hooksPath` verified unset.
+- Dispatch run `43942275993` on main HEAD went green first pass — all
+  checks plus the selected and `--full` fork-test tiers; the artifact
+  it uploaded is the gate evidence. The superseded push run
+  `43941174597` was cancelled by the per-ref concurrency group, as
+  designed (a dispatch is a superset: same checks + the artifact steps).
+- `promote-piz-from-ci.sh` from clean main installed
+  `dist-runtime-92c8c465054a5a6737a1894d3e0de865d6b120c3`; `PROMOTED_FROM`
+  verified, `piz --version` → 0.17.2, tree still clean. Previous pair
+  retained at `~/piz-dist-runtime-rollback/78d9ba69`.
+  `release/promote-head` fast-forwarded to `92c8c465`. No push, no
+  live-core restart, no model call.
