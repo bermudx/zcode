@@ -88,7 +88,7 @@
     "@zcode/zcode-cua": "workspace:*",
     "electron-updater": "6.8.10",
     "module-details-from-path": "^1.0.4",
-    "node-forge": "^1.4.1",
+    "node-forge": "^1.4.3",
     "node-pty": "^1.0.0",
     "pkijs": "3.4.3",
     "playwright-core": "1.59.1",
