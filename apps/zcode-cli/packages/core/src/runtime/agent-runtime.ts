@@ -72,6 +72,7 @@ import type {
   ContextSourceSnapshot,
   ExecutionShellSelection,
   HookRunner,
+  PendingInputEditLock,
   TurnId,
 } from "./deps.js";
 import { installAgentRuntimeMethods } from "./methods/index.js";
@@ -82,6 +83,11 @@ import type {
 } from "./methods/dynamic-workflow-run-settings.js";
 import { createRuntimeCommandQueue } from "./command-queue.js";
 import type { RuntimeCommandQueue } from "./command-queue.js";
+import {
+  closeMcpClientGate,
+  closeRuntimeBrowserSession,
+  installMcpClientDetachGate,
+} from "./mcp-client-detach.js";
 import type {
   ModelConnectivityTestInput,
   WorkspaceGenerateTextInput,
@@ -92,6 +98,10 @@ import type {
   RuntimeBackgroundStopResult,
 } from "./methods/background.js";
 import { initializeRuntimeTooling } from "./helpers/runtime-tools.js";
+import {
+  createTotalTokensBudgetState,
+  type TotalTokensBudgetState,
+} from "./helpers/total-tokens-budget.js";
 import {
   resolveInitialDynamicWorkflowToolsActivated,
   type DynamicWorkflowActivationSource,
@@ -130,11 +140,16 @@ import type {
   WorkspaceFileRewindApplyResult,
   WorkspaceFileRewindPreview,
   WorkspaceForkResult,
+  EditPendingInputOptions,
+  EditPendingInputResult,
+  LockPendingInputEditResult,
 } from "./types.js";
 import type { AgentRuntimeInternal, McpConnectOperation } from "./internal.js";
 import { InMemoryRuntimeTaskRegistry, type RuntimeTaskRegistry } from "../runtime-task/registry.js";
 import type { WorkflowBlockedReminderClock } from "../runtime-task/workflow-blocked-reminder.js";
+import type { BackgroundSubagentStallClock } from "../subagent/background-stall.js";
 import { createWorkflowBlockedReminder } from "./methods/dynamic-workflow-blocked-reminder.js";
+import { createSubagentStallReminder } from "./methods/subagent-stall-reminder.js";
 import { createMemoryRecallState } from "../memory/recall/index.js";
 import type { MemoryRecallState } from "../memory/recall/index.js";
 import type { ChildClientPortsContext, ClientFacingPorts } from "./helpers/child-client-ports.js";
@@ -144,7 +159,6 @@ import type { ProjectMemoryUpdate } from "./helpers/project-memory-dream.js";
 import { projectPersistentAgentMemoryTools } from "../subagent/persistent-memory.js";
 import { RuntimeTelemetryFacade } from "../telemetry/runtime-telemetry.js";
 import type { WorkspaceHookRuntimeAdmissionPort } from "../hooks/workspace-hook-runtime-admission.js";
-import { disposeNodeReplSession } from "../tool/handlers/node-repl.js";
 import { cloneModelSelection } from "./model-selection.js";
 
 // oxlint-disable typescript-eslint/no-unsafe-declaration-merging
@@ -152,10 +166,7 @@ export class AgentRuntime {
   controlOffPeakExecution(
     input: import("@zcode/shared").OffPeakControlParams,
   ): Promise<import("@zcode/shared").OffPeakControlResult> {
-    return controlOffPeakRuntime(
-      this as unknown as import("./internal.js").AgentRuntimeInternal,
-      input,
-    );
+    return controlOffPeakRuntime(this as unknown as AgentRuntimeInternal, input);
   }
   private sessionId: SessionId;
   private turnNumber: number;
@@ -185,6 +196,7 @@ export class AgentRuntime {
   private messageHistory: MessageHistory;
   private readFileState: ReadFileStateMap;
   private cachedTools: ModelToolContract[] | null = null;
+  private sessionControlKind: "cli" | "app" | undefined;
   /** launch.md「On demand: activation」：onDemand 会话出生为 false，`activateDynamicWorkflowTools` 翻为 true。 */
   private dynamicWorkflowToolsActivated: boolean;
   private dynamicWorkflowActivationSource?: DynamicWorkflowActivationSource;
@@ -245,6 +257,7 @@ export class AgentRuntime {
   private runtimeTaskRegistry: RuntimeTaskRegistry;
   // 「run 还欠着决定、主代理闲着」的提醒钟；由命令队列的忙 / 闲沿驱动，beginShutdown 停掉。
   private workflowBlockedReminder: WorkflowBlockedReminderClock;
+  private subagentStallReminder?: BackgroundSubagentStallClock;
   private branchGeneration = 0;
   private artifactStore?: ToolArtifactStorePort;
   private executionPort?: ExecutionPort;
@@ -257,6 +270,7 @@ export class AgentRuntime {
   private sessionStore?: SessionStorePort;
   private sessionPersisted = false;
   private needsPlanModeExitReminder = false;
+  private pendingPreviousRuntimeAgentNotice?: string;
   private latestConversationMessageId?: MessageId;
   private latestAssistantMessageId?: MessageId;
   private latestAssistantTurnId?: TurnId;
@@ -266,6 +280,7 @@ export class AgentRuntime {
     totalCacheReadTokens: 0,
     totalCacheWriteTokens: 0,
   };
+  private totalTokensBudget: TotalTokensBudgetState = createTotalTokensBudgetState();
   private currentTurnFileChanges: RuntimeTurnFileChangeMap = new Map();
   private lastAssistantCompletedAtMs?: number;
   private autoCompactConsecutiveFailures = 0;
@@ -279,6 +294,8 @@ export class AgentRuntime {
   private pendingInputSequence = 0;
   /** sendQueuedNow reservation；只活在当前 CLI 进程，防 drain/多端重复提升。 */
   private pendingInputReservations = new Map<string, string>();
+  /** composer 编辑态冻结锁；只活在当前 CLI 进程，与 reservation 互斥。 */
+  private pendingInputEditLocks = new Map<string, PendingInputEditLock>();
   // v4 setAutoDrain：false 时排队输入不自动消费
   // （turn-stop 不续跑、roundtrip 间不 drain），保留成 held 供显式消费。
   private queueAutoDrain = true;
@@ -289,6 +306,7 @@ export class AgentRuntime {
   private backgroundTaskNotificationsSealed = false;
   private backgroundTaskNotificationSealReason?: "subagent_terminal" | "subagent_cancelled";
   private pendingModelChangeTimeline?: PendingModelChangeTimeline;
+  private pendingWorktreeCreation?: import("@zcode/contracts").WorktreeCreationFact;
   private sessionStartHookRan = false;
   private sessionTitleGenerationAttempted = false;
   private agentTelemetry: RuntimeTelemetryFacade;
@@ -351,10 +369,7 @@ export class AgentRuntime {
     this.providerRuntimeHeadersPort = deps.providerRuntimeHeadersPort;
     this.browserControlPort = deps.browserControlPort;
     this.modelRequestAdmission = deps.modelRequestAdmission;
-    configureOffPeakRuntime(
-      this as unknown as import("./internal.js").AgentRuntimeInternal,
-      deps.onOffPeakLifecycleEvent,
-    );
+    configureOffPeakRuntime(runtime, deps.onOffPeakLifecycleEvent);
     // 旧会话的选择缺失不能阻断历史恢复；不在这里制造默认模型。
     this.sessionModelSelection =
       config.modelSelection && cloneModelSelection(config.modelSelection);
@@ -371,6 +386,7 @@ export class AgentRuntime {
     this.runtimeTaskRegistry = deps.runtimeTaskRegistry ?? new InMemoryRuntimeTaskRegistry();
     this.runtimeTaskRegistry.setActiveBranchGeneration?.(this.branchGeneration);
     this.workflowBlockedReminder = createWorkflowBlockedReminder(runtime);
+    this.subagentStallReminder = createSubagentStallReminder(runtime);
     this.artifactStore = deps.artifactStore;
     this.executionPort = deps.executionPort;
     this.fileSystemPort = deps.fileSystemPort;
@@ -397,34 +413,28 @@ export class AgentRuntime {
     // client attachment 闸门必须在 startMcpStartup 之前落定（评审 R1）：
     // factory 物化横跨 detach 的会话出生即 detached，startup 不得放行 stdio；
     // 信号后到的由订阅回调走现有 suspend 路径。
-    const mcpClientDetachSignal = deps.mcpClientDetachSignal;
-    if (mcpClientDetachSignal !== undefined) {
-      if (mcpClientDetachSignal.aborted) {
-        this.mcpClientAttached = false;
-        this.mcpAttachEpoch += 1;
-        this.mcpReconnectNeeded = true;
-      } else {
-        const onClientDetach = () => {
-          this.mcpDetachUnsubscribe = undefined;
-          void runtime.setMcpClientAttached(false).catch((error: unknown) => {
-            this.logger?.warn("MCP detach suspend via attachment signal failed", {
-              errorKind: error instanceof Error ? error.name : typeof error,
-              event: "mcp.detach_suspend.failed",
-              module: "core.runtime",
-              status: "failed",
-            });
-          });
-        };
-        mcpClientDetachSignal.addEventListener("abort", onClientDetach, { once: true });
-        this.mcpDetachUnsubscribe = () =>
-          mcpClientDetachSignal.removeEventListener("abort", onClientDetach);
-      }
-    }
+    const detachGate = installMcpClientDetachGate(deps.mcpClientDetachSignal, runtime, this.logger);
+    this.mcpClientAttached = detachGate.attached;
+    this.mcpAttachEpoch += detachGate.epochBump;
+    this.mcpReconnectNeeded = detachGate.reconnectNeeded;
+    this.mcpDetachUnsubscribe = detachGate.unsubscribe;
     runtime.startMcpStartup(this.rootTraceContext);
   }
 
   get shutdownSignal(): AbortSignal {
     return this.shutdownController.signal;
+  }
+
+  /** 观察原有后台所有者的完成事件；是否空闲仍只由 hasResidencyBlockingWork 判定。 */
+  onResidencyWorkChanged(notify: () => void): () => void {
+    this.workChanged.add(notify);
+    const removeTaskListener = this.runtimeTaskRegistry.subscribe?.(notify);
+    const removeEventListener = this.subscribeEvents({ onSessionEvent: notify });
+    return () => {
+      this.workChanged.delete(notify);
+      removeTaskListener?.();
+      removeEventListener();
+    };
   }
 
   /** child 不再接收执行，但既有后台工作可以自然结束；释放完成后 owner 才能移除引用。 */
@@ -498,39 +508,19 @@ export class AgentRuntime {
 
   async closeBrowserSession(): Promise<void> {
     this.beginShutdown();
-    disposeNodeReplSession(this.sessionId);
-    try {
-      await this.browserControlPort?.closeSession?.({
-        sessionId: this.sessionId,
-        traceContext: this.rootTraceContext,
-      });
-    } catch (error) {
-      // 上层并行关闭各资源；这里必须传播失败，防止生命周期把未释放的浏览器视为安全。
-      this.logger?.warn("Browser session cleanup failed", {
-        error: error instanceof Error ? error.message : String(error),
-        event: "browser.session_cleanup.failed",
-      });
-      throw error;
-    }
+    await closeRuntimeBrowserSession(this as unknown as AgentRuntimeInternal);
   }
 
   beginShutdown(): void {
     // ExecutionPort.close() 会把后台 Bash 收口为 cancelled；若允许
     // teardown terminal event 再唤醒模型，并与随后关闭的 session store 竞态。
     this.shuttingDown = true;
-    // client MCP 闸门同步落下：迟到的连接结果不得再向本 runtime 落地（issue #31）。
-    this.mcpClosed = true;
-    this.mcpClientAttached = false;
-    // attachment 订阅只留退订函数；shutdown 时 owner 信号可能再也用不到。
-    this.mcpDetachUnsubscribe?.();
-    this.mcpDetachUnsubscribe = undefined;
-    const closedReason = new Error("Session runtime closed");
-    // 在飞的 client connect（startup/apply 可有多条登记记录）逐个 abort——close 等
-    // residencyBlockingWork 收尾，不 abort 会让卡在握手的 connect 死等。
-    for (const op of this.mcpInFlightConnects) op.controller.abort(closedReason);
-    this.shutdownController.abort(closedReason);
+    this.shutdownController.abort(
+      closeMcpClientGate(this as unknown as AgentRuntimeInternal),
+    );
     // 同一条理由：会话在关，提醒钟不能再到点唤起一轮。
     this.workflowBlockedReminder.stop();
+    this.subagentStallReminder?.dispose();
     // 关闭单个 session 后进程仍存活，
     // 因此必须先终止该 runtime 的 Extraction，不能只在超时后放弃等待。
     this.memoryExtractionScheduler?.shutdown();
@@ -581,7 +571,11 @@ export interface AgentRuntime {
   getMode(): CollaborationMode;
   setCompactContextWindowCap(cap: number | undefined): void;
   getPlanEnabled(): boolean;
-  grantPermissionFullAccess(interactionId: string, signal?: AbortSignal): Promise<string>;
+  grantPermissionMode(
+    interactionId: string,
+    mode: "guarded" | "yolo",
+    signal?: AbortSignal,
+  ): Promise<string>;
   setExecutionState(
     input: { mode?: string; planEnabled?: boolean },
     traceContext?: TraceContext,
@@ -618,6 +612,11 @@ export interface AgentRuntime {
     toModel: ModelSelection;
     toModelLabel: string;
   }): void;
+  /**
+   * 受管 worktree 新建会话：记录 "已创建 worktree"，首轮持久化会话后、TurnStarted 之前
+   * 写成 timeline part 并发出 WorktreeCreated（docs/git/worktree.md §6.6.4）。只记录一次。
+   */
+  recordPendingWorktreeCreation(fact: import("@zcode/contracts").WorktreeCreationFact): void;
   getActiveTurnInfo(): ActiveTurnInfo | undefined;
   admitPrompt(
     input: string,
@@ -678,12 +677,22 @@ export interface AgentRuntime {
     reservationId: string;
     traceContext?: TraceContext;
   }): Promise<boolean>;
-  /** v4 queue 单项编辑：按 pendingInputId 替换排队输入文本（保位）。 */
-  editPendingInputById(options: {
+  /** v4 queue 单项编辑：按 pendingInputId 原地替换排队输入（保位），并释放编辑锁。 */
+  editPendingInputById(options: EditPendingInputOptions & { traceContext?: TraceContext }): Promise<
+    EditPendingInputResult
+  >;
+  /** composer 编辑态冻结：只对未 reserve 且无他人锁的排队项生效。 */
+  lockPendingInputEdit(options: {
     pendingInputId: string;
-    newText: string;
+    editLock: PendingInputEditLock;
+    traceContext?: TraceContext;
+  }): Promise<LockPendingInputEditResult>;
+  /** 释放编辑锁（发起端取消、刷新自愈或任意端手动解除）；无锁返回 false。 */
+  releasePendingInputEdit(options: {
+    pendingInputId: string;
     traceContext?: TraceContext;
   }): Promise<boolean>;
+  getPendingInputEditLock(pendingInputId: string): PendingInputEditLock | undefined;
   /** v4 queue 重排：移动 pendingInputId 到 beforePendingInputId 之前（null=队尾）。 */
   reorderPendingInput(options: {
     pendingInputId: string;
@@ -726,6 +735,19 @@ export interface AgentRuntime {
   invalidateToolCache(): void;
   getToolExecutor(): ToolExecutor;
   subscribeEvents(sink: SessionEventSink): () => void;
+  /**
+   * context 组成（docs/design/v2/model/context-composition.md）：有效的请求组成且模型相同时返回它，
+   * 否则按所查模型预演下一个请求。预演不落库、不写历史；没有可用模型时为 null。
+   */
+  getContextComposition(
+    input?: import("./context-composition/query.js").ContextCompositionQuery,
+  ): Promise<import("./context-composition/state.js").ContextCompositionMeasurement | null>;
+  /** 组成变更时同步调用；合并与修订号由订阅方（bootstrap tracker）负责。 */
+  subscribeContextCompositionChanged(
+    listener: import("./context-composition/state.js").ContextCompositionChangeListener,
+  ): () => void;
+  /** 会话外部改了会影响组成的状态（换模型）：最近一次请求组成作废并通知。 */
+  markContextCompositionChanged(): void;
   /** Bootstrap-owned lifecycle producers append only validated session events through this durable path. */
   appendEvent(event: SessionEvent, traceContext: TraceContext): Promise<void>;
   /**

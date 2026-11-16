@@ -99,6 +99,7 @@ export class PiTuiApp {
   private readonly mdTheme;
   private copy: TuiCopy;
   private readonly requestPermission;
+  private readonly unregisterPermissionRequester: (() => void) | undefined;
   private readonly ctrlCGuard = createCtrlCIntentGuard();
   private readonly escGuard = createDoublePressGuard();
   /** busy 退出三选一（detach / stop&quit / stay）+ Ctrl-C 双击语义，见 quit-choice.ts。 */
@@ -226,6 +227,11 @@ export class PiTuiApp {
       setApprovalQueue: this.store.setter("approvalQueue"),
       setStatus: (status) => this.store.set("status", status),
     });
+    // 审批入口按挂载期登记（TuiRegisterPermissionRequester）：回合之外的询问
+    // （后台会话、通知驱动的回合）也进同一审批队列；dispose 时注销。
+    this.unregisterPermissionRequester = this.options.registerPermissionRequester?.(
+      this.requestPermission,
+    );
 
     // 事件消费者先于订阅构造：同步回放型端口注册即推事件时 handleEvent 不能空转。
     this.subagents = new SubagentDirectory(this.store, this.options);
@@ -472,7 +478,6 @@ export class PiTuiApp {
         draftAttachments,
         messageInsertIndex: store.state.messages.length,
         options: this.submitPipeline(),
-        requestPermission: this.requestPermission,
         setDraftValue: (v) => this.history.setDraftValue(v),
         setLastError: (m) => store.set("lastError", m),
         setMessages: store.setter("messages"),
@@ -488,7 +493,6 @@ export class PiTuiApp {
       applySessionEvent: this.applyEvent,
       draftAttachments,
       options: this.submitPipeline(),
-      requestPermission: this.requestPermission,
       setActiveTurnStartedAtMs: (ms) => store.set("activeTurnStartedAtMs", ms),
       setBusy: (v) => store.set("busy", v),
       setDraftAttachments: store.setter("draftAttachments"),
@@ -778,6 +782,7 @@ export class PiTuiApp {
   /* ---------- lifecycle ---------- */
 
   async stop(): Promise<void> {
+    this.unregisterPermissionRequester?.();
     this.removeInputListener();
     this.unsubscribeSession?.();
     this.subagents.dispose();

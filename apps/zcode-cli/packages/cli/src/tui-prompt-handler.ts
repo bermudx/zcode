@@ -75,14 +75,17 @@ export function createTuiSubmitPrompt(
     object,
     NonNullable<ReturnType<typeof createCliHeadlessBrowserRuntime>>
   >();
-  let activeRequestPermission: TuiRequestPermission | undefined;
+  // Bug 根因：审批入口原先只在单次 submitPrompt/sendInput 调用内有效，调用结束即恢复为空；
+  // 通知驱动的回合和 CreateSession 建的后台会话在这之外询问，只能被 fail closed 拒绝。
+  // 现在由 TUI 挂载时登记、卸载时注销，入口只有这一个 owner，不再按提交切换。
+  let registeredRequestPermission: TuiRequestPermission | undefined;
   const cleanupTimeoutMs = Math.max(
     1,
     Math.trunc(deps.shutdownCleanupTimeoutMs ?? DEFAULT_CLI_CLEANUP_TIMEOUT_MS),
   );
   const permissionBroker: NonNullable<ZCodeAppOptions["permissionBroker"]> = {
     requestPermission: async (request, requestOptions) => {
-      const requestPermission = activeRequestPermission;
+      const requestPermission = registeredRequestPermission;
       if (!requestPermission) {
         return {
           decision: "deny",
@@ -152,6 +155,7 @@ export function createTuiSubmitPrompt(
     try {
       createdApp = await createAppFactory({
         modelSelectionMode: "cli-default",
+        standaloneSessionControl: true,
         browserControlPort: browserRuntime?.browserControlPort,
         env: appEnv,
         projectConfigPath: deps.projectConfigPath,
@@ -316,70 +320,63 @@ export function createTuiSubmitPrompt(
   });
 
   const submitPrompt: TuiPromptHandler = async (input, options) => {
-    const previousRequestPermission = activeRequestPermission;
-    activeRequestPermission = options.requestPermission;
-
-    try {
-      const result = await commandCenter(input, options);
-      return app ? { ...result, ...(await readTuiSessionMetadata(await getApp())) } : result;
-    } finally {
-      activeRequestPermission = previousRequestPermission;
-    }
+    const result = await commandCenter(input, options);
+    return app ? { ...result, ...(await readTuiSessionMetadata(await getApp())) } : result;
   };
 
   submitPrompt.setMode = async (nextMode) => ({ mode: await setCliMode(nextMode) });
 
+  submitPrompt.registerPermissionRequester = (requestPermission) => {
+    registeredRequestPermission = requestPermission;
+    return () => {
+      // 只注销自己：重新挂载时新入口先登记，旧入口的迟到注销不能把它清掉。
+      if (registeredRequestPermission === requestPermission)
+        registeredRequestPermission = undefined;
+    };
+  };
+
   submitPrompt.sendInput = async (input, options) => {
-    const previousRequestPermission = activeRequestPermission;
-    // busy-turn or resumed input can start a new turn through sendInput,
-    // bypassing submitPrompt's scoped approval handler and leaving approvals invisible.
-    activeRequestPermission = options?.requestPermission;
-
-    try {
-      // Model/effort changes configure subsequent requests, including during an active turn.
-      const command = parseSlashCommand(typeof input === "string" ? input : input.text);
-      if (command?.type === "known" && (command.name === "model" || command.name === "effort")) {
-        return {
-          kind: "command_result",
-          result: await submitPrompt(input, {
-            ...options,
-            abortSignal: options?.abortSignal ?? new AbortController().signal,
-          }),
-        };
-      }
-      // Ctrl+Q 的 delivery:"queue"（follow-up 排队）在进程内没有消费通道。
-      // 追踪（P003-F3，2026-10-26）：剥掉 delivery 后 input-facade 按 "auto"
-      // 进 core admitPrompt 的 busy 分支 → steerTurn 以无 delivery 字段的
-      // pendingInput 落 core 队列 lane（行内 drain 只消费 guide lane；队列
-      // lane 的 sendQueuedNow auto-drain 提升器只在 v4 bridge，进程内不建）；
-      // 回合正常收尾时该项转 held 无人消费，UI 又在 applyResult 清空队列区
-      // ——用户被告知"已排队"后输入静默丢失。这里显式回 queue_unavailable，
-      // 让 UI 提示不可排队并恢复草稿。完整 queue 语义在 attach 模式（piz），
-      // 见 turn-steering.md attach lane 节。
-      if (options?.delivery === "queue") {
-        return { kind: "queue_unavailable" };
-      }
-      const activeApp = await getApp();
-      if (activeApp.sendInput) {
-        // TUI 语义 → InputDelivery：steer=steer_active_turn（busy 注入当前
-        // turn，idle 与 auto 同开新回合）；queue 已在上方显式拒绝。
-        const { delivery, ...restOptions } = options ?? {};
-        const result = await activeApp.sendInput(input, {
-          ...restOptions,
-          ...(delivery === "steer" ? { delivery: "steer_active_turn" as const } : {}),
-        });
-        if (result.kind !== "started_turn") return result;
-        return withTuiMetadata(result.result, activeApp, currentCliMode(modeState));
-      }
-
-      return withTuiMetadata(
-        await activeApp.submitPrompt(input, options),
-        activeApp,
-        currentCliMode(modeState),
-      );
-    } finally {
-      activeRequestPermission = previousRequestPermission;
+    // Model/effort changes configure subsequent requests, including during an active turn.
+    const command = parseSlashCommand(typeof input === "string" ? input : input.text);
+    if (command?.type === "known" && (command.name === "model" || command.name === "effort")) {
+      return {
+        kind: "command_result",
+        result: await submitPrompt(input, {
+          ...options,
+          abortSignal: options?.abortSignal ?? new AbortController().signal,
+        }),
+      };
     }
+    // Ctrl+Q 的 delivery:"queue"（follow-up 排队）在进程内没有消费通道。
+    // 追踪（P003-F3，2026-10-26）：剥掉 delivery 后 input-facade 按 "auto"
+    // 进 core admitPrompt 的 busy 分支 → steerTurn 以无 delivery 字段的
+    // pendingInput 落 core 队列 lane（行内 drain 只消费 guide lane；队列
+    // lane 的 sendQueuedNow auto-drain 提升器只在 v4 bridge，进程内不建）；
+    // 回合正常收尾时该项转 held 无人消费，UI 又在 applyResult 清空队列区
+    // ——用户被告知"已排队"后输入静默丢失。这里显式回 queue_unavailable，
+    // 让 UI 提示不可排队并恢复草稿。完整 queue 语义在 attach 模式（piz），
+    // 见 turn-steering.md attach lane 节。
+    if (options?.delivery === "queue") {
+      return { kind: "queue_unavailable" };
+    }
+    const activeApp = await getApp();
+    if (activeApp.sendInput) {
+      // TUI 语义 → InputDelivery：steer=steer_active_turn（busy 注入当前
+      // turn，idle 与 auto 同开新回合）；queue 已在上方显式拒绝。
+      const { delivery, ...restOptions } = options ?? {};
+      const result = await activeApp.sendInput(input, {
+        ...restOptions,
+        ...(delivery === "steer" ? { delivery: "steer_active_turn" as const } : {}),
+      });
+      if (result.kind !== "started_turn") return result;
+      return withTuiMetadata(result.result, activeApp, currentCliMode(modeState));
+    }
+
+    return withTuiMetadata(
+      await activeApp.submitPrompt(input, options),
+      activeApp,
+      currentCliMode(modeState),
+    );
   };
 
   // Alt+Up 撤回端口（进程内）：直达 core pendingInputs 的 removeQueueItem；

@@ -112,6 +112,10 @@ export class AttachSessionHandle {
   activeRequestPermission:
     | ((request: unknown, options?: unknown) => Promise<unknown>)
     | undefined;
+  /** TUI 挂载期登记的审批入口（registerPermissionRequester），回合外询问也路由到它。 */
+  mountedRequestPermission:
+    | ((request: unknown, options?: unknown) => Promise<unknown>)
+    | undefined;
   /** 当前回合的 abortSignal：Ctrl-C/本地 abort 要同步撤下等待中的审批面板。 */
   private activeTurnAbortSignal: AbortSignal | undefined;
   private activeInputId: string | undefined;

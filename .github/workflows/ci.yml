@@ -40,6 +40,9 @@ jobs:
         run: cd apps/zcode-cli && mise exec -- ../../node_modules/.bin/turbo run build
       - name: Build model-option-map
         run: mise exec -- pnpm --filter @zcode/model-option-map build
+      # 3.18.2 新增根 workspace 包；SEA 测试断言 dist/contract.js，CLI turbo 图之外必须单独构建。
+      - name: Build session-control
+        run: mise exec -- pnpm --filter @zcode/session-control build
       - name: Typecheck (piz gate)
         run: mise exec -- pnpm typecheck:piz
       - name: Lint (root)

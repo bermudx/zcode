@@ -15,6 +15,7 @@ import { withFileLock } from "@zcode/shared/node";
 import type { SharedZCodeCredentialStore } from "../auth/shared-credentials.js";
 import {
   invalidateCanonicalCredentials,
+  isCanonicalTokenNearExpiry,
   loadCredentialPair,
   publishCanonicalCredentials,
   type CredentialPairSnapshot,
@@ -96,6 +97,13 @@ async function refreshLocked(
 
   // 合并：等锁期间别人已经刷新过就直接复用，零二次请求。这是 rotation reuse-detection 的关键。
   if (current?.tokens && current.generation !== observedGeneration) {
+    return current.tokens.access_token;
+  }
+  // observedGeneration 在取锁前读取：winner 若在我们「判定过期→读 generation」窗口内发布，
+  // generation 比对会把已新鲜的新记录当成旧账，再用刚轮换的 refresh token 刷新一次——严格
+  // rotation 下这会无谓消耗 token 并打破单飞语义。proactive 调用按锁内快照复核临期，已新鲜
+  // 即直接复用。reactive（401）不能套用：被拒 token 未必临期（服务端可提前吊销），必须照常刷新。
+  if (!input.reactive && current?.tokens && !isCanonicalTokenNearExpiry(current)) {
     return current.tokens.access_token;
   }
   if (!current?.tokens) {

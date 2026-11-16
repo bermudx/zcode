@@ -18,6 +18,7 @@ export const resolveBuildExternal = () => [
   "@zcode/tui-pi",
   "playwright-core",
   "koffi",
+  "@napi-rs/keyring",
 ];
 
 export const readZodBuildVersion = async () => {

@@ -339,7 +339,7 @@ export class AttachRuntime {
       );
     }
     const handle = this.sessions.get(parsed.data.sessionId);
-    const callback = handle?.activeRequestPermission;
+    const callback = handle?.activeRequestPermission ?? handle?.mountedRequestPermission;
     if (!handle || !callback) {
       return NO_INTERACTION_HANDLER_PERMISSION_RESPONSE;
     }
@@ -377,7 +377,7 @@ export class AttachRuntime {
       );
     }
     const handle = this.sessions.get(parsed.data.sessionId);
-    const callback = handle?.activeRequestPermission;
+    const callback = handle?.activeRequestPermission ?? handle?.mountedRequestPermission;
     const translated = userInputParamsToBrokerRequest(
       parsed.data,
       handle?.getMode() ?? "build",
@@ -727,10 +727,18 @@ export function createAttachPromptHandler(
   });
 
   const submitPrompt: TuiPromptHandler = async (input, submitOptions) => {
-    if (submitOptions?.requestPermission) {
-      current.activeRequestPermission = submitOptions.requestPermission as never;
-    }
     return await commandCenter(input, submitOptions);
+  };
+
+  // 审批入口改为挂载期登记（TuiRegisterPermissionRequester）：TUI 挂载即对主会话
+  // 生效，回合之外的反向请求（后台会话、通知驱动的回合）也路由到同一审批队列。
+  // 与进程内 prompt-handler 同语义：只注销自己，迟到注销不清新入口。
+  submitPrompt.registerPermissionRequester = (requestPermission) => {
+    current.mountedRequestPermission = requestPermission as never;
+    return () => {
+      if (current.mountedRequestPermission === requestPermission)
+        current.mountedRequestPermission = undefined;
+    };
   };
 
   submitPrompt.getMainSessionId = () => current.sessionId;

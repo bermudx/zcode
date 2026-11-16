@@ -160,6 +160,7 @@ export function startMcpStartup(
       trace: traceContext,
       workingDirectory: this.workingDirectory,
       workspaceIdentity: this.config.workspaceIdentity?.toString(),
+      ...(this.config.workspaceKey ? { workspaceKey: this.config.workspaceKey } : {}),
     })
     .then((snapshot) => {
       // detach/close/adopt 期间的迟到 startup 完成不算数：suspend 已接管

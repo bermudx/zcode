@@ -83,6 +83,9 @@ Slash Commands:
       reconnectedSessionUnavailable:
         "Reconnected to shared core — session unavailable, retrying…",
     },
+    approval: {
+      fromSession: (sessionId) => `From background session ${sessionId}`,
+    },
     copy: {
       copied: "Copied selected text to clipboard.",
       failed: "Could not copy selected text.",

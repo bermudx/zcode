@@ -207,6 +207,8 @@ export const REQUIRED_BUILD_ARTIFACTS = [
   "apps/zcode-cli/packages/contracts/dist/index.js",
   "apps/zcode-cli/packages/browser-use-plugin/scripts/browser-client.mjs",
   "packages/shared/dist/index.js",
+  // 3.18.2 起 SEA 打包要求根 session-control 的 dist；缺了先报构建缺口而非测试失败。
+  "packages/session-control/dist/contract.js",
 ];
 
 export function missingBuildArtifacts(root) {
