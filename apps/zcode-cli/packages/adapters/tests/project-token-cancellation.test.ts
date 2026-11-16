@@ -19,7 +19,7 @@ function gate() {
   return { promise, release };
 }
 
-function fixture(family: "bigmodel" | "zai", phase: "metadata" | "pat" | "business", warm = false) {
+function fixture(family: "bigmodel" | "zai", phase: "metadata" | "pat", warm = false) {
   const entered = gate();
   const response = gate();
   let held = !warm;
@@ -30,12 +30,7 @@ function fixture(family: "bigmodel" | "zai", phase: "metadata" | "pat" | "busine
       req: { url: string; timeoutMs?: number; trace?: TraceContext },
       options?: HttpClientRunOptions,
     ) => {
-      const target =
-        phase === "business"
-          ? "/api/auth/z/login"
-          : phase === "metadata"
-            ? "getCustomerInfo"
-            : "access_tokens";
+      const target = phase === "metadata" ? "getCustomerInfo" : "access_tokens";
       if (held && req.url.endsWith(target)) {
         entered.release();
         await new Promise<void>((resolve, reject) => {
@@ -51,9 +46,7 @@ function fixture(family: "bigmodel" | "zai", phase: "metadata" | "pat" | "busine
         if (failure) throw createHttpClientError({ code: "network_error", message: "unavailable" });
       }
       let data: unknown;
-      if (req.url.endsWith("/api/auth/z/login"))
-        data = { access_token: "business-jwt", expires_in: phase === "business" ? 600 : 3600 };
-      else if (req.url.endsWith("getCustomerInfo"))
+      if (req.url.endsWith("getCustomerInfo"))
         data = { organizations: [{ organizationId: "org", projects: [{ projectId: "project" }] }] };
       else if (req.url.endsWith("api_keys")) data = [{ apiKey: "key", name: "zcode-api-key" }];
       else {
@@ -71,7 +64,11 @@ function fixture(family: "bigmodel" | "zai", phase: "metadata" | "pat" | "busine
   const resolver = createCodingPlanApiKeyResolver({
     httpClient: { request } as unknown as HttpClientPort,
   });
-  const input = { family, accessToken: "oauth", accountIdentity: "user" };
+  const input = {
+    family,
+    accessToken: family === "zai" ? "business-jwt" : "oauth",
+    accountIdentity: "user",
+  };
   return {
     resolver,
     input,
@@ -93,8 +90,7 @@ describe.each(["resolve", "resolveMaterial"] as const)("%s 独立取消共享换
     ["bigmodel", "pat", "cold"],
     ["bigmodel", "pat", "refresh"],
     ["bigmodel", "pat", "rejected"],
-    ["zai", "business", "cold"],
-    ["zai", "business", "refresh"],
+    ["zai", "metadata", "cold"],
     ["zai", "pat", "refresh"],
   ] as const)("%s %s %s 首个调用方取消不影响后续会话", async (family, phase, mode) => {
     vi.useFakeTimers();
@@ -146,7 +142,7 @@ describe.each(["resolve", "resolveMaterial"] as const)("%s 独立取消共享换
   });
 
   it("提前取消不发起网络请求", async () => {
-    const f = fixture("zai", "business");
+    const f = fixture("zai", "metadata");
     const controller = new AbortController();
     controller.abort();
     await expect(
@@ -219,7 +215,7 @@ it.each([false, true])(
 );
 
 it("调用方取消不阻碍 logout 清理 owner，其他等待者拒绝迟到 Token", async () => {
-  const f = fixture("zai", "business");
+  const f = fixture("zai", "metadata");
   const controller = new AbortController();
   const first = f.resolver.resolve(f.input, { signal: controller.signal });
   const cancelled = expect(first).rejects.toMatchObject({ name: "AbortError" });
@@ -231,5 +227,5 @@ it("调用方取消不阻碍 logout 清理 owner，其他等待者拒绝迟到 T
   f.resolver.clear();
   f.response.release();
   await invalidated;
-  expect(f.request.mock.calls.every(([req]) => req.url.endsWith("/api/auth/z/login"))).toBe(true);
+  expect(f.request.mock.calls.every(([req]) => !req.url.endsWith("/api/auth/z/login"))).toBe(true);
 });

@@ -183,13 +183,25 @@ export async function completeCliOAuthLoginFlow(
           ? timeoutError()
           : new ZCodeCliLoginError(code, "Authorization failed. Please retry login."),
     });
+    const resolver =
+      options.apiKeyResolver ??
+      createCodingPlanApiKeyResolver({
+        httpClient: options.httpClient ?? createDefaultHttpClient(env),
+      });
+    const accessToken =
+      providerId === "zai"
+        ? await waitWithAbort(
+            resolver.exchangeZaiBusinessToken(readyData.accessToken),
+            signal,
+          )
+        : readyData.accessToken;
     const material = await waitWithAbort(
       resolveCodingPlanMaterial({
-        accessToken: readyData.accessToken,
+        accessToken,
         env,
         httpClient: options.httpClient,
         family: providerId,
-        resolver: options.apiKeyResolver,
+        resolver,
         signal,
       }),
       signal,
@@ -209,7 +221,7 @@ export async function completeCliOAuthLoginFlow(
         if (providerId === "zai") {
           await credentialStore.saveZaiLoginCredentials(
             {
-              accessToken: readyData.accessToken,
+              accessToken,
               jwtToken: readyData.token,
               user: readyData.user,
             },

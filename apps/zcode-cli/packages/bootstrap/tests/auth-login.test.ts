@@ -226,7 +226,13 @@ describe("ZCode CLI login", () => {
         },
       });
       expect(await credentialStore.load(SHARED_ZCODE_CREDENTIAL_KEYS.zaiAccessToken)).toBe(
-        "zai-access-token",
+        "zai-biz-token",
+      );
+      const loginExchange = httpClient.requests.find((request) =>
+        request.url.endsWith("/api/auth/z/login"),
+      );
+      expect(loginExchange?.body && new TextDecoder().decode(loginExchange.body)).toBe(
+        JSON.stringify({ token: "zai-access-token" }),
       );
       expect(await credentialStore.load(SHARED_ZCODE_CREDENTIAL_KEYS.zcodeJwtToken)).toBe(
         "jwt-token",
@@ -554,6 +560,7 @@ describe("ZCode CLI login", () => {
             },
             apiKeyResolver: {
               clear() {},
+              exchangeZaiBusinessToken: async () => "test-business-token",
               resolve: async () => "test-pat",
               resolveMaterial: async () => {
                 await pause("material");
@@ -751,6 +758,7 @@ describe("ZCode CLI login", () => {
         loginZCodeCli({
           apiKeyResolver: {
             clear() {},
+            exchangeZaiBusinessToken: async () => "zai-business-token",
             resolve: async () => "test-pat",
             resolveMaterial: async () => ({
               token: "test-pat",

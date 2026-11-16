@@ -558,9 +558,14 @@ describe("Coding Plan API key resolver", () => {
           },
         }),
       ]);
+      const resolver = createCodingPlanApiKeyResolver({ httpClient });
+      const accessToken =
+        family === "zai"
+          ? await resolver.exchangeZaiBusinessToken("oauth-token")
+          : "login-token";
       await expect(
-        createCodingPlanApiKeyResolver({ httpClient }).resolve({
-          accessToken: "login-token",
+        resolver.resolve({
+          accessToken,
           family,
         }),
       ).resolves.toBe("project-token");
@@ -620,7 +625,7 @@ describe("Coding Plan API key resolver", () => {
     expect(httpClient.requests.at(-1)?.headers).toMatchObject({ authorization: "Bearer login" });
   });
 
-  it("exchanges a ZAI OAuth access token for a short-lived project token", async () => {
+  it("exchanges a ZAI OAuth access token before resolving a project token", async () => {
     const httpClient = new FakeHttpClient([
       jsonResponse({
         code: 0,
@@ -652,9 +657,11 @@ describe("Coding Plan API key resolver", () => {
     ]);
     const resolver = createCodingPlanApiKeyResolver({ httpClient });
 
+    const businessToken = await resolver.exchangeZaiBusinessToken("zai-oauth-token");
+    expect(businessToken).toBe("zai-biz-token");
     await expect(
       resolver.resolve({
-        accessToken: "zai-oauth-token",
+        accessToken: businessToken,
         family: "zai",
       }),
     ).resolves.toBe("project-token");

@@ -1263,3 +1263,19 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
   - `pnpm-lock.yaml` not verified against `pnpm install
     --frozen-lockfile` locally; the structural checks above are the
     pre-CI evidence.
+
+### 2026-11-16 — Z.AI business token shared with Desktop (patch/zai-business-token)
+
+- Issue #71: Z.AI OAuth login exchanges the raw OAuth token once, before
+  credential persistence, and stores the returned business token under
+  `oauth:zai:access_token`, matching Desktop 3.18.2. The project-token resolver
+  now treats that stored value as the business token and sends it directly to
+  downstream project-token requests; BigModel remains unchanged.
+- There is no migration for older piz credentials that contain the raw OAuth
+  token. Re-run `/login zai-coding-plan` if downstream authentication fails.
+- Regression coverage: login with stub HTTP asserts the raw token is exchanged
+  and only the business token is persisted; resolver coverage asserts no login
+  exchange and verifies downstream Authorization uses the stored token;
+  BigModel resolver coverage remains in place.
+- Build, typecheck, lint, tests, push, draft PR and CI are pending; repository
+  policy keeps those verification commands in CI.
