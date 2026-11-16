@@ -174,13 +174,15 @@ async function waitForRegistrationFile(path: string, timeoutMs = 5_000): Promise
  *  FAKE_CORE_LISTEN_DELAY_MS 是真实 bind 前延迟：await 在 listen 调用之前，
  *  延迟期间 socket 确实不可连（旧版本先 listen 后等，探测立即成功，延迟只
  *  拖慢登记写入——「等就绪」路径根本没被压到）。FAKE_EVENTS_FILE 有值时在
- *  listen 回调写一行 `core-listening <ms>`，供断言受理与就绪的真实时序。 */
+ *  listen 回调写一行 `core-listening <ms>`，供断言受理与就绪的真实时序；
+ *  同步写入，保证探测连通前标记已落盘。 */
 async function writeFakeServerScript(directory: string): Promise<string> {
   const scriptPath = join(directory, "fake-app-server.mjs");
   await writeFile(
     scriptPath,
     `import { createServer } from "node:net";
-import { appendFile, writeFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 const socketIndex = process.argv.indexOf("--socket");
 const socketPath = process.argv[socketIndex + 1];
 const delay = Number(process.env.FAKE_CORE_LISTEN_DELAY_MS || "0");
@@ -188,7 +190,7 @@ const eventsFile = process.env.FAKE_EVENTS_FILE;
 const server = createServer((socket) => socket.end());
 if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 server.listen(socketPath, async () => {
-  if (eventsFile) await appendFile(eventsFile, "core-listening " + Date.now() + "\\n", "utf8");
+  if (eventsFile) appendFileSync(eventsFile, "core-listening " + Date.now() + "\\n", "utf8");
   await writeFile(socketPath + ".pid", process.pid + "\\n", "utf8");
   await writeFile(socketPath + ".env", JSON.stringify({
     attachCore: process.env.ZCODE_ATTACH_CORE ?? null,
