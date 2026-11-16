@@ -14,14 +14,26 @@ workspace cannot install standalone — its `workspace:*` deps point at root
 packages) → shared `tsc -b` → `turbo run build` → `typecheck:piz` → root and
 CLI lint → `architecture:check --changed` → `fork-tests.mjs --max-workers 2`
 (selected). On `main` pushes and manual dispatches it additionally runs
-`--full`. Only when every step is green it assembles and uploads
-`dist-runtime-<sha>` via `assemble-dist-runtime.sh` — the artifact's existence
-is the gate evidence.
+`--full`. Superseded runs on the same ref are cancelled (`concurrency`,
+cancel-in-progress), and turbo's local cache (`apps/zcode-cli/.turbo`) is
+cached between runs, so unchanged packages replay instead of rebuilding
+(2026-11-16, issue #81: per-push cold batteries and never-installed artifacts
+had burned 1,490/3,000 free-tier minutes by mid-month). `*.tsbuildinfo` is
+deliberately **not** cached: the root `tsc -b` dist outputs it describes are
+not in the cache, and a restored tsbuildinfo makes tsc report TS6305
+(observed in run 43939000283); turbo replays outputs together with its cache
+and is safe.
+
+`dist-runtime-<sha>` is assembled and uploaded **only on manual dispatch**
+(issue #81): a dispatched run executes every check first, so its artifact is
+itself the gate evidence for the sha it uploads. Push runs — `main` included —
+build nothing installable. Before `promote-piz-from-ci.sh`, dispatch the
+workflow on the current `main` HEAD and let it finish green.
 
 `sh apps/zcode-cli/scripts/promote-piz-from-ci.sh [run-id]` installs that
 artifact for the current clean `main` HEAD — same branch/cleanliness gates,
-atomic swap and `PROMOTED_FROM` semantics as `promote-piz.sh`. Artifacts for
-non-main shas exist but can never install (sha ≠ main HEAD).
+atomic swap and `PROMOTED_FROM` semantics as `promote-piz.sh`. Artifacts exist
+only for dispatched shas; non-main shas can never install (sha ≠ main HEAD).
 
 `.github/workflows/allowance-build.yml` is manual-only: it builds a chosen
 allowance ref (default `feat/allowance-herdr`, must be pushed to origin),

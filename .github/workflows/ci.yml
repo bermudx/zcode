@@ -5,6 +5,13 @@ on:
     branches: ["**"]
   workflow_dispatch:
 
+# Superseded runs on the same ref are cancelled: a follow-up push otherwise
+# pays the full battery for a sha nobody will read (Blacksmith free-tier
+# minutes; 2026-11-16: 1,490/3,000 used at mid-month).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
   COREPACK_ENABLE_PROJECT_SPEC: "0"
@@ -23,6 +30,16 @@ jobs:
           path: ~/.local/share/pnpm/store
           key: pnpm-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-
+      # 仅缓存 turbo 本地缓存（apps/zcode-cli 是 turbo cwd），命中时连同任务
+      # 输出一起回放。不要加 *.tsbuildinfo：根 tsc -b 的 dist 输出不在此缓存
+      # 内，恢复的 tsbuildinfo 会让 tsc 误判输出已构建而直接 TS6305
+      # （2026-11-16 run 43939000283 实测）；turbo 自身按内容哈希校验，安全。
+      # key 前缀 turbo- 与含 tsbuildinfo 的旧 buildstate- 条目刻意断开。
+      - uses: actions/cache@v4
+        with:
+          path: apps/zcode-cli/.turbo
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: turbo-${{ runner.os }}-
       # Root workspace covers apps/zcode-cli/packages/* too, so this one
       # install provides every CLI dep (see root pnpm-workspace.yaml). The
       # nested apps/zcode-cli workspace cannot install standalone: its
@@ -81,11 +98,16 @@ jobs:
               tail -150 "$log"
             done
           done
-      # Runs only after every check above is green: an uploaded artifact is
-      # proof the sha passed this workflow's tiers.
+      # Promotion input only (manual dispatch): the sha-keyed pair that
+      # promote-piz-from-ci.sh installs. Runs only after every check above is
+      # green, so a dispatched artifact is itself the gate evidence for its
+      # sha. Push runs (branch or main) build nothing installable — per-push
+      # artifacts burned runner minutes for pairs nobody could install.
       - name: Assemble dist-runtime
+        if: github.event_name == 'workflow_dispatch'
         run: sh apps/zcode-cli/scripts/assemble-dist-runtime.sh "$PWD" "$PWD/apps/zcode-cli/packages/cli/dist-runtime"
       - name: Upload dist-runtime artifact
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: dist-runtime-${{ github.sha }}

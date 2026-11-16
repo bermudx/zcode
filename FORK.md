@@ -1314,3 +1314,41 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
 
 Made by GLM-5.3 via ZCode; operator brief: promote HEAD after confirming it
 carries all patches.
+
+### 2026-11-16 — ci runner-minute cuts (fix/skip-core-client-main-builds, #81)
+
+- Operator flagged Blacksmith waste after the 78d9ba69 promotion context
+  (screenshot: 1,490/3,000 free 2vCPU-min at day 16/30; 88 jobs) and named
+  the direction by renaming this worktree's branch. Three cuts in
+  `.github/workflows/ci.yml`, no check removed from any push:
+  - `dist-runtime` assemble+upload now runs **only on manual dispatch** —
+    push runs (main included) built sha-keyed pairs that only
+    `promote-piz-from-ci.sh` can install, so everything between promotions
+    was never used. Promotion flow: dispatch the workflow on main HEAD,
+    then promote-from-ci (verification.md CI section updated).
+  - `concurrency` group per ref with cancel-in-progress — superseded runs
+    on a branch no longer run to completion.
+  - actions/cache for `apps/zcode-cli/.turbo` + `**/*.tsbuildinfo` — every
+    push rebuilt unchanged packages cold; turbo and tsc revalidate by
+    content hash, so a stale restore recomputes.
+- Docs only besides the workflow; no shipped code, no promotion, no
+  live-core contact.
+- Evidence, first run `43937354945` (push, `98538733`): all steps green;
+  `Assemble dist-runtime` + `Upload dist-runtime artifact` **skipped** as
+  designed; buildstate cache cold (first run) and **saved** post-run
+  (`buildstate-Linux-98538733…`, 39 MB payload); pnpm store restored from
+  an 855 MB hit; turbo build ran 26/26 tasks `cache miss` (genuinely cold,
+  ~1 min of the ~3.9 min job — "dominant cost" wording from the first
+  draft was wrong and is dropped); selected fork-tests correctly ran only
+  the 2 always-run suites (17 tests) with `ci.yml` reported NOT COVERED.
+  Caches live in Blacksmith's transparent cache layer, not the GitHub
+  caches API (`total_count: 0` there is expected).
+- Follow-up run `43939000283` (`52148df8`) **failed** and proved the
+  cross-run restore works — restored `*.tsbuildinfo` without the root
+  `tsc -b` dist outputs it describes, so tsc assumed projects were built
+  and errored `TS6305` on `packages/shared/test/fixtures/fake-relay-v2.ts`.
+  Introduced by this branch; fixed on it: the cache now holds only
+  `apps/zcode-cli/.turbo` (turbo replays outputs together with its cache),
+  and the key prefix `turbo-` deliberately severs the poisoned
+  `buildstate-` entries. `*.tsbuildinfo` stays out — lesson recorded in
+  ci.yml (Chinese bug-comment rule) and verification.md.
