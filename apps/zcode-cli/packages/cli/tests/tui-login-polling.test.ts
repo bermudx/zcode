@@ -128,11 +128,15 @@ async function fixture(t: TestContext, providerId: "zai" | "bigmodel" = "bigmode
     },
     // OAuth 登录只解析项目访问材料，不再落盘派生 API Key（staging 9af2a442d3 改为请求期换取 Token）。
     apiKeyResolver: {
+      async exchangeZaiBusinessToken(accessToken) {
+        assert.equal(accessToken, "test-oauth-token");
+        return "test-business-token";
+      },
       async resolveMaterial(input, options) {
         assert.equal(input.family, providerId);
         assert.equal(
           input.accessToken,
-          providerId === "zai" ? "test-oauth-token" : "test-business-token",
+          "test-business-token",
         );
         assert.ok(options?.signal);
         return TEST_PROJECT_MATERIAL;

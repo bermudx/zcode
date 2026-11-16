@@ -14,13 +14,10 @@ import {
   resolveBigModelApiOrigin,
   type ProjectAccessTokenMaterial,
 } from "@zcode/shared";
-import { ZaiBusinessTokenCache, type ZaiBusinessToken } from "./zai-business-token-cache.js";
 
-const BUSINESS_AUTH_MAX_ATTEMPTS = 2;
-const SINGLE_ATTEMPT = 1;
 const PROJECT_TOKEN_REQUEST_TIMEOUT_MS = 15_000;
 const ZAI_API_HOST = "https://api.z.ai";
-// 与 zai-business-token-cache 校验保持一致：envelope code 属此集合才继续读 Token。
+// 仅这些成功码允许解析 Z.AI 登录响应中的业务 Token。
 const ZAI_LOGIN_SUCCESS_CODES = new Set<unknown>([0, 200, "0", "200"]);
 const ZAI_ENVELOPE_CODE_MAX_LENGTH = 64;
 const ZAI_ENVELOPE_MSG_MAX_LENGTH = 200;
@@ -60,6 +57,7 @@ export interface ResolveCodingPlanApiKeyInput {
   trace?: TraceContext;
 }
 export interface CodingPlanApiKeyResolver {
+  exchangeZaiBusinessToken(accessToken: string): Promise<string>;
   resolve(input: ResolveCodingPlanApiKeyInput, options?: HttpClientRunOptions): Promise<string>;
   resolveMaterial(
     input: ResolveCodingPlanApiKeyInput,
@@ -84,7 +82,7 @@ export class CodingPlanApiKeyError extends Error {
   }
 }
 
-/** 换证链路内部的结构化失败：附着 envelope 原因，经共享 pending 传播给所有等待方。 */
+/** Z.AI 登录交换内部的结构化失败：附着 envelope 原因，不含敏感响应数据。 */
 class ZaiBusinessLoginError extends Error {
   constructor(readonly reason: ZaiLoginFailureReason) {
     super("project_token_login_failed");
@@ -92,22 +90,14 @@ class ZaiBusinessLoginError extends Error {
   }
 }
 
-/** CLI 进程内唯一换证入口；保留旧导出名兼容调用方，返回值已是短期 Token。 */
+/** CLI 进程内 Coding Plan 项目令牌解析器及 Z.AI 登录令牌交换入口。 */
 export function createCodingPlanApiKeyResolver(
   options: CodingPlanApiKeyResolverOptions,
 ): CodingPlanApiKeyResolver {
   const execution = new AsyncLocalStorage<{
     context?: HttpClientRunOptions["context"];
     trace?: TraceContext;
-    business?: ZaiBusinessToken;
   }>();
-  const businessTokens = new ZaiBusinessTokenCache(() =>
-    options.observe?.({
-      family: "zai",
-      stage: "resolve",
-      code: "project_token_business_login_refresh_deferred",
-    }),
-  );
   const request = async (url: string, init: RequestInit, capture?: "zai-login") => {
     const response = await options.httpClient
       .request(
@@ -129,14 +119,6 @@ export function createCodingPlanApiKeyResolver(
           throw new ProjectAccessTokenTransientError({ kind: "timeout" });
         throw error;
       });
-    if (response.status === 401 && new URL(url).pathname.startsWith("/api/biz/")) {
-      const run = execution.getStore();
-      if (
-        run?.business &&
-        new Headers(init.headers).get("Authorization") === `Bearer ${run.business.token}`
-      )
-        businessTokens.invalidate(run.business);
-    }
     if (response.status === 404) return { code: 404 };
     if (response.status === 429 || (response.status >= 500 && response.status < 600))
       throw new ProjectAccessTokenTransientError({
@@ -173,84 +155,63 @@ export function createCodingPlanApiKeyResolver(
     locationStore: options.locationStore,
   });
   let generation = 0;
+  const exchangeZaiBusinessToken = async (accessToken: string): Promise<string> => {
+    const oauth = accessToken.trim();
+    if (!oauth) throw new CodingPlanApiKeyError("project_token_login_required");
+    const capturedGeneration = generation;
+    const businessToken = await request(
+      `${ZAI_API_HOST}/api/auth/z/login`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: oauth }),
+      },
+      "zai-login",
+    )
+      .then((raw) => {
+        // Bug 原因（issue #50）：业务令牌解析失败会丢弃 z.ai 的 code/msg。
+        // 在边界先判失败形态并保留 envelope 字段；绝不携带 Token 或响应正文。
+        const failure = readZaiLoginRejection(raw);
+        if (failure) throw new ZaiBusinessLoginError(failure);
+        const token = readZaiLoginToken(raw);
+        if (!token) throw new ZaiBusinessLoginError({});
+        return token;
+      })
+      .catch((error: unknown) => {
+        // Bug 原因（issue #50）：失败原因曾被丢弃，日志与用户提示都看不到
+        // z.ai 的 code/msg；只传播结构化字段，绝不记录 token/请求体。
+        const reason = readZaiLoginFailure(error);
+        options.observe?.({
+          family: "zai",
+          stage: "resolve",
+          code: "project_token_login_failed",
+          ...(reason?.httpStatus !== undefined ? { httpStatus: reason.httpStatus } : {}),
+          ...(reason?.code !== undefined ? { zaiCode: reason.code } : {}),
+          ...(reason?.msg !== undefined ? { zaiMessage: reason.msg } : {}),
+        });
+        throw new CodingPlanApiKeyError("project_token_login_failed", reason);
+      });
+    if (generation !== capturedGeneration)
+      throw new CodingPlanApiKeyError("project_token_scope_invalidated");
+    return businessToken;
+  };
   const resolveMaterial = async (
     input: ResolveCodingPlanApiKeyInput,
   ): Promise<ProjectAccessTokenMaterial> => {
-    const oauth = input.accessToken.trim();
-    if (!oauth) throw new CodingPlanApiKeyError("project_token_login_required");
+    const loginToken = input.accessToken.trim();
+    if (!loginToken) throw new CodingPlanApiKeyError("project_token_login_required");
     const capturedGeneration = generation;
-    const maxAttempts = input.family === "zai" ? BUSINESS_AUTH_MAX_ATTEMPTS : SINGLE_ATTEMPT;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (generation !== capturedGeneration)
-        throw new CodingPlanApiKeyError("project_token_scope_invalidated");
-      const business =
-        input.family === "zai"
-          ? await businessTokens
-              .resolve(oauth, () =>
-                request(
-                  `${ZAI_API_HOST}/api/auth/z/login`,
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ token: oauth }),
-                  },
-                  "zai-login",
-                ).then((raw) => {
-                  // Bug 原因（issue #50）：cache 校验失败只抛无字段 Error，z.ai 的
-                  // code/msg 被丢弃。在边界按同一契约先判失败形态，把 envelope 装进
-                  // 结构化异常；绝不携带 Token/正文，成功响应原样交给 cache 复核。
-                  const failure = readZaiLoginRejection(raw);
-                  if (failure) throw new ZaiBusinessLoginError(failure);
-                  return raw;
-                }),
-              )
-              .catch((error: unknown) => {
-                // Bug 原因（issue #50）：失败原因曾被丢弃，日志与用户提示都看不到
-                // z.ai 的 code/msg；只传播结构化字段，绝不记录 token/请求体。
-                const reason = readZaiLoginFailure(error);
-                options.observe?.({
-                  family: input.family,
-                  stage: "resolve",
-                  code: "project_token_login_failed",
-                  ...(reason?.httpStatus !== undefined
-                    ? { httpStatus: reason.httpStatus }
-                    : {}),
-                  ...(reason?.code !== undefined ? { zaiCode: reason.code } : {}),
-                  ...(reason?.msg !== undefined ? { zaiMessage: reason.msg } : {}),
-                });
-                throw new CodingPlanApiKeyError("project_token_login_failed", reason);
-              })
-          : undefined;
-      if (generation !== capturedGeneration)
-        throw new CodingPlanApiKeyError("project_token_scope_invalidated");
-      const loginToken = business?.token ?? oauth;
-      const run = execution.getStore();
-      if (run) run.business = business;
-      try {
-        const result = await client.resolve({
-          origin: input.family === "zai" ? ZAI_API_HOST : resolveBigModelApiOrigin(process.env),
-          family: input.family,
-          loginToken,
-          accountId: input.accountIdentity ?? input.family,
-          personalProjectSelection: "default",
-          rejectedProjectTokenFingerprint: input.rejectedProjectTokenFingerprint,
-        });
-        if (generation !== capturedGeneration)
-          throw new CodingPlanApiKeyError("project_token_scope_invalidated");
-        return result;
-      } catch (error) {
-        // 只恢复业务 JWT 的明确 HTTP 401；不把模型 401、403 或网络故障猜成过期。
-        if (!business || !businessTokens.wasRejected(business)) throw error;
-        businessTokens.invalidate(business);
-        if (attempt + 1 === maxAttempts) throw error;
-        options.observe?.({
-          family: input.family,
-          stage: "resolve",
-          code: "project_token_business_login_refresh",
-        });
-      }
-    }
-    throw new CodingPlanApiKeyError("project_token_request_failed");
+    const result = await client.resolve({
+      origin: input.family === "zai" ? ZAI_API_HOST : resolveBigModelApiOrigin(process.env),
+      family: input.family,
+      loginToken,
+      accountId: input.accountIdentity ?? input.family,
+      personalProjectSelection: "default",
+      rejectedProjectTokenFingerprint: input.rejectedProjectTokenFingerprint,
+    });
+    if (generation !== capturedGeneration)
+      throw new CodingPlanApiKeyError("project_token_scope_invalidated");
+    return result;
   };
   const resolveForCaller = (
     input: ResolveCodingPlanApiKeyInput,
@@ -271,6 +232,7 @@ export function createCodingPlanApiKeyResolver(
       runOptions?.signal,
     );
   return {
+    exchangeZaiBusinessToken,
     resolveMaterial: resolveForCaller,
     async resolve(input, runOptions) {
       const value = await resolveForCaller(input, runOptions);
@@ -278,13 +240,12 @@ export function createCodingPlanApiKeyResolver(
     },
     clear() {
       generation++;
-      businessTokens.clear();
       client.clear();
     },
   };
 }
 
-/** 只读 envelope 的 code/msg；非成功 code 或缺 Token 即换证失败，与 cache 的失败形态一致。 */
+/** 只读 envelope 的 code/msg；非成功 code 或缺 Token 即视为登录交换失败。 */
 function readZaiLoginRejection(raw: unknown): ZaiLoginFailureReason | undefined {
   if (!raw || typeof raw !== "object") return {};
   const response = raw as {
@@ -299,11 +260,17 @@ function readZaiLoginRejection(raw: unknown): ZaiLoginFailureReason | undefined 
     ...(msg !== undefined ? { msg } : {}),
   };
   if (response.code != null && !ZAI_LOGIN_SUCCESS_CODES.has(response.code)) return reason;
+  if (!readZaiLoginToken(raw)) return reason;
+  return undefined;
+}
+
+function readZaiLoginToken(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const response = raw as { data?: { access_token?: unknown; accessToken?: unknown } };
   const token =
     (typeof response.data?.access_token === "string" && response.data.access_token.trim()) ||
     (typeof response.data?.accessToken === "string" && response.data.accessToken.trim());
-  if (!token) return reason;
-  return undefined;
+  return token || undefined;
 }
 
 /** envelope code 允许数字或字符串；统一成有限长字符串，异常形态不进日志或异常。 */

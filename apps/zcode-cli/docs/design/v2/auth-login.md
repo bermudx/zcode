@@ -193,8 +193,9 @@ Key setup persists model credentials; OAuth setup retains the login session and
 stable identity, then resolves a Project Access Token before each HTTP attempt.
 
 `Z.AI Coding Plan` reuses the ZAI CLI OAuth flow above. After Poll returns
-`ready`, the CLI stores the existing ZAI OAuth session keys and exchanges
-`data.zai.access_token` for a Project Access Token:
+`ready`, the CLI exchanges `data.zai.access_token` for the Z.AI business token,
+then stores that business token as `oauth:zai:access_token`, matching Desktop.
+It uses the business token to resolve a Project Access Token:
 
 1. `POST https://api.z.ai/api/auth/z/login` with `{ "token": accessToken }`.
 2. Use the returned biz token as `Authorization: Bearer <token>`.
@@ -202,7 +203,13 @@ stable identity, then resolves a Project Access Token before each HTTP attempt.
 4. Find or create an API key named `zcode-api-key`.
 5. Issue `POST /api/biz/v1/organization/{org}/projects/{project}/api_keys/{id}/access_tokens`
    with the biz login JWT and `{clientType: "zcode", clientVersion}`.
-6. Keep the Token in memory; persist only the stable user identity and OAuth source marker.
+6. Persist the business token and stable user identity; do not persist the
+   Project Access Token. The resolver uses the stored business token directly
+   for the downstream project-token requests and never repeats the login exchange.
+
+Older piz credentials may still contain the raw OAuth token in
+`oauth:zai:access_token`. There is no automatic migration; a failed downstream
+request requires the user to run `/login zai-coding-plan` again.
 
 `BigModel Coding Plan` uses a local callback server rather than the desktop app
 deeplink:
@@ -377,7 +384,6 @@ Required coverage:
 
 沿用共享 PAT owner。HTTP adapter 仅把结构化 network_error/timeout 和 HTTP 429/5xx 标记为临时故障；其他非 2xx 状态以结构化 HTTP 状态失败上报，2xx 但正文不是 JSON 记为 `project_token_invalid_response`，最终错误码按 `docs/model-provider-project-access-token.md`「换证失败错误码」映射，不携带响应体或 Token；提前刷新遇到这些故障时，允许在原 expiresAt 内复用未被拒绝的 PAT，5 秒退避，并记录脱敏事件。取消、401/403/404、畸形响应及未知错误不降级。模型 401 恢复携带的拒绝指纹先清除匹配 PAT，不会因此重用失败凭据。退出/账号切换必须拒绝迟到结果；不回退 API Key。验收覆盖临时故障、取消、过期、明确拒绝、并发及两 family 的成功码 0/200/字符串兼容。
 
-Z.AI 前置业务 JWT 的 `ZaiBusinessTokenCache` 采用相同的临时故障分类与 5 秒退避，降级结果必须属于共享 pending。仅在 JWT exp / 响应 TTL 的最早期限内、同一登录且未被 invalidate 时复用旧值；无有效期元数据不降级。保留旧对象身份，确保迟到的 401 仍能将其标记为拒绝；clear/切账号拒绝在途结果。降级只记录固定 `project_token_business_login_refresh_deferred` 事件，不包含 JWT、OAuth 或响应内容。验收覆盖并发、退避恢复、原有效期边界、未知有效期、认证拒绝、取消及在途 clear/invalidate/换账号。
 
 共享换证的生命周期属于 resolver/cache owner：Key ID 定位、PAT 签发/刷新/401 恢复与业务 JWT 换证 HTTP 都不携带单个调用方 signal，也不携带 context.abortSignal；保留 trace/logger，每次 HTTP 请求设置 15 秒超时。`resolve` 与 `resolveMaterial` 为调用方提供独立可取消等待，提前取消不发请求，等待中取消及时拒绝且移除监听器；不能让一个会话取消影响其他等待者或清空有效缓存。所有等待者退出后底层任务仍有超时，晚到失败必须消费；clear/登录代次保护不变。验收覆盖首个/后续等待者取消、并发共享、旧 PAT 刷新、401 恢复、Z.AI JWT 刷新、全员取消后的成功/失败、监听器清理和 logout 竞态。
 

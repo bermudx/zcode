@@ -35,7 +35,6 @@ function fixture(
     create?: boolean;
     creationFailure?: boolean;
     metadataFailure?: boolean;
-    businessFailure?: boolean;
   } = {},
 ) {
   let issues = 0;
@@ -43,11 +42,7 @@ function fixture(
   const observe = vi.fn();
   const request = vi.fn(async (input: HttpClientRequest) => {
     let reply: Reply;
-    if (input.url.endsWith("/api/auth/z/login")) {
-      reply = options.businessFailure
-        ? httpFailure(503)
-        : { status: 200, data: { access_token: "business-jwt", expires_in: 3600 } };
-    } else if (input.url.endsWith("getCustomerInfo")) {
+    if (input.url.endsWith("getCustomerInfo")) {
       reply = options.metadataFailure
         ? httpFailure(503)
         : {
@@ -228,19 +223,16 @@ describe("PAT 签发有界恢复", () => {
     expect(f.issues()).toBe(0);
   });
 
-  it.each(["metadataFailure", "businessFailure"] as const)(
-    "%s 不被签发重试扩大",
-    async (failure) => {
-      const f = fixture(() => success(), { [failure]: true });
-      await expect(f.resolver.resolve({ ...input, family: "zai" })).rejects.toThrow();
-      expect(f.issues()).toBe(0);
-      expect(
-        f.request.mock.calls.filter(([r]) =>
-          r.url.endsWith(failure === "metadataFailure" ? "getCustomerInfo" : "/api/auth/z/login"),
-        ),
-      ).toHaveLength(1);
-    },
-  );
+  it("metadata failure is not expanded into a signing retry", async () => {
+    const f = fixture(() => success(), { metadataFailure: true });
+    await expect(
+      f.resolver.resolve({ ...input, family: "zai", accessToken: "business-jwt" }),
+    ).rejects.toThrow();
+    expect(f.issues()).toBe(0);
+    expect(f.request.mock.calls.filter(([r]) => r.url.endsWith("getCustomerInfo"))).toHaveLength(
+      1,
+    );
+  });
 
   it("第一次失败迟到于 clear 时不启动旧账号重试", async () => {
     const entered = deferred();

@@ -22,9 +22,7 @@ describe.each(["bigmodel", "zai"] as const)("%s PAT 临时刷新失败", (family
     const request = vi.fn(async ({ url }: { url: string }) => {
       let data: unknown;
       let status = 200;
-      if (url.endsWith("/api/auth/z/login"))
-        data = { access_token: "business-jwt", expires_in: 3600 };
-      else if (url.endsWith("getCustomerInfo"))
+      if (url.endsWith("getCustomerInfo"))
         data = { organizations: [{ organizationId: "org", projects: [{ projectId: "project" }] }] };
       else if (url.endsWith("api_keys")) data = [{ apiKey: "key", name: "zcode-api-key" }];
       else {
@@ -50,7 +48,11 @@ describe.each(["bigmodel", "zai"] as const)("%s PAT 临时刷新失败", (family
       httpClient: { request } as unknown as HttpClientPort,
       observe,
     });
-    const input = { family, accessToken: "oauth", accountIdentity: "user" };
+    const input = {
+      family,
+      accessToken: family === "zai" ? "business-jwt" : "oauth",
+      accountIdentity: "user",
+    };
     await expect(resolver.resolve(input)).resolves.toBe("old-pat");
     vi.setSystemTime(start + 481_000);
     if (["network_error", "timeout", 429, 503].includes(failure)) {
@@ -101,9 +103,7 @@ describe.each(["bigmodel", "zai"] as const)("%s PAT 临时刷新失败", (family
     let issues = 0;
     const request = vi.fn(async ({ url }: { url: string }) => {
       let data: unknown;
-      if (url.endsWith("/api/auth/z/login"))
-        data = { access_token: "business-jwt", expires_in: 3600 };
-      else if (url.endsWith("getCustomerInfo"))
+      if (url.endsWith("getCustomerInfo"))
         data = { organizations: [{ organizationId: "org", projects: [{ projectId: "project" }] }] };
       else if (url.endsWith("api_keys")) data = [{ apiKey: "key", name: "zcode-api-key" }];
       else {
@@ -124,7 +124,11 @@ describe.each(["bigmodel", "zai"] as const)("%s PAT 临时刷新失败", (family
     const resolver = createCodingPlanApiKeyResolver({
       httpClient: { request } as unknown as HttpClientPort,
     });
-    const input = { family, accessToken: "oauth", accountIdentity: "user" };
+    const input = {
+      family,
+      accessToken: family === "zai" ? "business-jwt" : "oauth",
+      accountIdentity: "user",
+    };
     await resolver.resolve(input);
     vi.setSystemTime(start + offset);
     let result: string | undefined;
