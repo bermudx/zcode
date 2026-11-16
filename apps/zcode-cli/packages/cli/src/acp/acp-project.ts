@@ -17,6 +17,10 @@ import type {
   ToolKind,
   ToolCallUpdate,
 } from "@agentclientprotocol/sdk";
+import { RequestError } from "@agentclientprotocol/sdk";
+import { PROTOCOL_V4_LIMITS } from "@zcode/shared/zcode-protocol-v4";
+import type { TuiPromptAttachment } from "@zcode/tui";
+import { z } from "zod";
 import {
   AskUserQuestionInputSchema,
   TodoWriteOutputSchema,
@@ -220,9 +224,25 @@ export function permissionResultForAcpOption(
   return { decision: "allow" };
 }
 
-/** ACP 的文本块 → core 的一整条 prompt 文本。resource 内容内联，链接保留引用。 */
-export function promptBlocksToText(blocks: readonly ContentBlock[]): string {
+const INVALID_PROMPT_PARAMS = -32602;
+const MAX_IMAGE_BASE64_CHARS = Math.ceil(PROTOCOL_V4_LIMITS.attachmentMaxBytes / 3) * 4;
+const imageBlockSchema = z.object({
+  data: z.string().min(1).max(MAX_IMAGE_BASE64_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/u),
+  mimeType: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+});
+const IMAGE_EXTENSIONS = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+} as const;
+
+export type AcpPromptInput = { text: string; attachments: TuiPromptAttachment[] };
+
+/** ACP 整条输入先校验再交给现有附件上传；不读 URI、不在适配层保存图片文件。 */
+export function promptBlocksToInput(blocks: readonly ContentBlock[]): AcpPromptInput {
   const parts: string[] = [];
+  const attachments: TuiPromptAttachment[] = [];
   for (const block of blocks) {
     switch (block.type) {
       case "text":
@@ -240,17 +260,38 @@ export function promptBlocksToText(blocks: readonly ContentBlock[]): string {
         }
         break;
       }
-      case "image":
+      case "image": {
+        const parsed = imageBlockSchema.safeParse(block);
+        if (!parsed.success) {
+          throw new RequestError(
+            INVALID_PROMPT_PARAMS,
+            `Invalid ACP image: expected PNG, JPEG, GIF or WebP with nonempty base64 (max ${PROTOCOL_V4_LIMITS.attachmentMaxBytes} bytes)`,
+          );
+        }
+        const { data, mimeType } = parsed.data;
+        // Buffer.from 会容忍畸形 base64；必须回编码比对，不能悄悄截断/改写用户图片。
+        const bytes = Buffer.from(data, "base64");
+        if (bytes.byteLength > PROTOCOL_V4_LIMITS.attachmentMaxBytes || bytes.toString("base64") !== data) {
+          throw new RequestError(INVALID_PROMPT_PARAMS, "Invalid ACP image: malformed base64 or image exceeds byte limit");
+        }
+        attachments.push({
+          content: `data:${mimeType};base64,${data}`,
+          path: `@acp-image-${attachments.length + 1}.${IMAGE_EXTENSIONS[mimeType]}`,
+          type: "image",
+        });
+        break;
+      }
       case "audio":
-        throw new Error(
-          `piz acp does not accept ${block.type} content yet; send text or a file reference instead`,
+        throw new RequestError(
+          INVALID_PROMPT_PARAMS,
+          "piz acp does not accept audio content yet; send text or a file reference instead",
         );
       default:
         parts.push(JSON.stringify(block));
         break;
     }
   }
-  return parts.join("\n\n").trim();
+  return { attachments, text: parts.join("\n\n").trim() };
 }
 
 function resourceLinkPath(uri: string): string {

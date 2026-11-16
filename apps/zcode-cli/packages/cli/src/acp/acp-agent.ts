@@ -38,7 +38,7 @@ import {
   permissionOptionsForCore,
   permissionResultForAcpOption,
   planApprovalResult,
-  promptBlocksToText,
+  promptBlocksToInput,
   toolKindForName,
   type AcpPermissionResult,
 } from "./acp-project.js";
@@ -304,7 +304,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
         // client 注入 MCP（issue #31 CMCP01）：stdio/http/sse 三种声明都接，
         // stdio 无独立能力位——ACP 里它始终可用。
         mcpCapabilities: { http: true, sse: true },
-        promptCapabilities: { audio: false, embeddedContext: true, image: false },
+        promptCapabilities: { audio: false, embeddedContext: true, image: true },
         sessionCapabilities: { close: {}, resume: {} },
       },
       agentInfo: { name: "piz", version: options.version },
@@ -565,32 +565,38 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
   app.onRequest(methods.agent.session.prompt, async ({ client, params }) => {
     const session = requireSession(params.sessionId);
     if (activeTurns.has(params.sessionId)) {
-      throw new RequestError(
-        INVALID_PARAMS,
-        "A prompt turn is already running for this ACP session",
-      );
+      throw new RequestError(INVALID_PARAMS, "A prompt turn is already running for this ACP session");
     }
-    const text = promptBlocksToText(params.prompt);
-    if (text.length === 0) {
+    let input: ReturnType<typeof promptBlocksToInput>;
+    try {
+      input = promptBlocksToInput(params.prompt);
+    } catch (error) {
+      log?.warn?.("acp prompt content rejected", { sessionId: params.sessionId });
+      throw error;
+    }
+    const { text, attachments } = input;
+    if (text.length === 0 && attachments.length === 0) {
       throw new RequestError(INVALID_PARAMS, "Prompt contains no usable content");
     }
     // /goal 与 /dwf 是前端本地命令（TUI 的 command-center 同款）：ACP 客户端没有
     // command-center，这里代为路由；其余 slash 输入维持 P005 的原文转发。
     const localCommand = parseLocalSlashCommand(text);
+    const skillResolution = resolveSkillInvocation(text, slashCatalogs.get(params.sessionId));
+    if (attachments.length > 0 && (localCommand || skillResolution.kind === "message")) {
+      log?.warn?.("acp local command images rejected", { sessionId: params.sessionId });
+      throw new RequestError(INVALID_PARAMS, "Images require a model prompt, not a locally answered command");
+    }
     if (localCommand) {
       return await runLocalCommand(client, session, localCommand);
     }
     // `/skill` 系输入由本层裁定（core 不认识该命令词）：prompt 改写为手动技能提示，
     // message 以 agent_message_chunk 本地回执（裸 /skill 列表），forward 维持 P005。
-    const skillResolution = resolveSkillInvocation(text, slashCatalogs.get(params.sessionId));
     if (skillResolution.kind === "message") {
       const emit = emitterFor(client, session);
-      emit([
-        {
-          content: { text: skillResolution.text, type: "text" },
-          sessionUpdate: "agent_message_chunk",
-        },
-      ]);
+      emit([{
+        content: { text: skillResolution.text, type: "text" },
+        sessionUpdate: "agent_message_chunk",
+      }]);
       await pendingDrain;
       if (connectionFailure) throw connectionFailure;
       return { stopReason: "end_turn" } satisfies PromptResponse;
@@ -600,16 +606,17 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     const turn: ActiveTurn = {
       cancel: () => {
         turn.cancelled = true;
+        // 句柄按上传/命令阶段决定是否 stop；上传期间不能误停共享会话的其它输入。
         controller.abort();
-        void session.handle.stopActiveTurn();
       },
       cancelled: false,
     };
     activeTurns.set(params.sessionId, turn);
     session.cancel = turn.cancel;
     try {
+      log?.debug?.("acp prompt submitting", { imageCount: attachments.length, sessionId: params.sessionId, traceId: session.handle.traceId });
       await session.handle.submitPrompt(
-        promptText,
+        attachments.length > 0 ? { text: promptText, attachments } : promptText,
         {
           abortSignal: controller.signal,
           requestPermission: (request: PermissionBrokerRequest, extra?: { signal?: AbortSignal }) =>
@@ -618,7 +625,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
       );
       await pendingDrain;
       if (connectionFailure) throw connectionFailure;
-      return { stopReason: "end_turn" } satisfies PromptResponse;
+      return { stopReason: turn.cancelled ? "cancelled" : "end_turn" } satisfies PromptResponse;
     } catch (error) {
       if (turn.cancelled || isAbortError(error)) {
         return { stopReason: "cancelled" } satisfies PromptResponse;
