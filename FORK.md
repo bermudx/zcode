@@ -1328,10 +1328,20 @@ carries all patches.
     then promote-from-ci (verification.md CI section updated).
   - `concurrency` group per ref with cancel-in-progress — superseded runs
     on a branch no longer run to completion.
-  - actions/cache for `apps/zcode-cli/.turbo` + `**/*.tsbuildinfo` — the
-    per-push cold `turbo run build`/`tsc -b` was the dominant cost; turbo
-    and tsc revalidate by content hash, so a stale restore recomputes.
+  - actions/cache for `apps/zcode-cli/.turbo` + `**/*.tsbuildinfo` — every
+    push rebuilt unchanged packages cold; turbo and tsc revalidate by
+    content hash, so a stale restore recomputes.
 - Docs only besides the workflow; no shipped code, no promotion, no
-  live-core contact. CI on this branch is the first execution of the new
-  steps (cache save + no artifact upload on a push run) — result recorded
+  live-core contact.
+- Evidence, first run `43937354945` (push, `98538733`): all steps green;
+  `Assemble dist-runtime` + `Upload dist-runtime artifact` **skipped** as
+  designed; buildstate cache cold (first run) and **saved** post-run
+  (`buildstate-Linux-98538733…`, 39 MB payload); pnpm store restored from
+  an 855 MB hit; turbo build ran 26/26 tasks `cache miss` (genuinely cold,
+  ~1 min of the ~3.9 min job — "dominant cost" wording from the first
+  draft was wrong and is dropped); selected fork-tests correctly ran only
+  the 2 always-run suites (17 tests) with `ci.yml` reported NOT COVERED.
+  Caches live in Blacksmith's transparent cache layer, not the GitHub
+  caches API (`total_count: 0` there is expected). Cross-run cache restore
+  is checked on the follow-up run (this fix-up push) — result recorded
   on the PR.

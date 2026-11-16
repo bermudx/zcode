@@ -33,8 +33,8 @@ jobs:
       # Incremental build state: turbo's local cache (apps/zcode-cli is the
       # turbo cwd) replays unchanged task outputs, tsc -b skips unchanged
       # projects via tsbuildinfo. Both revalidate by content hash, so a stale
-      # restore is recomputed, never replayed wrong. Cuts the per-push cold
-      # build, the dominant runner-minute cost.
+      # restore is recomputed, never replayed wrong. Removes the per-push
+      # cold rebuild of unchanged packages.
       - uses: actions/cache@v4
         with:
           path: |
