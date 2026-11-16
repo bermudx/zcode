@@ -1314,3 +1314,24 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
 
 Made by GLM-5.3 via ZCode; operator brief: promote HEAD after confirming it
 carries all patches.
+
+### 2026-11-16 — ci runner-minute cuts (fix/skip-core-client-main-builds, #81)
+
+- Operator flagged Blacksmith waste after the 78d9ba69 promotion context
+  (screenshot: 1,490/3,000 free 2vCPU-min at day 16/30; 88 jobs) and named
+  the direction by renaming this worktree's branch. Three cuts in
+  `.github/workflows/ci.yml`, no check removed from any push:
+  - `dist-runtime` assemble+upload now runs **only on manual dispatch** —
+    push runs (main included) built sha-keyed pairs that only
+    `promote-piz-from-ci.sh` can install, so everything between promotions
+    was never used. Promotion flow: dispatch the workflow on main HEAD,
+    then promote-from-ci (verification.md CI section updated).
+  - `concurrency` group per ref with cancel-in-progress — superseded runs
+    on a branch no longer run to completion.
+  - actions/cache for `apps/zcode-cli/.turbo` + `**/*.tsbuildinfo` — the
+    per-push cold `turbo run build`/`tsc -b` was the dominant cost; turbo
+    and tsc revalidate by content hash, so a stale restore recomputes.
+- Docs only besides the workflow; no shipped code, no promotion, no
+  live-core contact. CI on this branch is the first execution of the new
+  steps (cache save + no artifact upload on a push run) — result recorded
+  on the PR.
