@@ -15,7 +15,7 @@ Electron path.
 ACP client (T3 Code)                    piz acp                         shared core
 ────────────────────                    ───────                         ───────────
 initialize             ──►  capabilities: v1, resume{}, close{},       (no core call)
-                            no loadSession, no image/audio; HTTP/SSE MCP
+                            no loadSession, image support, no audio; HTTP/SSE MCP
 session/new {cwd,
  mcpServers}           ──►  one lazy lane per cwd ─────────────────────► session/create
                             └─ subscribe, compact cap for GLM
@@ -102,6 +102,8 @@ Event order for one turn:
 
 ```
 session/prompt
+  → validate all content blocks (text/resources + images)
+  → [images] existing v4 attachment begin → chunk* → commit
   → v4 sendText (commandId)
   → [core] turn_started(inputId)
   → session/update agent_message_chunk …      (model_streaming text_delta)
@@ -112,10 +114,58 @@ session/prompt
   → session/prompt response {stopReason}
 ```
 
-`session/cancel` sets the turn's cancelled flag, aborts the per-turn signal (which
-issues the v4 stop in `AttachSessionHandle`) and calls `stopActiveTurn()`. A cancelled
-prompt resolves with `stopReason: "cancelled"`; cancellation never turns into an
-error response.
+`session/cancel` sets the turn's cancelled flag and aborts the per-turn signal.
+For ordinary prompts, `AttachSessionHandle` owns stop admission: before the
+command is sent, cancellation only aborts the upload; after admission starts,
+the handle issues v4 stop. The ACP adapter must not send an additional,
+unscoped stop during an upload. Local goal commands still call
+`stopActiveTurn()` because their continuation is started by a separate op.
+A cancelled prompt resolves with `stopReason: "cancelled"`; cancellation never
+turns into an error response.
+
+### Image input — issue #79
+
+`initialize.promptCapabilities.image` is true; audio stays false. The adapter
+maps ACP image blocks to the existing `TuiPromptAttachment` data-URL shape and
+calls `AttachSessionHandle.submitPrompt` once with text and all images. No
+filesystem staging, remote URI fetching, new upload implementation, or model
+provider import is introduced.
+
+```text
+ACP prompt blocks
+  → synchronous validation + mapping (ACP adapter)
+  → existing AttachSessionHandle (one in-flight prompt/abort signal)
+  → existing v4 attachment transaction (core owns artifact bytes and refs)
+  → one sendText with text + committed refs (core owns input admission)
+  → normal model request / signing / turn events
+```
+
+- Accept inline PNG, JPEG, GIF and WebP with nonempty canonical padded base64.
+  Each image must fit the shared `PROTOCOL_V4_LIMITS.attachmentMaxBytes` limit;
+  check encoded length before decoding. MIME/encoding/size validation happens
+  for the **whole prompt before any upload or command**. Actual image decoding
+  and model compatibility remain core/provider responsibilities.
+- Preserve text/resource flattening and image order. Images receive deterministic
+  per-prompt display names; their storage identity remains the existing random
+  upload transaction and core artifact reference. An image-only prompt has
+  empty text and is valid; an empty prompt without images is not.
+- An optional ACP image URI is not fetched or opened: inline `data` is the
+  content authority. Audio, invalid images and images attached to commands
+  answered locally return ACP invalid-params errors, never silent image loss.
+  Skill invocations that produce a model prompt retain the images.
+- Upload failure uses the existing abort cleanup, rejects the prompt, and
+  never sends `sendText`. Cancellation during begin/chunk/commit must prevent
+  subsequent uploads and command admission, return `cancelled`, and release
+  the ACP in-flight slot. Resume does not replay uploads or resend a prompt.
+- Diagnostics record only session/trace identifiers, attachment counts and
+  stable failure descriptions, never base64 bytes, image URIs or prompt text.
+  Shared-core ownership, permissions, no-plugins startup and signing are unchanged.
+
+Regression evidence belongs in the pure input mapper, the SDK client ↔ ACP
+agent tests, and a disposable socket test using the real `AttachSessionHandle`
+and upload implementation. Fixtures prove protocol forwarding, not image
+understanding, real-model compatibility or allowance eligibility. A real
+T3/model image turn remains unverified until observed on a verified built pair.
 
 ## Local slash commands (`/goal`, `/dwf`)
 
@@ -198,7 +248,7 @@ Rules:
   workflows unless a host enables the policy, so `/dwf list` is a truthful
   empty list in default piz sessions. Full command semantics over ACP does
   not imply enabling the engine; that is a separate product decision.
-- Resource blocks ride along as text: `promptBlocksToText` flattens a
+- Resource blocks ride along as text: `promptBlocksToInput` flattens a
   prompt into one text string, so resource blocks typed around a local
   command end up **baked into its args** (a `/goal <objective>` objective
   or ignored as part of args), not attached as separate context. No local
@@ -235,7 +285,7 @@ not hand-copied per call site.
 | Area | v1 behavior |
 | --- | --- |
 | Sessions | `session/new`, `session/resume`, `session/close` (real stop); no `session/load`, so history is never replayed |
-| Turns | `session/prompt` (text + resource blocks only; images/audio rejected with a message), `session/cancel`, `session/update` |
+| Turns | `session/prompt` (text + resource blocks + inline images; audio rejected), `session/cancel`, `session/update` |
 | Local commands | `/goal` (+`/target`) and `/dwf` intercepted in `session/prompt`, routed through core ops, response emitted as an `agent_message_chunk`; advertised via `available_commands_update` (see the section above) |
 | Workspaces | one lazy `AttachRuntime` + socket client per `cwd`; sessions are per-cwd but share that lane. All lanes converge on the single shared core: the socket endpoint is derived from the data root only, never from `cwd`/workspace identity (2026-11-08 single-core consolidation); workspace refs still travel in every `session/create`/`session/resume`/`session/list` so per-session isolation is unchanged |
 | Permissions | `session/request_permission`; `allow_once` / `allow_always` (only when core suggests permission updates) / `reject_once`; answer is the core option's `response` |

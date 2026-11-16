@@ -2,6 +2,8 @@
 // 这些是协议形状的唯一定义处，漂移必须在这里先红。
 import assert from "node:assert/strict";
 import test from "node:test";
+import { RequestError, type ContentBlock } from "@agentclientprotocol/sdk";
+import { PROTOCOL_V4_LIMITS } from "@zcode/shared/zcode-protocol-v4";
 import {
   ACP_BUILD_MODE,
   ACP_MODEL_CONFIG_ID,
@@ -18,31 +20,66 @@ import {
   permissionOptionsForCore,
   permissionResultForAcpOption,
   planApprovalResult,
-  promptBlocksToText,
+  promptBlocksToInput,
   summarizeToolResult,
   toolKindForName,
 } from "../src/acp/acp-project.js";
 
 test("prompt blocks: text and resource links become one prompt", () => {
-  const text = promptBlocksToText([
+  const input = promptBlocksToInput([
     { text: "Fix the bug", type: "text" },
     { name: "a.ts", type: "resource_link", uri: "file:///w/a.ts" },
   ]);
-  assert.equal(text, "Fix the bug\n\n@/w/a.ts");
+  assert.deepEqual(input, { attachments: [], text: "Fix the bug\n\n@/w/a.ts" });
 });
 
-test("prompt blocks: images are rejected instead of silently dropped", () => {
-  assert.throws(
-    () =>
-      promptBlocksToText([
-        {
-          data: "AAAA",
-          mimeType: "image/png",
-          type: "image",
-        },
-      ]),
-    /does not accept image content/,
-  );
+test("prompt blocks: inline images preserve order beside text and embedded resources", () => {
+  const data = Buffer.from("transport fixture, not decoded image").toString("base64");
+  const formats = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+  const input = promptBlocksToInput([
+    { text: "inspect", type: "text" },
+    ...formats.map((mimeType) => ({ data, mimeType, type: "image" as const, uri: "file:///not-opened" })),
+    { resource: { text: "extra context", uri: "file:///context.txt" }, type: "resource" },
+    { name: "code.ts", type: "resource_link", uri: "file:///code.ts" },
+  ]);
+  assert.equal(input.text, "inspect\n\nextra context\n\n@/code.ts");
+  assert.deepEqual(input.attachments, formats.map((mime, index) => ({
+    content: `data:${mime};base64,${data}`,
+    path: `@acp-image-${index + 1}.${["png", "jpg", "gif", "webp"][index]}`,
+    type: "image",
+  })));
+  assert.equal(promptBlocksToInput([{ data, mimeType: "image/png", type: "image" }]).text, "");
+});
+
+test("prompt blocks: invalid image data and audio fail as invalid params without leaking data", () => {
+  const badBlocks: ContentBlock[] = [
+    { data: "", mimeType: "image/png", type: "image" },
+    { data: "private-image-sentinel", mimeType: "image/png", type: "image" },
+    { data: "YQ", mimeType: "image/png", type: "image" },
+    { data: "YR==", mimeType: "image/png", type: "image" },
+    { data: "YQ==\n", mimeType: "image/png", type: "image" },
+    { data: "YQ==", mimeType: "text/plain", type: "image" },
+    { data: "YQ==", mimeType: "image/svg+xml", type: "image" },
+    { data: "YQ==", mimeType: "audio/wav", type: "audio" },
+  ];
+  for (const block of badBlocks) {
+    assert.throws(() => promptBlocksToInput([block]), (error: unknown) => {
+      assert.ok(error instanceof RequestError);
+      assert.equal(error.code, -32602);
+      assert.doesNotMatch(error.message, /private-image-sentinel/);
+      return true;
+    });
+  }
+});
+
+test("prompt blocks: shared byte cap rejects oversized images before uploads", () => {
+  const maxBytes = PROTOCOL_V4_LIMITS.attachmentMaxBytes;
+  const maxEncoded = Math.ceil(maxBytes / 3) * 4;
+  // 两种边界：编码长度已超限，或编码长度刚好但解码后多一字节。
+  for (const data of ["A".repeat(maxEncoded + 4), Buffer.alloc(maxBytes + 1).toString("base64")]) {
+    assert.throws(() => promptBlocksToInput([{ data, mimeType: "image/png", type: "image" }]),
+      (error: unknown) => error instanceof RequestError && error.code === -32602);
+  }
 });
 
 test("modes: only plan is distinct, everything else is build", () => {

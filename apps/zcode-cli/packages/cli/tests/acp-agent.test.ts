@@ -294,6 +294,9 @@ test("acp agent: initialize advertises resume/close and no loadSession", async (
     assert.equal(init.protocolVersion, 1);
     assert.equal(init.agentInfo?.name, "piz");
     assert.equal(init.agentCapabilities?.loadSession, false);
+    assert.deepEqual(init.agentCapabilities?.promptCapabilities, {
+      audio: false, embeddedContext: true, image: true,
+    });
     assert.deepEqual(init.agentCapabilities?.sessionCapabilities, {
       close: {},
       resume: {},
@@ -1656,7 +1659,7 @@ test("acp agent: a second prompt while a local command is in flight is rejected"
 
 // ── /skill 的手动调用改写（issue #9：ACP 与 TUI command-center 同契约）─────────
 
-test("acp agent: /skill <name> [task] reaches the core as the manual skill prompt", async () => {
+test("acp agent: /skill <name> [task] reaches the core as the manual skill prompt with images intact", async () => {
   const core = new FakeCore();
   const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
   const { app: client } = collectUpdates(() => "");
@@ -1679,6 +1682,25 @@ test("acp agent: /skill <name> [task] reaches the core as the manual skill promp
     });
     assert.equal(result.stopReason, "end_turn");
     assert.equal(session.text, buildManualSkillPrompt("diff-review", ""));
+    let captured: Parameters<AttachSessionHandle["submitPrompt"]>[0] | undefined;
+    const submit = session.handle.submitPrompt.bind(session.handle);
+    session.handle.submitPrompt = async (prompt, options) => {
+      captured = prompt;
+      return await submit(prompt, options);
+    };
+    const data = Buffer.from("image transport fixture").toString("base64");
+    result = await ctx.request(methods.agent.session.prompt, {
+      prompt: [
+        { text: "/skill diff-review inspect screenshot", type: "text" },
+        { data, mimeType: "image/png", type: "image" },
+      ],
+      sessionId: created.sessionId,
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(captured, {
+      attachments: [{ content: `data:image/png;base64,${data}`, path: "@acp-image-1.png", type: "image" }],
+      text: buildManualSkillPrompt("diff-review", "inspect screenshot"),
+    });
   });
 });
 

@@ -4,6 +4,7 @@ import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { client, methods, RequestError, type ContentBlock } from "@agentclientprotocol/sdk";
 import {
   ZCODE_PROTOCOL_VERSION,
   zcodeProtocolErrorCodes,
@@ -11,6 +12,7 @@ import {
   type ZCodeProtocolMcpServer,
 } from "@zcode/shared";
 import { AcpCoreSessions } from "../src/acp/acp-sessions.js";
+import { createAcpAgentApp } from "../src/acp/acp-agent.js";
 import type { AttachSessionHandle } from "../src/attach/attach-session.js";
 
 // 协议 fixture 不是 live core；但使用真实 socket、AttachRuntime 和 session handle，
@@ -55,6 +57,9 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
   const socketPath = join(directory, "core.sock");
   const sockets = new Set<Socket>();
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const upload = {
+    respond: undefined as ((method: string) => Promise<void>) | undefined,
+  };
   const connectedRefs: Array<{ workspaceIdentity?: string; workspacePath: string }> = [];
   let connectionCount = 0;
   let rejectClose = false;
@@ -124,6 +129,19 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
           } else {
             resident.delete(sessionId);
           }
+        } else if (message.method.startsWith("v4/attachment/")) {
+          const { uploadId } = message.params;
+          const reply = message.method === "v4/attachment/begin"
+            ? { nextChunkIndex: 0, state: "staging", uploadId }
+            : message.method === "v4/attachment/chunk"
+              ? { nextChunkIndex: Number(message.params.chunkIndex) + 1, uploadId }
+              : message.method === "v4/attachment/commit"
+                ? { ref: `zcode-artifact://${String(uploadId)}` }
+                : {};
+          result = Promise.resolve().then(async () => {
+            await upload.respond?.(message.method);
+            return reply;
+          });
         } else if (message.method === "v4/command") {
           result = { commandId: message.params.commandId, status: "accepted", revisionAtDecision: 0 };
           if (message.params.type === "sendText") {
@@ -131,9 +149,16 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
             notify(sessionId, "turn_started", { inputId: promptInput });
           }
         }
-        socket.write(`${JSON.stringify(
-          error ? { id: message.id, error } : { id: message.id, result },
-        )}\n`);
+        void Promise.resolve(result).then((value) => {
+          socket.write(`${JSON.stringify(
+            error ? { id: message.id, error } : { id: message.id, result: value },
+          )}\n`);
+        }).catch((failure: unknown) => {
+          socket.write(`${JSON.stringify({
+            id: message.id,
+            error: { code: -32000, message: failure instanceof Error ? failure.message : "fixture failure" },
+          })}\n`);
+        });
       }
     });
   });
@@ -156,7 +181,7 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
     await rm(directory, { recursive: true, force: true });
   });
   return {
-    catalogs, sessions, requests, sockets, notify, connectedRefs, socketPath,
+    catalogs, sessions, requests, sockets, notify, connectedRefs, socketPath, upload,
     get connectionCount() { return connectionCount; },
     get promptInput() { return promptInput; },
     rejectClose: (reject: boolean) => { rejectClose = reject; },
@@ -488,3 +513,167 @@ test("CMCP14 replay snapshot survives caller mutation; per-session isolation; cl
       && (r.method === "session/resume" || r.method === "session/subscribe"),
   ));
 });
+
+// issue #79：SDK client → ACP → 真实 session handle/upload → disposable socket。
+// core 回包/事件是协议夹具，不证明真实模型识图、签名或额度资格。
+const IMAGE_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const IMAGE_BLOCK = { data: IMAGE_DATA, mimeType: "image/png", type: "image" } as const;
+
+for (const imageOnly of [false, true]) {
+  test(`ACP images reach one v4 command through real uploads (image-only=${imageOnly})`, { timeout: 10000 }, async (t) => {
+    const f = await fixture(t);
+    const app = createAcpAgentApp({ sessions: f.sessions, version: "test" });
+    await client({ name: "image-test" }).connectWith(app, async (ctx) => {
+      const init = await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+      assert.equal(init.agentCapabilities?.promptCapabilities?.image, true);
+      assert.equal(init.agentCapabilities?.promptCapabilities?.audio, false);
+      const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+      const prompt: ContentBlock[] = imageOnly
+        ? [IMAGE_BLOCK]
+        : [{ type: "text", text: "Inspect these" }, IMAGE_BLOCK,
+          { type: "text", text: "Compare them" }, IMAGE_BLOCK];
+      const pending = ctx.request(methods.agent.session.prompt, { prompt, sessionId });
+      void pending.catch(() => undefined);
+      await until(() => f.promptInput !== undefined);
+      const wire = f.requests.filter((r) => r.method.startsWith("v4/"));
+      assert.deepEqual(wire.map((r) => r.method), [
+        ...Array.from({ length: imageOnly ? 1 : 2 }, () => [
+          "v4/attachment/begin", "v4/attachment/chunk", "v4/attachment/commit",
+        ]).flat(),
+        "v4/command",
+      ]);
+      const begins = wire.filter((r) => r.method === "v4/attachment/begin");
+      const chunks = wire.filter((r) => r.method === "v4/attachment/chunk");
+      for (let index = 0; index < begins.length; index += 1) {
+        assert.equal(begins[index].params.sessionId, sessionId);
+        assert.equal(begins[index].params.mime, "image/png");
+        assert.equal(begins[index].params.fileName, `acp-image-${index + 1}.png`);
+        assert.equal(begins[index].params.totalBytes, Buffer.from(IMAGE_DATA, "base64").byteLength);
+        assert.equal(chunks[index].params.uploadId, begins[index].params.uploadId);
+        assert.equal(chunks[index].params.dataBase64, IMAGE_DATA);
+      }
+      const send = wire.at(-1)!;
+      assert.equal(send.params.type, "sendText");
+      assert.deepEqual(send.params.payload, {
+        attachments: begins.map((begin, index) => ({
+          bytes: Buffer.from(IMAGE_DATA, "base64").byteLength,
+          fileName: `acp-image-${index + 1}.png`,
+          mime: "image/png",
+          ref: `zcode-artifact://${String(begin.params.uploadId)}`,
+        })),
+        heldQueueDisposition: "keepQueueAndSend",
+        text: imageOnly ? "" : "Inspect these\n\nCompare them",
+      });
+      f.notify(sessionId, "turn_complete", { inputId: f.promptInput, response: "fixture response" });
+      assert.equal((await pending).stopReason, "end_turn");
+    });
+  });
+}
+
+test("ACP rejects invalid images/audio/local-command images before any upload or command", { timeout: 10000 }, async (t) => {
+  const f = await fixture(t);
+  const diagnostics: unknown[] = [];
+  const record = (message: string, context?: Record<string, unknown>) => { diagnostics.push({ message, context }); };
+  const app = createAcpAgentApp({
+    logger: { debug: record, warn: record }, sessions: f.sessions, version: "test",
+  });
+  await client({ name: "image-test" }).connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+    const cases: ContentBlock[][] = [
+      [IMAGE_BLOCK, { ...IMAGE_BLOCK, data: "private-invalid-sentinel" }],
+      [{ ...IMAGE_BLOCK, data: "" }],
+      [{ ...IMAGE_BLOCK, mimeType: "text/plain" }],
+      [{ type: "audio", data: "YQ==", mimeType: "audio/wav" }],
+      [{ type: "text", text: " \n " }],
+      [],
+      ...["/goal inspect", "/dwf", "/skill"].map((text): ContentBlock[] =>
+        [{ type: "text", text }, IMAGE_BLOCK]),
+    ];
+    for (const prompt of cases) {
+      await assert.rejects(ctx.request(methods.agent.session.prompt, { prompt, sessionId }),
+        (error: unknown) => {
+          assert.ok(error instanceof RequestError);
+          assert.equal(error.code, -32602);
+          assert.doesNotMatch(error.message, /private-invalid-sentinel/);
+          return true;
+        });
+    }
+    assert.equal(f.requests.filter((r) => r.method.startsWith("v4/")).length, 0);
+    const pending = ctx.request(methods.agent.session.prompt, {
+      prompt: [{ type: "text", text: "valid next turn" }], sessionId,
+    });
+    void pending.catch(() => undefined);
+    await until(() => f.promptInput !== undefined);
+    f.notify(sessionId, "turn_complete", { inputId: f.promptInput, response: "ok" });
+    assert.equal((await pending).stopReason, "end_turn", "invalid input must not retain the prompt slot");
+  });
+  assert.ok(diagnostics.length > 0);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private-invalid-sentinel|must not be admitted alone/);
+  assert.ok(!JSON.stringify(diagnostics).includes(IMAGE_DATA));
+});
+
+test("ACP upload failure aborts staging, never admits text, and releases the prompt slot", { timeout: 10000 }, async (t) => {
+  const f = await fixture(t);
+  f.upload.respond = async (method) => {
+    if (method === "v4/attachment/chunk") throw new Error("injected image upload failure");
+  };
+  const app = createAcpAgentApp({ sessions: f.sessions, version: "test" });
+  await client({ name: "image-test" }).connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+    await assert.rejects(ctx.request(methods.agent.session.prompt, {
+      prompt: [{ type: "text", text: "must not be admitted alone" }, IMAGE_BLOCK], sessionId,
+    }), /injected image upload failure/);
+    assert.deepEqual(f.requests.filter((r) => r.method.startsWith("v4/")).map((r) => r.method), [
+      "v4/attachment/begin", "v4/attachment/chunk", "v4/attachment/abort",
+    ]);
+    f.upload.respond = undefined;
+    const pending = ctx.request(methods.agent.session.prompt, { prompt: [IMAGE_BLOCK], sessionId });
+    void pending.catch(() => undefined);
+    await until(() => f.promptInput !== undefined);
+    f.notify(sessionId, "turn_complete", { inputId: f.promptInput, response: "ok" });
+    assert.equal((await pending).stopReason, "end_turn");
+  });
+});
+
+for (const stage of ["begin", "chunk", "commit"]) {
+  test(`ACP cancel during image ${stage} never sends an unscoped stop or a command`, { timeout: 10000 }, async (t) => {
+    const f = await fixture(t);
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    t.after(() => release?.());
+    f.upload.respond = async (method) => {
+      if (method === `v4/attachment/${stage}`) await held;
+    };
+    const app = createAcpAgentApp({ sessions: f.sessions, version: "test" });
+    await client({ name: "image-test" }).connectWith(app, async (ctx) => {
+      await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+      const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: "/workspace", mcpServers: [] });
+      const pending = ctx.request(methods.agent.session.prompt, { prompt: [IMAGE_BLOCK, IMAGE_BLOCK], sessionId });
+      void pending.catch(() => undefined);
+      await until(() => f.requests.some((r) => r.method === `v4/attachment/${stage}`));
+      await assert.rejects(ctx.request(methods.agent.session.prompt, {
+        prompt: [{ type: "text", text: "cannot overtake image upload" }], sessionId,
+      }), /already running/);
+      ctx.notify(methods.agent.session.cancel, { sessionId });
+      // 同一 ACP 通道上的 barrier 确保 cancel 已在回包放行前被处理。
+      await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+      assert.equal(f.requests.filter((r) => r.method === "v4/command").length, 0);
+      release?.();
+      assert.equal((await pending).stopReason, "cancelled");
+      assert.equal(f.requests.filter((r) => r.method === "v4/command").length, 0);
+      assert.equal(f.requests.filter((r) => r.method === "v4/attachment/begin").length, 1);
+      if (stage !== "commit") {
+        assert.ok(f.requests.some((r) => r.method === "v4/attachment/abort"));
+      }
+      f.upload.respond = undefined;
+      const next = ctx.request(methods.agent.session.prompt, { prompt: [IMAGE_BLOCK], sessionId });
+      void next.catch(() => undefined);
+      await until(() => f.promptInput !== undefined);
+      ctx.notify(methods.agent.session.cancel, { sessionId });
+      assert.equal((await next).stopReason, "cancelled");
+      await until(() => f.requests.some((r) => r.method === "v4/command" && r.params.type === "stop"));
+    });
+  });
+}
