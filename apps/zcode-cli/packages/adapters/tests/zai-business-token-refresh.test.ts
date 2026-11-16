@@ -53,7 +53,7 @@ describe("Z.ai business token", () => {
     expect(requests.length).toBeGreaterThan(0);
     for (const downstream of requests)
       expect(new Headers(downstream.headers).get("authorization")).toBe(
-        "Bearer stored-business-token",
+        "stored-business-token",
       );
   });
 

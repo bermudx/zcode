@@ -95,6 +95,8 @@ function httpClientFixture(init?: Partial<{ authorizeUrl: string; expiresAt: num
       async request(request, options) {
         requests.push(request);
         assert.ok(options?.signal);
+        if (request.url.endsWith("/api/auth/z/login"))
+          return response({ access_token: "test-business-token" });
         if (request.method === "POST") {
           return response({
             authorize_url: init?.authorizeUrl ?? authorizeUrl,
@@ -120,8 +122,10 @@ describe("zcode protocol auth/* handlers", () => {
   it("loginStart returns the authorize URL and loginComplete persists credentials", async () => {
     const f = await fixture();
     const http = httpClientFixture();
+    const store = createSharedZCodeCredentialStore({ env: f.env });
     const handlers = createProtocolAuthLoginHandlers({
       apiKeyResolver,
+      credentialStore: store,
       httpClient: http.httpClient,
       sleep: async () => {},
     });
@@ -137,6 +141,7 @@ describe("zcode protocol auth/* handlers", () => {
     expect(complete.provider).toBe("zai");
     expect(complete.model.length).toBeGreaterThan(0);
     expect(complete.user.user_id).toBe("test-account");
+    expect(await store.load("oauth:zai:access_token")).toBe("test-business-token");
     // poll 用 flow_id + init 期生成的 Bearer pollToken；客户端只见 flowId。
     const polls = http.requests.filter((r) => r.method === "GET");
     expect(polls.length).toBeGreaterThan(0);
@@ -230,6 +235,7 @@ describe("zcode protocol auth/* handlers", () => {
       const start = await handlers.loginStart(f.context, { provider: "zai" });
       const complete = await handlers.loginComplete(f.context, { flowId: start.flowId });
       assert.equal(complete.ok, true);
+      expect(await store.load("oauth:zai:access_token")).toBe("test-business-token");
       expect(
         runtime.runtime.registryService.getProvider(configured.providerId)?.models.length,
       ).toBeGreaterThan(0);
