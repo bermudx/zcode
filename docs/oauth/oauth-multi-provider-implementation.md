@@ -1,6 +1,6 @@
 # OAuth 多提供方改造实施说明（Desktop）
 
-更新时间：2026-04-03
+更新时间：2026-11-15
 
 ## 1. 本次落地范围
 
@@ -96,13 +96,13 @@ ZAI 默认登录链路已切换为后端 JWT token 交换，授权入口和业�
 - 授权页：由 `ZAI_<ENV>_OAUTH_ORIGIN` 派生 `/api/oauth/authorize`，生产默认为 `https://chat.z.ai/api/oauth/authorize`
 - token 交换：由 `ZCODE_<ENV>_BASE_URL` 派生 `/api/v1/oauth/token`
 - 桌面端请求体：`{ code, redirect_uri, state }`
-- 本地保存的 `oauth:zai:access_token` 是后端返回的 `data.token`
+- 本地保存的 `oauth:zai:access_token` 是 `data.zai.access_token` 经 `POST /api/auth/z/login` 换得的 Z.AI 业务 token；`data.token`（zcode JWT）单独保存为 `zcodejwttoken`
 
 ## 4. ZAI 后端 JWT 登录链路（增量）
 
 ZAI OAuth 登录不再由桌面端直接请求三方 ZAI token 接口。桌面端只负责打开授权页、接收 `zcode://oauth/callback` deep link，并把 `code`、`redirect_uri`、`state` 传给后端 `https://zcode.z.ai/api/v1/oauth/token`。
 
-后端完成 z.ai token 交换、userinfo 拉取、用户创建与 JWT 签发。客户端把响应中的 `data.token` 保存为 `oauth:zai:access_token`，把 `data.user` 映射为 `oauth:zai:user_info`，并把 `oauth:active_provider` 设置为 `zai`。
+后端完成 z.ai token 交换、userinfo 拉取、用户创建与 JWT 签发。客户端把响应中的 `data.zai.access_token` 经 `POST /api/auth/z/login` 换成业务 token 后保存为 `oauth:zai:access_token`，把 `data.token`（zcode JWT）保存为 `zcodejwttoken`，把 `data.user` 映射为 `oauth:zai:user_info`，并把 `oauth:active_provider` 设置为 `zai`。
 
 ## 5. 验证结果
 
@@ -166,25 +166,36 @@ BigModel 兼容迁移：
   - BigModel legacy token 可恢复并迁移
   - 启动校验 401 会触发退出并清理凭据
 
-## 8. OAuth 后预置模型供应商补齐（ZAI）
+## 8. Coding Plan 请求凭据链路（项目访问令牌）
 
-本次补齐了 ZAI 在 OAuth 成功后的预置模型供应商同步链路，行为对齐 `z-work` 中 `getZaiApiKey` 的取 key 逻辑：
+ZAI 的 Coding Plan 请求凭据不再落盘长期 key；链路分登录期与请求期两段，业务 token 交换收敛在登录期完成。
 
-1. 使用 `oauth:zai:access_token` 调 `POST https://api.z.ai/api/auth/z/login` 交换 ZAI 业务 token
-2. 使用业务 token 调 `GET /api/biz/customer/getCustomerInfo` 选择默认机构/项目
-3. 调 `GET /api_keys` 查找 `zcode-api-key`，不存在则 `POST /api_keys` 创建
-4. 调 `GET /api_keys/copy/{apiKey}` 获取 `secretKey`
-5. 写入预置 provider 的 `apiKey` 为 `apiKey.secretKey`
+登录期（deep link `exchangeToken` 与 CLI polling `normalizePolledTokenSet` 在同一 adapter 边界转换）：
 
-实现与测试：
+1. 后端 `data.zai.access_token`（Z.AI OAuth token）经 `POST {businessLoginUrl}`（默认 `https://api.z.ai/api/auth/z/login`）换成 Z.AI 平台业务 token，由 `ZaiBusinessTokenResolver` 完成并带进程内缓存
+2. 业务 token 持久化为 `oauth:zai:access_token`；`data.token`（zcode JWT）单独保存为 `zcodejwttoken`
+3. ZAI_CN 不经过该交换，直接持久化后端返回的 access_token
 
-- 实现：`packages/services/src/model-provider/repo/oauthPresetProviderRepo.ts`
-- 测试：`packages/services/test/modelProviderService.test.ts`
-  - `会把 OAuth 的 ZAI 供应商配置同步成预置模型供应商`
-  - `ZAI 交换业务 token 失败时不会写入预置模型供应商`
-  - `ZAI 拉取明文 key 失败时不会写入预置模型供应商`
+请求期（Coding Plan 调用需要凭据时）：
+
+1. `AccountProviderCredentialService.loadCodingPlanMaterial` 读取 `oauth:zai:access_token` 业务 token，经 `AccountProviderApiKeyResolver` 调共享 `ProjectAccessTokenClient.resolve`
+2. `GET {origin}/api/biz/customer/getCustomerInfo` 选择机构/项目：个人 Key 只看非团队项目，优先“默认机构/默认项目”；解析出的 `{organizationId, projectId, apiKeyId}` 位置经 `locationStore` 写入凭据服务 `project-key-location:v1:...` 键复用
+3. `GET`/`POST /api/biz/v1/organization/{organizationId}/projects/{projectId}/api_keys` 查找或创建 `zcode-api-key`（团队为 `zcode-team-api-key`，`keyType: 2`）
+4. `POST {apiKeyId}/access_tokens` 签发短期项目访问令牌（PAT）；`ProjectAccessTokenCache` 进程内缓存并提前刷新，已知 Key 的签发临时失败在同一会话内重试一次
+5. PAT 仅作请求期凭据，不落盘为供应商 apiKey；Key 定位 404 时删除缓存位置并重建
+
+实现：
+
+- 登录期交换：`packages/services/src/oauth/providers/zaiProviderAdapter.ts`、`packages/services/src/providers/zaiBusinessTokenResolver.ts`
+- PAT 解析与缓存：`packages/shared/src/project-access-token-client.ts`
+- Desktop 注入与编排：`packages/services/src/model-provider/accountProjectTokenClient.ts`、`accountProviderApiKeyResolver.ts`、`accountProviderCredentialService.ts`
+- CLI 复用同一共享 client：`apps/zcode-cli/packages/adapters/src/auth/coding-plan-api-key.ts`；登录期交换在 `apps/zcode-cli/packages/bootstrap/src/auth-login.ts` 调 `exchangeZaiBusinessToken`
+
+测试：
+
+- `apps/zcode-cli/packages/adapters/tests/zai-business-token-refresh.test.ts`、`auth.test.ts`、`project-token-cancellation.test.ts`、`project-token-cold-recovery.test.ts`、`project-token-refresh.test.ts`
+- `packages/desktop/test/e2e/coding-plan/`（含 `account-key-usage-scene.test.ts`）与 `packages/desktop/test/e2e/auth-config/login/oauth-completion-race.test.ts`
 
 兼容策略：
 
-- BigModel 保持原有 fallback 行为（`copy` 缺失 `secretKey` 时可回退裸 key）
-- ZAI 严格要求 `secretKey`，避免落盘不可用的裸 API key
+- BigModel 走同一 PAT 链路（`family: "bigmodel"`，origin 由 `resolveBigModelApiOrigin` 解析）；`api_keys/copy` 的 `secretKey` 回退与“写预置供应商 apiKey”均已移除
