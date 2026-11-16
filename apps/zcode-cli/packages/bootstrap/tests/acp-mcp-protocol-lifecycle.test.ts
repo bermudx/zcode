@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   type Logger,
   type LoggerFactory,
@@ -32,10 +32,6 @@ const FIXTURE = fileURLToPath(
 );
 const NODE = process.execPath;
 const SENTINEL_CRED = "FAKE_SENTINEL_CRED_b7c3d1e9";
-
-beforeEach(() => {
-  process.env.TEMPDIAG_TEST = expect.getState().currentTestName ?? "unknown";
-});
 
 function processAlive(pid: number): boolean {
   try {

@@ -8,7 +8,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystemAdapter } from "@zcode/adapters/fs";
 import { createSqliteSessionStore } from "@zcode/adapters/storage";
 import { PermissionService, defaultPermissionConfig } from "@zcode/core";
@@ -30,10 +30,6 @@ import { createTestModelFactoryFromAdapter } from "./helpers/test-agent-runtime.
 const FIXTURE = fileURLToPath(
   new URL("../../adapters/tests/fixtures/mcp-echo-server.mjs", import.meta.url),
 );
-
-beforeEach(() => {
-  process.env.TEMPDIAG_TEST = expect.getState().currentTestName ?? "unknown";
-});
 
 function processAlive(pid: number): boolean {
   try {

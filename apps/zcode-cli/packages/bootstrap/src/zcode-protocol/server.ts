@@ -645,7 +645,7 @@ export class ZCodeProtocolAgentServer {
     if (this.shutdownPromise) return this.shutdownPromise;
     const tempDiagOp = ++tempDiagSeq;
     process.stderr.write(
-      `[TEMPDIAG] server.shutdown.start test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${[...this.context.sessions.keys()].join(",")} t=${Date.now()}\n`,
+      `[TEMPDIAG] server.shutdown.start op=${tempDiagOp} sid=${[...this.context.sessions.keys()].join(",")} t=${Date.now()}\n`,
     );
     // abort listener 可以同步重入；在通知任何 owner 前先占有同一个关闭结果。
     const shutdown = Promise.withResolvers<void>();
@@ -678,7 +678,7 @@ export class ZCodeProtocolAgentServer {
         result.status === "rejected" ? [result.reason] : [],
       );
       process.stderr.write(
-        `[TEMPDIAG] server.shutdown.end test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} t=${Date.now()} errors=${errors.length}\n`,
+        `[TEMPDIAG] server.shutdown.end op=${tempDiagOp} t=${Date.now()} errors=${errors.length}\n`,
       );
       if (errors.length)
         shutdown.reject(new AggregateError(errors, "Protocol runtime shutdown failed"));
@@ -748,10 +748,6 @@ export class ZCodeProtocolAgentServer {
   private async handleRequest(
     request: ZCodeProtocolRequest,
   ): Promise<ZCodeProtocolError | ZCodeProtocolResponse> {
-    const tempDiagOp = ++tempDiagSeq;
-    process.stderr.write(
-      `[TEMPDIAG] protocol.request.start test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} method=${request.method} requestId=${String(request.id)} t=${Date.now()}\n`,
-    );
     // request id 可在前一请求完成后复用；新请求不能继承未消费的旧 outbox。
     this.postResponseOutbox.delete(request.id);
     let releaseResidencyOperation: (() => void) | undefined;
@@ -782,11 +778,11 @@ export class ZCodeProtocolAgentServer {
           if (flight) {
             const tempDiagOp = ++tempDiagSeq;
             process.stderr.write(
-              `[TEMPDIAG] request.idleRestart.wait test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${id} t=${Date.now()}\n`,
+              `[TEMPDIAG] request.idleRestart.wait op=${tempDiagOp} sid=${id} t=${Date.now()}\n`,
             );
             await flight;
             process.stderr.write(
-              `[TEMPDIAG] request.idleRestart.done test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${id} t=${Date.now()}\n`,
+              `[TEMPDIAG] request.idleRestart.done op=${tempDiagOp} sid=${id} t=${Date.now()}\n`,
             );
           }
         }
@@ -806,9 +802,6 @@ export class ZCodeProtocolAgentServer {
       const protocolError = toProtocolError(error);
       return this.fail(request.id, protocolError.code, protocolError.message, protocolError.data);
     } finally {
-      process.stderr.write(
-        `[TEMPDIAG] protocol.request.end test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} method=${request.method} requestId=${String(request.id)} t=${Date.now()}\n`,
-      );
       if (changesPlugins) {
         this.context.deps?.pluginPreparation?.invalidate();
         this.context.deps?.pluginDiscovery?.invalidate?.();

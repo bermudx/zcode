@@ -19,13 +19,13 @@ export function trackResidencyBlockingWork<T>(
   this.residencyBlockingWork.add(work);
   this.residencyBlockingWorkCount = this.residencyBlockingWork.size;
   process.stderr.write(
-    `[TEMPDIAG] rbw.add test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${String(this.sessionId)} count=${this.residencyBlockingWorkCount} t=${Date.now()}\n`,
+    `[TEMPDIAG] rbw.add op=${tempDiagOp} sid=${String(this.sessionId)} count=${this.residencyBlockingWorkCount} t=${Date.now()}\n`,
   );
   return work.finally(() => {
     this.residencyBlockingWork.delete(work);
     this.residencyBlockingWorkCount = this.residencyBlockingWork.size;
     process.stderr.write(
-      `[TEMPDIAG] rbw.settle test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${String(this.sessionId)} count=${this.residencyBlockingWorkCount} t=${Date.now()}\n`,
+      `[TEMPDIAG] rbw.settle op=${tempDiagOp} sid=${String(this.sessionId)} count=${this.residencyBlockingWorkCount} t=${Date.now()}\n`,
     );
     for (const notify of this.workChanged) notify();
   });

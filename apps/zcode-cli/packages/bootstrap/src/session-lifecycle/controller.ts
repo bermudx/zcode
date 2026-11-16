@@ -8,18 +8,10 @@ import {
   type SessionLifecycleState,
 } from "./contract.js";
 
-let tempDiagSeq = 0;
-function tempDiag(point: string, op: number, sessionId: string, operation: string): void {
-  process.stderr.write(
-    `[TEMPDIAG] lifecycle.${point} test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${op} sid=${sessionId} operation=${operation} t=${Date.now()}\n`,
-  );
-}
-
 interface Entry {
   snapshot: SessionLifecycleSnapshot;
   flight?: {
     operation: SessionLifecycleOperation;
-    op: number;
     promise: Promise<void>;
     workspace?: ZCodeWorkspaceRef;
   };
@@ -74,7 +66,6 @@ export class SessionLifecycleController implements SessionLifecycle {
     if (entry.restartAfterStartup)
       return this.join(sessionId, entry.restartAfterStartup, entry.restartWorkspace, workspace);
     if (entry.flight?.operation === "stop") {
-      tempDiag("join", entry.flight.op, sessionId, "ensureReady");
       return entry.flight.promise.then(() => this.ensureReady(sessionId, workspace));
     }
     return this.run(
@@ -99,7 +90,6 @@ export class SessionLifecycleController implements SessionLifecycle {
   ): Promise<void> {
     const entry = this.entry(sessionId);
     if (entry.flight?.operation === "stop") {
-      tempDiag("join", entry.flight.op, sessionId, "initialize");
       return entry.flight.promise.then(() => this.initialize(sessionId, activate, workspace, kind));
     }
     return this.run(
@@ -184,7 +174,6 @@ export class SessionLifecycleController implements SessionLifecycle {
         entry.flight.operation === operation ||
         (operation === "ensureReady" && entry.flight.operation === "restart")
       ) {
-        tempDiag("join", entry.flight.op, sessionId, operation);
         return this.join(sessionId, entry.flight.promise, entry.flight.workspace, workspace);
       }
       return Promise.reject(
@@ -203,16 +192,13 @@ export class SessionLifecycleController implements SessionLifecycle {
       );
     }
     const deferred = Promise.withResolvers<void>();
-    const op = ++tempDiagSeq;
-    const flight = { operation, op, promise: deferred.promise, workspace };
+    const flight = { operation, promise: deferred.promise, workspace };
     // 先登记，再调用宿主：同步重入和 restart 的 unloaded 间隙不能抢占此操作。
     entry.flight = flight;
-    tempDiag("start", op, sessionId, operation);
     entry.snapshot.lastError = null;
     void work().then(
       () => {
         entry.flight = undefined;
-        tempDiag("settle", op, sessionId, operation);
         // 保留轻量版本事实，避免 stop/reopen 后迟到状态拥有更大的 revision。
         deferred.resolve();
         this.host.onOperationSettled?.(sessionId);
@@ -229,7 +215,6 @@ export class SessionLifecycleController implements SessionLifecycle {
           message: error instanceof Error ? error.message : String(error),
         };
         entry.flight = undefined;
-        tempDiag("settle", op, sessionId, operation);
         this.publish(entry);
         deferred.reject(error);
         this.host.onOperationSettled?.(sessionId);

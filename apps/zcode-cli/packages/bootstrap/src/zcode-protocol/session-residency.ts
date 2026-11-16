@@ -211,11 +211,11 @@ async function releaseSessionRecord(
   try {
     const tempDiagOp = ++tempDiagSeq;
     process.stderr.write(
-      `[TEMPDIAG] app.close.start test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${sessionId} mode=${mode} t=${Date.now()}\n`,
+      `[TEMPDIAG] app.close.start op=${tempDiagOp} sid=${sessionId} mode=${mode} t=${Date.now()}\n`,
     );
     await record.app.close?.();
     process.stderr.write(
-      `[TEMPDIAG] app.close.end test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${tempDiagOp} sid=${sessionId} t=${Date.now()}\n`,
+      `[TEMPDIAG] app.close.end op=${tempDiagOp} sid=${sessionId} t=${Date.now()}\n`,
     );
     runtimeClosed = true;
   } catch (error) {

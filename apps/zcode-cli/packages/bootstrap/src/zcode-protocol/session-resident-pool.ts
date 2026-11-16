@@ -57,9 +57,9 @@ interface ResidencyCandidate {
 
 // [TEMPDIAG] client-MCP timeout diagnostics — revert before merge.
 let tempDiagSeq = 0;
-function tempDiag(point: string, op: number, sessionId: string, extra = ""): void {
+function tempDiag(point: string, sessionId: string, extra = ""): void {
   process.stderr.write(
-    `[TEMPDIAG] ${point} test=${process.env.TEMPDIAG_TEST ?? "unknown"} op=${op} sid=${sessionId} t=${Date.now()}${extra}\n`,
+    `[TEMPDIAG] ${point} op=${++tempDiagSeq} sid=${sessionId} t=${Date.now()}${extra}\n`,
   );
 }
 
@@ -133,17 +133,15 @@ export class SessionResidentPool {
       this.rebalance();
     };
 
-    const acquireOp = ++tempDiagSeq;
-    tempDiag("pool.acquire.enter", acquireOp, sessionIds.join(","));
+    tempDiag("pool.acquire.enter", sessionIds.join(","));
     try {
       for (const sessionId of sessionIds) {
-        const waitOp = ++tempDiagSeq;
-        tempDiag("pool.waitDeact.wait", waitOp, sessionId);
+        tempDiag("pool.waitDeact.wait", sessionId);
         await this.waitForDeactivation(sessionId);
-        tempDiag("pool.waitDeact.done", waitOp, sessionId);
+        tempDiag("pool.waitDeact.done", sessionId);
         this.touch(sessionId);
       }
-      tempDiag("pool.acquire.acquired", acquireOp, sessionIds.join(","));
+      tempDiag("pool.acquire.acquired", sessionIds.join(","));
       return release;
     } catch (error) {
       release();
