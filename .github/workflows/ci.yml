@@ -79,8 +79,6 @@ jobs:
             for log in "$dir"/_zcode_*.log; do
               echo "===== $log"
               tail -150 "$log"
-              echo "----- TEMPDIAG (full) $log"
-              grep -E "TEMPDIAG|FAIL|Test timed out" "$log" || true
             done
           done
       # Runs only after every check above is green: an uploaded artifact is
