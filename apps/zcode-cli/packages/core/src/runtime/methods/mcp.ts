@@ -17,19 +17,6 @@ import type { McpToolDescriptor, PluginReferenceCatalog } from "@zcode/contracts
 
 const MCP_SESSION_OAUTH_AUTHORIZATION_TIMEOUT_MS = 15_000;
 
-// [TEMPDIAG] client-MCP timeout diagnostics — revert before merge.
-let tempDiagSeq = 0;
-function tempDiagOpen(point: string, sessionId: unknown, extra = ""): number {
-  const op = ++tempDiagSeq;
-  tempDiagAt(point, op, sessionId, extra);
-  return op;
-}
-function tempDiagAt(point: string, op: number, sessionId: unknown, extra = ""): void {
-  process.stderr.write(
-    `[TEMPDIAG] ${point} op=${op} sid=${String(sessionId)} t=${Date.now()}${extra}\n`,
-  );
-}
-
 export async function refreshWorkspaceTrustAdmission(
   runtime: AgentRuntimeInternal,
   traceContext: TraceContext,
@@ -464,7 +451,6 @@ export async function setMcpClientAttached(
   attached: boolean,
 ): Promise<void> {
   if (this.mcpClosed || attached === this.mcpClientAttached) return;
-  const diagOp = tempDiagOpen("mcp.setAttached.enter", this.sessionId, ` attached=${attached}`);
   // detach：同步落下闸门——pending connect 的迟到结果与新准入都被挡在 applied 侧；
   // epoch 递增使在飞 apply 的迟到完成失效（old-owner 不能覆盖新 attachment）。
   this.mcpClientAttached = attached;
@@ -472,7 +458,6 @@ export async function setMcpClientAttached(
   if (attached) {
     // adoption：等挂起的 teardown 收尾（suspend 也排在 apply tail 上），回合边界补连。
     await this.mcpApplyTail;
-    tempDiagAt("mcp.setAttached.tailSettled", diagOp, this.sessionId);
     return;
   }
   // 连接即将断开：applied 快照不再等于活连接，先立 reconnect 旗标——
@@ -520,12 +505,10 @@ export async function setMcpClientAttached(
   this.mcpApplyTail = suspend.catch(() => undefined);
   this.trackResidencyBlockingWork(suspend);
   await suspend;
-  tempDiagAt("mcp.setAttached.suspended", diagOp, this.sessionId);
 }
 
 export async function applyPendingMcpServers(this: AgentRuntimeInternal): Promise<void> {
   const apply = this.mcpApplyTail.then(() => {
-    const diagOp = tempDiagOpen("mcpApply.enter", this.sessionId);
     // 每次 apply 独立 AbortController：detach 经在飞登记表取消 client connect，
     // 不扩散成整轮 shutdown abort（评审 R3）。shutdown 仍要收口在飞 connect。
     const controller = new AbortController();
@@ -536,7 +519,6 @@ export async function applyPendingMcpServers(this: AgentRuntimeInternal): Promis
       this.shutdownSignal.addEventListener("abort", abortFromShutdown, { once: true });
     }
     return performMcpApply.call(this, controller).finally(() => {
-      tempDiagAt("mcpApply.exit", diagOp, this.sessionId);
       this.shutdownSignal.removeEventListener("abort", abortFromShutdown);
     });
   });
@@ -725,7 +707,6 @@ export async function prepareBorrowedMcp(
   this: AgentRuntimeInternal,
   input: { traceContext: TraceContext; signal: AbortSignal },
 ): Promise<BorrowedMcpAccess> {
-  const diagOp = tempDiagOpen("mcp.borrow.enter", this.sessionId);
   const ABORTED = Symbol("mcp.borrow.aborted");
   // 等待/发现统一走这条：调用方 signal + 本 runtime shutdown 只取消「等」，
   // 不取消父侧 connect/status 本身。
@@ -758,16 +739,11 @@ export async function prepareBorrowedMcp(
   // 发现读（status/listTools）也必须在同一栅栏内：读期间发生 queued apply、
   // detach+adopt 或 port 换代会让 config/port/status 混代——任何身份变化都
   // 丢弃本轮并重读稳定的 applied 面（评审 R3-返工）。
-  try {
-    for (;;) {
+  for (;;) {
     const tail = this.mcpApplyTail;
     const startup = this.mcpStartupPromise;
-    tempDiagAt("mcp.borrow.waitTail", diagOp, this.sessionId);
     if (!(await waitFor(tail))) return EMPTY_BORROWED_MCP;
-    tempDiagAt("mcp.borrow.tailSettled", diagOp, this.sessionId);
-    tempDiagAt("mcp.borrow.waitStartup", diagOp, this.sessionId);
     if (!(await waitFor(startup ?? Promise.resolve()))) return EMPTY_BORROWED_MCP;
-    tempDiagAt("mcp.borrow.startupSettled", diagOp, this.sessionId);
     if (tail !== this.mcpApplyTail || startup !== this.mcpStartupPromise) continue;
     // owner 在等待期间变了（detach/shutdown）：detached 的正确答案是空；
     // 旧快照不得交还给借用方。
@@ -802,9 +778,6 @@ export async function prepareBorrowedMcp(
       port,
       snapshot: { statuses, tools },
     };
-    }
-  } finally {
-    tempDiagAt("mcp.borrow.exit", diagOp, this.sessionId);
   }
 }
 

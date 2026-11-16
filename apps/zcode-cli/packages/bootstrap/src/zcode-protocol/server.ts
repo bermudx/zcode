@@ -192,9 +192,6 @@ import { createInMemorySessionEventStore } from "@zcode/contracts";
 export type { ZCodeProtocolAgentDependencies, ZCodeProtocolSessionRecord };
 
 import { closeMcpUiInstance, openMcpUiInstance, validateMcpUiInstance } from "./mcp-ui/index.js";
-// [TEMPDIAG] client-MCP timeout diagnostics — revert before merge.
-let tempDiagSeq = 0;
-
 const PLUGIN_PREPARATION_MUTATION_METHODS = new Set<string>([
   zcodeProtocolMethods.pluginsSetEnabled,
   zcodeProtocolMethods.pluginsInstall,
@@ -643,10 +640,6 @@ export class ZCodeProtocolAgentServer {
   /** 进程资源关闭，不使用会删除产品会话/发布 session.removed 的 session/close。 */
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
-    const tempDiagOp = ++tempDiagSeq;
-    process.stderr.write(
-      `[TEMPDIAG] server.shutdown.start op=${tempDiagOp} sid=${[...this.context.sessions.keys()].join(",")} t=${Date.now()}\n`,
-    );
     // abort listener 可以同步重入；在通知任何 owner 前先占有同一个关闭结果。
     const shutdown = Promise.withResolvers<void>();
     this.shutdownPromise = shutdown.promise;
@@ -676,9 +669,6 @@ export class ZCodeProtocolAgentServer {
     void Promise.allSettled([closingResources, ...closingSessions]).then((results) => {
       const errors = results.flatMap((result) =>
         result.status === "rejected" ? [result.reason] : [],
-      );
-      process.stderr.write(
-        `[TEMPDIAG] server.shutdown.end op=${tempDiagOp} t=${Date.now()} errors=${errors.length}\n`,
       );
       if (errors.length)
         shutdown.reject(new AggregateError(errors, "Protocol runtime shutdown failed"));
@@ -775,16 +765,7 @@ export class ZCodeProtocolAgentServer {
         // 若先一步取得自动重载资格，新请求等新实例就绪才获取租约，不能在旧 Inbox 留下输入。
         for (const id of sessionIds) {
           const flight = this.context.sessionLifecycle?.idleRestartInProgress(id);
-          if (flight) {
-            const tempDiagOp = ++tempDiagSeq;
-            process.stderr.write(
-              `[TEMPDIAG] request.idleRestart.wait op=${tempDiagOp} sid=${id} t=${Date.now()}\n`,
-            );
-            await flight;
-            process.stderr.write(
-              `[TEMPDIAG] request.idleRestart.done op=${tempDiagOp} sid=${id} t=${Date.now()}\n`,
-            );
-          }
+          if (flight) await flight;
         }
         releaseResidencyOperation =
           await this.context.sessionResidentPool?.acquireOperation(sessionIds);
