@@ -179,9 +179,15 @@ function createToolCallingExecutor(
   return {
     generateText: async (request) => {
       requests.push(request);
-      // 每轮 turn 恰好调一次：turn 的第一个请求末尾是 user 输入，续跑请求
-      // 末尾是上一步的 tool 结果——last-role 判据让每轮都真实走一遍调用。
-      const lastRole = request.messages.at(-1)?.role;
+      // 工具批次的 user-role token-budget 提醒排在工具结果之后；它不代表新一轮输入。
+      const lastRole = request.messages.findLast(
+        (message) =>
+          !(
+            message.role === "user" &&
+            typeof message.content === "string" &&
+            message.content.includes("<total_tokens>")
+          ),
+      )?.role;
       const offered = request.tools?.some((tool) => tool.name === toolName);
       if (offered && lastRole !== "tool") {
         return {
@@ -718,9 +724,16 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
           requestCount += 1;
           if (requestCount === 3) await turnGate; // 第二轮首个请求阻塞 → parent active
           const tools = request.tools ?? [];
-          // 每轮一次调用：末条消息是 tool 结果就停（parent/child 各自的
-          // transcript 互不干扰——跨会话扫全部请求会误判已调过）。
-          const lastRole = request.messages.at(-1)?.role;
+          // 每轮一次调用：忽略工具结果后的预算提醒，检查最后一条实际对话消息；
+          // parent/child 各自的 transcript 互不干扰。
+          const lastRole = request.messages.findLast(
+            (message) =>
+              !(
+                message.role === "user" &&
+                typeof message.content === "string" &&
+                message.content.includes("<total_tokens>")
+              ),
+          )?.role;
           if (tools.some((t) => t.name === "mcp__fork__echo") && lastRole !== "tool") {
             return {
               finishReason: "tool-calls",
@@ -1551,7 +1564,15 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       modelExecutor: {
         generateText: async (request) => {
           requests.push(request);
-          const lastRole = request.messages.at(-1)?.role;
+          // 工具批次的 user-role token-budget 提醒排在工具结果之后；它不代表新一轮输入。
+          const lastRole = request.messages.findLast(
+            (message) =>
+              !(
+                message.role === "user" &&
+                typeof message.content === "string" &&
+                message.content.includes("<total_tokens>")
+              ),
+          )?.role;
           const offered = ["mcp__h1__echo", "mcp__sib__echo"].find((name) =>
             request.tools?.some((tool) => tool.name === name),
           );

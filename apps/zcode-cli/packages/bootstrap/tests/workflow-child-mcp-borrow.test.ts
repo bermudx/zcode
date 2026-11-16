@@ -505,7 +505,15 @@ describe("workflow child borrows parent's live MCP port and effective config", (
     const modelFactory = createTestModelFactoryFromAdapter({
       async generateText(request: ModelRequest) {
         requests.push(request);
-        const lastRole = request.messages.at(-1)?.role;
+        // 工具批次的 user-role token-budget 提醒排在工具结果之后；它不代表新一轮输入。
+        const lastRole = request.messages.findLast(
+          (message) =>
+            !(
+              message.role === "user" &&
+              typeof message.content === "string" &&
+              message.content.includes("<total_tokens>")
+            ),
+        )?.role;
         if (request.tools?.some((t) => t.name === "mcp__s1__echo") && lastRole !== "tool") {
           return {
             finishReason: "tool-calls",
