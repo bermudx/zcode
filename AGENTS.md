@@ -30,7 +30,11 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   (the script enforces branch + cleanliness; promoting anything main lacks
   regresses the next main-based promotion). The script does NOT build: run the
   build (`docs/fork/verification.md`) after the merge, then grep `dist/` for
-  the change before promoting — it will happily promote a stale `dist/`. Dev builds write
+  the change before promoting — it will happily promote a stale `dist/`. `dist-runtime` resolves npm deps from root
+  `node_modules`: after promoting a lockfile change, run
+  `pnpm install --frozen-lockfile` here (2026-11-15: 3.18.2 promoted without
+  `@napi-rs/keyring` → "System credential storage is unavailable"), then
+  unset the `core.hooksPath` its prepare step sets. Dev builds write
   `packages/*/dist/` and cannot leak into `piz`; frontend externals resolve
   to snapshots inside `dist-runtime/node_modules` (see
   `docs/fork/verification.md`). `zcode` on PATH still points to the old
