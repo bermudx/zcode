@@ -30,18 +30,16 @@ jobs:
           path: ~/.local/share/pnpm/store
           key: pnpm-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-
-      # Incremental build state: turbo's local cache (apps/zcode-cli is the
-      # turbo cwd) replays unchanged task outputs, tsc -b skips unchanged
-      # projects via tsbuildinfo. Both revalidate by content hash, so a stale
-      # restore is recomputed, never replayed wrong. Removes the per-push
-      # cold rebuild of unchanged packages.
+      # 仅缓存 turbo 本地缓存（apps/zcode-cli 是 turbo cwd），命中时连同任务
+      # 输出一起回放。不要加 *.tsbuildinfo：根 tsc -b 的 dist 输出不在此缓存
+      # 内，恢复的 tsbuildinfo 会让 tsc 误判输出已构建而直接 TS6305
+      # （2026-11-16 run 43939000283 实测）；turbo 自身按内容哈希校验，安全。
+      # key 前缀 turbo- 与含 tsbuildinfo 的旧 buildstate- 条目刻意断开。
       - uses: actions/cache@v4
         with:
-          path: |
-            apps/zcode-cli/.turbo
-            **/*.tsbuildinfo
-          key: buildstate-${{ runner.os }}-${{ github.sha }}
-          restore-keys: buildstate-${{ runner.os }}-
+          path: apps/zcode-cli/.turbo
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: turbo-${{ runner.os }}-
       # Root workspace covers apps/zcode-cli/packages/* too, so this one
       # install provides every CLI dep (see root pnpm-workspace.yaml). The
       # nested apps/zcode-cli workspace cannot install standalone: its

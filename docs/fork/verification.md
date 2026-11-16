@@ -15,10 +15,14 @@ packages) → shared `tsc -b` → `turbo run build` → `typecheck:piz` → root
 CLI lint → `architecture:check --changed` → `fork-tests.mjs --max-workers 2`
 (selected). On `main` pushes and manual dispatches it additionally runs
 `--full`. Superseded runs on the same ref are cancelled (`concurrency`,
-cancel-in-progress), and turbo's local cache plus `*.tsbuildinfo` are cached
-between runs, so unchanged packages replay instead of rebuilding (2026-11-16,
-issue #81: per-push cold batteries and never-installed artifacts had burned
-1,490/3,000 free-tier minutes by mid-month).
+cancel-in-progress), and turbo's local cache (`apps/zcode-cli/.turbo`) is
+cached between runs, so unchanged packages replay instead of rebuilding
+(2026-11-16, issue #81: per-push cold batteries and never-installed artifacts
+had burned 1,490/3,000 free-tier minutes by mid-month). `*.tsbuildinfo` is
+deliberately **not** cached: the root `tsc -b` dist outputs it describes are
+not in the cache, and a restored tsbuildinfo makes tsc report TS6305
+(observed in run 43939000283); turbo replays outputs together with its cache
+and is safe.
 
 `dist-runtime-<sha>` is assembled and uploaded **only on manual dispatch**
 (issue #81): a dispatched run executes every check first, so its artifact is

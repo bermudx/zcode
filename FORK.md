@@ -1342,6 +1342,13 @@ carries all patches.
   draft was wrong and is dropped); selected fork-tests correctly ran only
   the 2 always-run suites (17 tests) with `ci.yml` reported NOT COVERED.
   Caches live in Blacksmith's transparent cache layer, not the GitHub
-  caches API (`total_count: 0` there is expected). Cross-run cache restore
-  is checked on the follow-up run (this fix-up push) — result recorded
-  on the PR.
+  caches API (`total_count: 0` there is expected).
+- Follow-up run `43939000283` (`52148df8`) **failed** and proved the
+  cross-run restore works — restored `*.tsbuildinfo` without the root
+  `tsc -b` dist outputs it describes, so tsc assumed projects were built
+  and errored `TS6305` on `packages/shared/test/fixtures/fake-relay-v2.ts`.
+  Introduced by this branch; fixed on it: the cache now holds only
+  `apps/zcode-cli/.turbo` (turbo replays outputs together with its cache),
+  and the key prefix `turbo-` deliberately severs the poisoned
+  `buildstate-` entries. `*.tsbuildinfo` stays out — lesson recorded in
+  ci.yml (Chinese bug-comment rule) and verification.md.
