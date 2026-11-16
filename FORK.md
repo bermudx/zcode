@@ -195,7 +195,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh`, which refuses to run from anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `a971df4e` pair (ACP effort sync on top of `a2e129f4` ACP per-model reasoning effort), promoted 2026-11-07 from clean main after the recorded verification — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh` / `scripts/promote-piz-from-ci.sh`, both of which refuse anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `78d9ba69` pair — shipped code identical to the promoted `2dd6f16a` pair (the range is docs/tests only), promoted 2026-11-16 from the ci workflow's sha-keyed artifact after a green rerun — see [verification](docs/fork/verification.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -1279,3 +1279,35 @@ Made by GLM-5.3 via ZCode; operator brief: review the 3.17.2 sync with subagents
   BigModel resolver coverage remains in place.
 - Build, typecheck, lint, tests, push, draft PR and CI are pending; repository
   policy keeps those verification commands in CI.
+- Later: merged as PR #72 (`2dd6f16a`) with ci green; that cycle's promotion
+  installed the `2dd6f16a` pair (see the promotion entry below).
+
+### 2026-11-16 — promotion of 78d9ba69 (docs/test-only restamp, CI artifact)
+
+- Operator: "promote HEAD". HEAD = main = origin/main = `78d9ba69`; the only
+  branches not merged into main remain `feat/allowance-herdr` (parked) and
+  `lead-sidekick` (experiment). Range from the promoted `2dd6f16a`:
+  `AGENTS.md` post-promote deps note (#75), oauth spec §8 fix (#74/#77) and
+  cli spawn-marker test fixes (#73/#76) — docs and tests only, no shipped
+  code and no lockfile change (no post-promote `pnpm install` needed;
+  `core.hooksPath` verified unset).
+- First ci run on the sha (43804211371) failed one test: adapters
+  `exec.test.ts :: keeps Bash descendant enumeration out of generic argv
+  cancellation`, timeout at 5006 ms while three concurrent full suites shared
+  the Blacksmith runner capacity. The identical adapters tree passed the full
+  tier in both sibling runs (`b39214dc`, `ece320ae`) and the range touches no
+  adapters code — classified load flake, not a regression. Rerun of the
+  failed job completed green; that success (and its artifact upload) is the
+  gate evidence. Harness lesson: piping `gh run watch --exit-status` through
+  `tail` masks the exit status — the first attempt's failure was only caught
+  on the follow-up `gh run view`.
+- `promote-piz-from-ci.sh` from clean main installed artifact
+  `dist-runtime-78d9ba69a73ab6516e1b7fcfa0aec9a9e02f1bc0` (run 43804211371);
+  `PROMOTED_FROM` verified, `piz --version` → 0.17.2, tree still clean.
+  Previous pair retained at `~/piz-dist-runtime-rollback/2dd6f16a`. No push,
+  no live-core restart, no model call; the delta ships no behavior change —
+  the promotion restamps `PROMOTED_FROM` so the next `--promote-gate` diffs
+  from the right base.
+
+Made by GLM-5.3 via ZCode; operator brief: promote HEAD after confirming it
+carries all patches.
