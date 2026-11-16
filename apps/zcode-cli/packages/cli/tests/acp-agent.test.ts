@@ -651,6 +651,83 @@ test("acp agent: AskUserQuestion uses form elicitation and returns answers", asy
   assert.deepEqual(answers, [{ "Which scope?": "Repo" }]);
 });
 
+test("acp agent: ExitPlanMode sends the plan in the visible approval field", async () => {
+  const plan = "# Plan for approval\n\n- Keep **Markdown** intact.\n- Verify the change.\n\n```sh\ngit diff\n```";
+  for (const decision of ["approve", "reject"] as const) {
+    const core = new FakeCore();
+    const app = createAcpAgentApp({ sessions: core, version: "test" });
+    const results: PermissionBrokerResult[] = [];
+    let formCount = 0;
+    const testClient = client({ name: "test-client" })
+      .onRequest(methods.client.elicitation.create, ({ params }) => {
+        formCount++;
+        assert.equal(params.mode, "form");
+        if (params.mode !== "form") throw new Error("Expected an approval form");
+        assert.equal(params.message, "acp test");
+        assert.equal(params.toolCallId, "t1");
+        assert.equal(
+          params.requestedSchema.properties.decision?.description,
+          `${plan}\n\nApprove the plan to start implementing it, or reject to keep planning.`,
+        );
+        assert.deepEqual(params.requestedSchema.required, ["decision"]);
+        return { action: "accept" as const, content: { decision } };
+      })
+      .onRequest(methods.client.session.requestPermission, () => {
+        assert.fail("Plan approval must not use auto-approved tool permissions");
+      });
+    await testClient.connectWith(app, async (ctx) => {
+      await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+      const created = await ctx.request(methods.agent.session.new, {
+        cwd: "/workspace", mcpServers: [],
+      });
+      const handle = core.sessions.get(created.sessionId)!.handle;
+      handle.submitPrompt = async (_prompt, options) => {
+        results.push(
+          (await options?.requestPermission?.(
+            permissionRequest("ExitPlanMode", { plan }, created.sessionId),
+          )) as PermissionBrokerResult,
+        );
+        return { response: "" };
+      };
+      await ctx.request(methods.agent.session.prompt, {
+        prompt: [{ text: "plan", type: "text" }], sessionId: created.sessionId,
+      });
+    });
+    assert.equal(formCount, 1);
+    assert.equal(results[0]?.decision, decision === "approve" ? "allow" : "deny");
+  }
+});
+
+test("acp agent: invalid ExitPlanMode input fails before asking for approval", async () => {
+  const core = new FakeCore();
+  const app = createAcpAgentApp({ sessions: core, version: "test" });
+  let formCount = 0;
+  const testClient = client({ name: "test-client" })
+    .onRequest(methods.client.elicitation.create, () => {
+      formCount++;
+      return { action: "accept" as const, content: { decision: "approve" } };
+    });
+  await testClient.connectWith(app, async (ctx) => {
+    await ctx.request(methods.agent.initialize, { protocolVersion: 1 });
+    const created = await ctx.request(methods.agent.session.new, {
+      cwd: "/workspace", mcpServers: [],
+    });
+    core.sessions.get(created.sessionId)!.handle.submitPrompt = async (_prompt, options) => {
+      await options?.requestPermission?.(
+        permissionRequest("ExitPlanMode", {}, created.sessionId),
+      );
+      return { response: "" };
+    };
+    await assert.rejects(
+      ctx.request(methods.agent.session.prompt, {
+        prompt: [{ text: "plan", type: "text" }], sessionId: created.sessionId,
+      }),
+      /Invalid ExitPlanMode input:/,
+    );
+  });
+  assert.equal(formCount, 0);
+});
+
 test("acp agent: ExitPlanMode cannot be auto-approved without an explicit answer", async () => {
   const core = new FakeCore();
   const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
@@ -671,7 +748,7 @@ test("acp agent: ExitPlanMode cannot be auto-approved without an explicit answer
       // SendInputOptions 契约里回包是 unknown；适配层恒回 PermissionBrokerResult，单跳收窄。
       results.push(
         (await options?.requestPermission?.(
-          permissionRequest("ExitPlanMode", undefined, created.sessionId),
+          permissionRequest("ExitPlanMode", { plan: "# Plan\n\nKeep planning." }, created.sessionId),
         )) as PermissionBrokerResult,
       );
       return { response: "" };
