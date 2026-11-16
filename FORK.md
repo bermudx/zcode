@@ -55,8 +55,11 @@ Pushes are guarded locally: `push.default=nothing`, and `upstream`/`archive-sour
 have `pushurl=DISABLED`. As of 2026-11-07 `origin` (bermudi/piz.git; renamed to
 bermudx/zcode.git 2026-11-08) has push
 **enabled** and `origin/main` sits behind local `main` at `c2d393f7` — this
-differs from the guard state this file recorded before; pushes still require the
-operator's explicit go-ahead.
+differs from the guard state this file recorded before.
+Feature-branch pushes to `origin`, draft PR creation and CI are authorized parts
+of requested work; do not ask for separate approval. Pushes to `main` or other
+protected branches still require the operator's explicit go-ahead
+(clarified 2026-11-16). Merges and promotion also require operator approval.
 Do not push to upstream, force-push, rename old branches, or delete old worktrees
 as part of documentation maintenance. New carried-change commit subjects use
 `fork:`. Merge upstream into candidate branches; do not rewrite existing history.

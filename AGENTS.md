@@ -38,8 +38,11 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   `packages/*/dist/` and cannot leak into `piz`; frontend externals resolve
   to snapshots inside `dist-runtime/node_modules` (see
   `docs/fork/verification.md`). `zcode` on PATH still points to the old
-  allowance tree. Do not change wrappers, restart live cores, push,
-  publish or remove old branches/worktrees as incidental cleanup.
+  allowance tree. Feature-branch pushes, draft PRs and CI are part of requested
+  work; only pushes to `main` or other protected branches need separate approval
+  (operator clarified 2026-11-16). Merges and promotion still need approval.
+  Do not change wrappers, restart live cores, publish or remove old
+  branches/worktrees as incidental cleanup.
 - Dependency install and CLI/attach builds were first verified here on
   2026-10-23 (pinned node 24.14.0/pnpm 10.33.2; root `mise.toml` must be
   trusted or `mise exec` silently uses unpinned tools). Use pinned mise
