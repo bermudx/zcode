@@ -25,10 +25,15 @@ It owns fork direction, branch roles, active patches and maintenance policy.
 - Installed commands: since 2026-10-23 `piz` runs a matched client/core
   pair built in THIS checkout; it does not auto-update. The wrapper execs
   `apps/zcode-cli/packages/cli/dist-runtime/`, a frozen dir written only by
-  `apps/zcode-cli/scripts/promote-piz.sh` — run it after the verification
+  the official promotion scripts — run them after the verification
   matrix passes, never as part of a dev build, and only from a clean `main`
-  (the script enforces branch + cleanliness; promoting anything main lacks
-  regresses the next main-based promotion). The script does NOT build: run the
+  (the scripts enforce branch + cleanliness; promoting anything main lacks
+  regresses the next main-based promotion). For CI artifacts,
+  `promote-piz-from-ci.sh <run-id>` accepts a different build SHA only when its
+  full Git tree equals clean main; keep `PROMOTED_FROM` as the build SHA and
+  record `PROMOTED_ON`/`PROMOTED_CI_RUN`. Do not spend another full-suite run
+  solely to stamp a merge SHA. See verification.md for provenance and
+  `--repo-root`. The local-build script does NOT build: run the
   build (`docs/fork/verification.md`) after the merge, then grep `dist/` for
   the change before promoting — it will happily promote a stale `dist/`. `dist-runtime` resolves npm deps from root
   `node_modules`: after promoting a lockfile change, run
@@ -54,6 +59,9 @@ It owns fork direction, branch roles, active patches and maintenance policy.
 - Before code changes, read `.agents/skills/architecture-governance/SKILL.md`,
   run architecture checks and load controlled target context. Update the
   corresponding spec before changing behavior; add regressions and run them.
+  Pass an explicit `--base <integration-base>`: the default can select the
+  branch's own tracking ref and check an empty diff (#89). A successful empty
+  comparison is not changed-file coverage.
 - Read the session-management skill before changing session ownership, identity,
   persistence or migration. Read DESIGN.md before UI changes and relevant
   React/platform skills for the code touched.

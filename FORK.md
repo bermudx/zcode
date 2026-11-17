@@ -1374,3 +1374,30 @@ carries all patches.
   retained at `~/piz-dist-runtime-rollback/78d9ba69`.
   `release/promote-head` fast-forwarded to `92c8c465`. No push, no
   live-core restart, no model call.
+
+### 2026-11-16 — ACP plan approval promotion, reusing the tested CI artifact
+
+- Operator authorized merge/promotion of #84, then rejected paying for a
+  duplicate identical-tree artifact dispatch. Merged #84 as `a49e077d`
+  with `[skip ci]`: its whole Git tree is exactly the tree built and
+  full-tested at `6f150d75` in dispatched run `43980559348`.
+- Used the reviewed #88 promoter from its tooling checkout against clean
+  installed `main`, before the tooling-only change altered that tree.
+  `PROMOTED_FROM` remains `6f150d75`; `PROMOTED_ON=a49e077d`;
+  `PROMOTED_CI_RUN=43980559348`. No artifact relabeling or rebuild.
+- Installed files match the original CI artifact (apart from the two added
+  provenance markers); `piz --version` returns 0.17.2. The previous
+  `92c8c465` pair is retained under
+  `apps/zcode-cli/packages/cli/.dist-runtime.ci.rcBLPp.rollback/`;
+  both old bundle checksums match the pre-promotion capture.
+- #88's new tooling received its own selected CI run (`43990516821`),
+  not a second full runtime gate/artifact build. Independent verifiers
+  returned PASS+NOTES for #84 and #88. Runtime full CI included 13 bootstrap
+  tests that passed on isolated rerun, not a clean first-pass suite.
+- Actual T3 plan visibility remains unverified; the operator accepted that
+  limitation. No credentials read/copied, model call, wrapper change,
+  dependency install, live-core restart or branch deletion.
+- [Evidence and provenance](docs/fork/reports/2026-11-16-acp-plan-ci-artifact-promotion.md).
+
+Made by GPT-6.1 Sol (OpenAI, via Pi); operator request: promote the tested
+ACP plan build without another identical-tree CI artifact run.
