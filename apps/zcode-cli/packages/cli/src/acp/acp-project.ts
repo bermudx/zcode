@@ -23,6 +23,7 @@ import type { TuiPromptAttachment } from "@zcode/tui";
 import { z } from "zod";
 import {
   AskUserQuestionInputSchema,
+  ExitPlanModeInputSchema,
   TodoWriteOutputSchema,
   type AskUserQuestion,
   type AskUserQuestionOption,
@@ -381,16 +382,22 @@ export function answersFromElicitationContent(
 export const PLAN_APPROVAL_DECISION_KEY = "decision";
 
 /** ExitPlanMode → 批准/拒绝。Auto/Full 的自动批准只可能落在显式选项上，不会静默跳过。 */
-export function buildPlanApprovalForm(reason: string): {
+export function buildPlanApprovalForm(input: unknown, reason: string): {
   message: string;
   requestedSchema: ElicitationSchema;
 } {
+  const parsed = ExitPlanModeInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new Error("Invalid ExitPlanMode input: expected a nonempty plan within the plan size limit");
+  }
+  // T3 的审批面板展示字段 description，不展示顶层 message；计划正文必须随决策字段下发。
+  const description = `${parsed.data.plan}\n\nApprove the plan to start implementing it, or reject to keep planning.`;
   return {
     message: reason.length > 0 ? reason : "Approve this plan?",
     requestedSchema: {
       properties: {
         [PLAN_APPROVAL_DECISION_KEY]: {
-          description: "Approve the plan to start implementing it, or reject to keep planning.",
+          description,
           enum: ["approve", "reject"],
           title: "Plan approval",
           type: "string",

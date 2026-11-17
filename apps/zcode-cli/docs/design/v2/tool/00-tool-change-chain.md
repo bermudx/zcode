@@ -1,5 +1,16 @@
 # Tool Change Chain Spec
 
+## ACP ExitPlanMode 计划正文（issue #83）
+
+`ExitPlanMode` 的权威 `input.plan` → 既有 interaction broker → attach 反向请求
+→ ACP `buildPlanApprovalForm`：用共享 `ExitPlanModeInputSchema` 校验后，把完整原文
+放在决策字段 `description`，排在批准/拒绝说明之前。T3 已报告的表单只显示字段说明，
+不能只靠顶层 `message` 或 `rawInput` 展示计划。缺失、空白、类型错误或超限输入不发审批表单。
+不增加 transcript 消息或第二份计划状态；工具 schema、模型描述、权限、执行、事件、
+V4/桌面/手机投影、持久化与显式批准语义均不变。回归覆盖 Markdown 原文、长度上限、
+非法输入、SDK 线上表单与批准/拒绝/decline。完整合同见根目录
+`docs/design/v2/acp-frontend.md`「Plan approval content」；实际 T3 视觉验收仍待完成。
+
 ## ACP client-supplied MCP（issue #31）
 
 ACP `mcpServers` → shared protocol schema → session runtime 的显式 MCP override →

@@ -290,7 +290,7 @@ not hand-copied per call site.
 | Workspaces | one lazy `AttachRuntime` + socket client per `cwd`; sessions are per-cwd but share that lane. All lanes converge on the single shared core: the socket endpoint is derived from the data root only, never from `cwd`/workspace identity (2026-11-08 single-core consolidation); workspace refs still travel in every `session/create`/`session/resume`/`session/list` so per-session isolation is unchanged |
 | Permissions | `session/request_permission`; `allow_once` / `allow_always` (only when core suggests permission updates) / `reject_once`; answer is the core option's `response` |
 | `AskUserQuestion` | form elicitation: one string property per question, single-select as `enum`, multi-select as comma-separated text; answers are keyed by question text |
-| `ExitPlanMode` | form elicitation with an explicit `approve` / `reject` enum; Auto/Full cannot silently approve a plan because the client must return a decision |
+| `ExitPlanMode` | form elicitation with the complete `input.plan` in the decision field's description and an explicit `approve` / `reject` enum; Auto/Full cannot silently approve a plan because the client must return a decision |
 | Modes | `plan` and `build`; any other core mode projects as `build` |
 | Models | `session/set_config_option` with `configId: "model"`, values `provider/model`; `config_option_update` on model change |
 | Reasoning effort | `session/set_config_option` with `configId: "thought_level"`, category `thought_level`; select choices come from the **current model's** `reasoning.levels` in `settings.model.available` (never the unioned `thoughtLevel.available`); `currentValue` falls back `thoughtLevel.current` → `thoughtLevel.defaultLevel` → model `reasoning.defaultLevel` → first level. The option is omitted when effort is disabled or the current model advertises no levels. The setter response returns the full `configOptions`; a model switch reprojects effort choices through the existing `config_option_update` lane. Effort changes made by other clients reach the handle through `state.updated` → `applyStatePatch`, which emits `model_selected` when the model selection **or** `thoughtLevel.current` changes; the agent then pushes `config_option_update` rebuilt from the live snapshot. Changes this connection made itself (in-flight `session/set_config_option`) are not pushed again: the response already carries the confirmed options. After a model switch the attach client sends the target model's `reasoning.defaultLevel`, and the core snapshot drops any `thoughtLevel.current` not listed for the current model, so no stale level is kept |
@@ -299,6 +299,22 @@ not hand-copied per call site.
 | Files/terminals | core executes them; `fs/*` and `terminal/*` are neither advertised nor used |
 | Auth | outside ACP: existing `piz login`; no `authMethods` advertised |
 | Disconnect | detach — core sessions survive; the ACP connection only unregisters its sinks |
+
+### Plan approval content
+
+The core's `ExitPlanMode` input is the sole authority for the plan under review.
+The ACP adapter validates it with `ExitPlanModeInputSchema` and preserves the full
+plan string, including Markdown and whitespace, in the approval field's
+`description`, before the approval instructions. Do not rely on the elicitation's
+top-level `message`: the reported T3 approval panel shows the field description,
+but not that message. The reason remains the form's top-level message; it is not
+a substitute for the plan.
+
+This is a pure projection of the existing reverse request, not a new transcript
+message, saved plan, checklist update or approval state. Invalid/missing plans
+fail before an approval form is sent. Approval, rejection, decline and cancellation
+keep their existing response mapping. No core protocol, ownership or event-order
+change is needed.
 
 ## Spike results (T3 Code 0.1.6)
 

@@ -385,10 +385,12 @@ test("questions: malformed core input fails loudly before creating an elicitatio
 });
 
 test("plan approval: explicit approve/reject only", () => {
-  const form = buildPlanApprovalForm("Do the thing");
+  const plan = "# Implementation\n\n1. Update the adapter.\n2. Add a regression.\n\n```ts\nconst ready = true;\n```";
+  const form = buildPlanApprovalForm({ plan }, "Do the thing");
+  assert.equal(form.message, "Do the thing");
   assert.deepEqual(form.requestedSchema.properties?.decision, {
     description:
-      "Approve the plan to start implementing it, or reject to keep planning.",
+      `${plan}\n\nApprove the plan to start implementing it, or reject to keep planning.`,
     enum: ["approve", "reject"],
     title: "Plan approval",
     type: "string",
@@ -396,6 +398,23 @@ test("plan approval: explicit approve/reject only", () => {
   assert.deepEqual(planApprovalResult({ decision: "approve" }), { decision: "allow" });
   assert.equal(planApprovalResult({ decision: "reject" }).decision, "deny");
   assert.equal(planApprovalResult({}).decision, "deny");
+});
+
+test("plan approval: preserves the full plan at the size limit, including whitespace", () => {
+  const plan = `\n# Plan\n${"x".repeat(19_990)}\n\n`;
+  assert.equal(plan.length, 20_000);
+  const form = buildPlanApprovalForm({ plan }, "");
+  assert.equal(form.message, "Approve this plan?");
+  assert.equal(
+    form.requestedSchema.properties?.decision?.description,
+    `${plan}\n\nApprove the plan to start implementing it, or reject to keep planning.`,
+  );
+});
+
+test("plan approval: invalid plans cannot produce an approval form", () => {
+  for (const input of [undefined, {}, { plan: "" }, { plan: " \n " }, { plan: 42 }, { plan: "x".repeat(20_001) }]) {
+    assert.throws(() => buildPlanApprovalForm(input, "Approve?"), /Invalid ExitPlanMode input:/);
+  }
 });
 
 test("tool kinds map to ACP categories", () => {

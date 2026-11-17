@@ -763,7 +763,7 @@ async function approvePlan(
   request: PermissionBrokerRequest,
   signal?: AbortSignal,
 ): Promise<PermissionBrokerResult> {
-  const form = buildPlanApprovalForm(request.reason ?? "");
+  const form = buildPlanApprovalForm(request.input, request.reason ?? "");
   const response = await client.request(
     methods.client.elicitation.create,
     {
