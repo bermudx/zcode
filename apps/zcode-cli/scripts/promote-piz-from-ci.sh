@@ -76,7 +76,7 @@ ART="dist-runtime-$BUILD_SHA"
 echo "promote-piz-from-ci: verified build=$BUILD_SHA main=$SHA tree=$MAIN_TREE run=$RUN_ID" >&2
 
 DST="$CLI_PKG/dist-runtime"
-TMP="$(mktemp -d "$CLI_PKG/.dist-runtime-ci.XXXXXX")"
+TMP="$(mktemp -d "$CLI_PKG/.dist-runtime.ci.XXXXXX")"
 echo "promote-piz-from-ci: staging at $TMP (retained on failure)" >&2
 
 gh run download "$RUN_ID" --repo "$GH_REPO" --name "$ART" --dir "$TMP" ||
