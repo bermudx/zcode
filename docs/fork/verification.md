@@ -31,13 +31,38 @@ green cache-replayed build; pinned by cli `tests/turbo-build-outputs.test.mjs`).
 `dist-runtime-<sha>` is assembled and uploaded **only on manual dispatch**
 (issue #81): a dispatched run executes every check first, so its artifact is
 itself the gate evidence for the sha it uploads. Push runs — `main` included —
-build nothing installable. Before `promote-piz-from-ci.sh`, dispatch the
-workflow on the current `main` HEAD and let it finish green.
+build nothing installable. Dispatch once on the candidate and let it finish green.
+A merge-only commit does not require another dispatch when the candidate's full
+Git tree is identical to clean `main`.
 
-`sh apps/zcode-cli/scripts/promote-piz-from-ci.sh [run-id]` installs that
-artifact for the current clean `main` HEAD — same branch/cleanliness gates,
-atomic swap and `PROMOTED_FROM` semantics as `promote-piz.sh`. Artifacts exist
-only for dispatched shas; non-main shas can never install (sha ≠ main HEAD).
+`sh apps/zcode-cli/scripts/promote-piz-from-ci.sh [run-id] [--repo-root <path>]`
+installs a verified artifact into clean `main`. Without a run id it looks for a
+successful run on that exact `HEAD`; pass the already-tested candidate's run id
+to reuse its artifact after merging.
+
+The promoter verifies the run through GitHub: completed, successful,
+`workflow_dispatch`, and `.github/workflows/ci.yml` in `bermudx/zcode`. It reads
+the build SHA from that run, requires its commit object locally, and compares
+the **entire Git tree** with the target `main` tree. Any changed file or dependency
+manifest rejects reuse; matching only runtime paths is not sufficient. Artifact
+name and embedded `PROMOTED_FROM` must match the actual build SHA, never a
+replacement main SHA. Required matched client/core and frontend files must exist.
+The target branch, tracked cleanliness and HEAD are checked again after download.
+
+`PROMOTED_FROM` stays the actual build commit (also the next promote-gate base).
+The promoter adds `PROMOTED_ON` for target `main` and `PROMOTED_CI_RUN` for the
+source run. It stages on the destination filesystem, retains the previous
+installed directory as a printed rollback path, and restores it if the final
+rename fails. Failed staging directories are retained for diagnosis, not deleted.
+Diagnostics go to stderr; no live core is restarted.
+
+`--repo-root` permits running reviewed promotion tooling from another checkout
+against the installed checkout. All source-tree and branch gates apply to the
+**target**, not the tooling checkout. This permits promoting an identical tested
+tree before a tooling-only PR changes `main`; it is not a dirty-main bypass.
+Merge commits whose tree was already verified may use `[skip ci]` in the merge
+message, with the successful source run and tree comparison recorded on the PR.
+New code still needs its own CI evidence; tree equality never replaces that.
 
 `.github/workflows/allowance-build.yml` is manual-only: it builds a chosen
 allowance ref (default `feat/allowance-herdr`, must be pushed to origin),
