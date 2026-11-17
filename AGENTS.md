@@ -59,6 +59,9 @@ It owns fork direction, branch roles, active patches and maintenance policy.
 - Before code changes, read `.agents/skills/architecture-governance/SKILL.md`,
   run architecture checks and load controlled target context. Update the
   corresponding spec before changing behavior; add regressions and run them.
+  Pass an explicit `--base <integration-base>`: the default can select the
+  branch's own tracking ref and check an empty diff (#89). A successful empty
+  comparison is not changed-file coverage.
 - Read the session-management skill before changing session ownership, identity,
   persistence or migration. Read DESIGN.md before UI changes and relevant
   React/platform skills for the code touched.
