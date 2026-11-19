@@ -337,7 +337,7 @@ test("acp agent: session/new exposes plan/build and a model config option", asyn
   });
 });
 
-test("acp agent: new and resume advertise the thought_level config option", async () => {
+test("acp agent: new and resume advertise inactive model effort before any model switch", async () => {
   const core = new FakeCore();
   const app = createAcpAgentApp({ sessions: core, version: "1.2.3" });
   await clientApp(() => "", () => ({ action: "decline" })).connectWith(app, async (ctx) => {
@@ -349,6 +349,32 @@ test("acp agent: new and resume advertise the thought_level config option", asyn
     const effortOf = (
       configOptions: readonly SessionConfigOption[] | null | undefined,
     ) => configOptions?.find((option) => option.id === "thought_level");
+    const discovery = {
+      availableModels: [
+        {
+          _meta: {
+            reasoningEffort: "high",
+            reasoningEfforts: [
+              { label: "Low", value: "low" },
+              { label: "High", value: "high" },
+            ],
+          },
+          modelId: "zhipu/glm-5",
+          name: "GLM-5",
+        },
+        {
+          _meta: {
+            reasoningEffort: "max",
+            reasoningEfforts: [{ label: "Max", value: "max" }],
+          },
+          modelId: "zhipu/glm-4",
+          name: "GLM-4",
+        },
+      ],
+      currentModelId: "zhipu/glm-5",
+    };
+    assert.ok("models" in created);
+    assert.deepEqual(created.models, discovery);
     const advertised = effortOf(created.configOptions);
     assert.equal(advertised?.type, "select");
     if (advertised?.type === "select") {
@@ -362,6 +388,8 @@ test("acp agent: new and resume advertise the thought_level config option", asyn
       cwd: "/workspace",
       sessionId: "sess_resumed",
     });
+    assert.ok("models" in resumed);
+    assert.deepEqual(resumed.models, discovery);
     assert.equal(effortOf(resumed.configOptions)?.type, "select");
   });
 });

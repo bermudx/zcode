@@ -9,11 +9,9 @@ import {
   type AgentApp,
   type AgentContext,
   type ContentBlock,
-  type NewSessionResponse,
   type PermissionOption,
   type PromptResponse,
   type RequestPermissionResponse,
-  type ResumeSessionResponse,
   type SessionConfigOption,
   type SessionUpdate,
 } from "@agentclientprotocol/sdk";
@@ -32,6 +30,7 @@ import {
   answersFromElicitationContent,
   buildConfigOptions,
   buildModeState,
+  buildModelState,
   buildPlanApprovalForm,
   buildQuestionForm,
   coreModeToAcpMode,
@@ -232,11 +231,14 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     return session;
   };
 
-  const sharedOptions = (session: AcpSession): NewSessionResponse => ({
-    configOptions: configOptionsFor(session),
-    modes: buildModeState(session.handle.getMode()),
-    sessionId: session.handle.sessionId,
-  });
+  const sharedOptions = (session: AcpSession) => {
+    const models = buildModelState(session.handle.snapshot.settings.model);
+    return {
+      configOptions: configOptionsFor(session),
+      modes: buildModeState(session.handle.getMode()),
+      ...(models ? { models } : {}),
+    };
+  };
 
   /**
    * 会话建立后广播命令面。必须让 session/new|resume 的响应先落线再发这条
@@ -328,7 +330,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     const session = await options.sessions.open(params.cwd, mcpServers);
     bindSession(client, session);
     advertiseCommands(client, session);
-    return sharedOptions(session);
+    return { ...sharedOptions(session), sessionId: session.handle.sessionId };
   });
 
   app.onRequest(methods.agent.session.resume, async ({ client, params }) => {
@@ -348,11 +350,7 @@ export function createAcpAgentApp(options: AcpAgentOptions): AgentApp {
     });
     bindSession(client, session);
     advertiseCommands(client, session);
-    const response: ResumeSessionResponse = {
-      configOptions: configOptionsFor(session),
-      modes: buildModeState(session.handle.getMode()),
-    };
-    return response;
+    return sharedOptions(session);
   });
 
   app.onRequest(methods.agent.session.close, async ({ params }) => {

@@ -13,6 +13,7 @@ import {
   answersFromElicitationContent,
   buildConfigOptions,
   buildModeState,
+  buildModelState,
   buildPlanApprovalForm,
   buildQuestionForm,
   coreModeToAcpMode,
@@ -94,7 +95,7 @@ test("modes: only plan is distinct, everything else is build", () => {
 });
 
 test("model config option: current ref and enabled models only", () => {
-  const options = buildConfigOptions({
+  const settings = {
     available: [
       {
         label: "GLM-5",
@@ -107,6 +108,17 @@ test("model config option: current ref and enabled models only", () => {
       },
     ],
     current: { modelId: "glm-5", providerId: "zhipu" },
+  };
+  const options = buildConfigOptions(settings);
+  assert.deepEqual(buildModelState(settings), {
+    availableModels: [
+      {
+        _meta: { supportsReasoningEffort: false },
+        modelId: "zhipu/glm-5",
+        name: "GLM-5",
+      },
+    ],
+    currentModelId: "zhipu/glm-5",
   });
   assert.equal(options.length, 1);
   const option = options[0];
@@ -123,6 +135,24 @@ test("model config option: current ref and enabled models only", () => {
 const reasoning = (values: string[], defaultLevel?: string) => ({
   defaultLevel,
   levels: values.map((value) => ({ label: value.toUpperCase(), value })),
+});
+
+test("model discovery omits an invalid default instead of advertising a stale level", () => {
+  const models = buildModelState({
+    available: [
+      {
+        label: "GLM-5",
+        reasoning: reasoning(["low", "high"], "max"),
+        ref: { modelId: "glm-5", providerId: "zhipu" },
+      },
+    ],
+  });
+  assert.deepEqual(models?.availableModels[0]?._meta, {
+    reasoningEfforts: [
+      { label: "LOW", value: "low" },
+      { label: "HIGH", value: "high" },
+    ],
+  });
 });
 
 test("thought level config: current model reasoning drives choices, not the union", () => {

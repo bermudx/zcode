@@ -69,6 +69,20 @@ export interface CoreModelSettings {
   available: readonly CoreModelOption[];
 }
 
+type AcpModelReasoningMetadata =
+  | { supportsReasoningEffort: false }
+  | { reasoningEfforts: Array<{ value: string; label: string }>; reasoningEffort?: string };
+
+interface AcpModelState {
+  currentModelId: string;
+  availableModels: Array<{
+    modelId: string;
+    name: string;
+    description?: string;
+    _meta: AcpModelReasoningMetadata;
+  }>;
+}
+
 /** 与 core `@zcode/contracts` 的 PermissionBrokerResult 同形的本地最小面。 */
 export type AcpPermissionResult =
   | { decision: "allow"; permissionUpdates?: unknown; reason?: string }
@@ -114,6 +128,32 @@ export function modelValue(selection: CoreModelRef | undefined): string | undefi
 
 function enabledModels(settings: CoreModelSettings): CoreModelOption[] {
   return settings.available.filter((option) => !option.disabledReason);
+}
+
+/** T3 从旧版 models 字段读取非当前模型的档位；切换仍走标准 config option。 */
+export function buildModelState(settings: CoreModelSettings): AcpModelState | undefined {
+  const availableModels = enabledModels(settings).map(
+    ({ ref, label, description, reasoning }): AcpModelState["availableModels"][number] => {
+      const levels = reasoning?.levels ?? [];
+      const defaultLevel = levels.find((level) => level.value === reasoning?.defaultLevel)?.value;
+      return {
+        modelId: modelValue(ref) ?? ref.modelId,
+        name: label,
+        ...(description !== undefined ? { description } : {}),
+        _meta: levels.length === 0
+          ? { supportsReasoningEffort: false }
+          : {
+              reasoningEfforts: levels.map(({ value, label }) => ({ value, label })),
+              ...(defaultLevel !== undefined ? { reasoningEffort: defaultLevel } : {}),
+            },
+      };
+    },
+  );
+  if (availableModels.length === 0) return undefined;
+  return {
+    availableModels,
+    currentModelId: modelValue(settings.current) ?? availableModels[0]!.modelId,
+  };
 }
 
 /** ACP 的模型选择走通用 config option（category=model），T3 的模型选择器就吃这一项。 */
