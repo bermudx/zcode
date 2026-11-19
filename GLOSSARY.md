@@ -1,6 +1,8 @@
 # Glossary
 
 - **piz** — This maintained ZCode fork and its installed CLI command.
+- **dist-runtime** — The frozen runtime directory `apps/zcode-cli/packages/cli/dist-runtime/` that the installed `piz` wrapper execs. Only the promotion scripts write it; it carries the PROMOTED_* markers.
+- **dispatch run** — A manual (`workflow_dispatch`) run of the `ci` workflow. The only run kind that assembles and uploads a `dist-runtime` artifact.
 - **PROMOTED_FROM** — Installed runtime marker containing the original build commit, never relabeled to a later merge commit.
 - **PROMOTED_ON** — Installed runtime marker containing the clean `main` commit whose Git tree was checked against the build at promotion time.
 - **PROMOTED_CI_RUN** — Installed runtime marker containing the successful CI run that supplied the promoted artifact.
