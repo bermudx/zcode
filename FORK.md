@@ -198,11 +198,17 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh` / `scripts/promote-piz-from-ci.sh`, both of which refuse anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `92c8c465` pair — ACP image-prompt forwarding (`patch/acp-image-input`, #80) plus the ci runner-minute cuts (#82/#81), promoted 2026-11-16 from the ci workflow's sha-keyed artifact (dispatch run 43942275993, green first pass) — see [verification](docs/fork/verification.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh` / `scripts/promote-piz-from-ci.sh`, both of which refuse anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `f3f79f79` pair — ACP plan approval visibility (#84), browser-client turbo output declaration (#85), the reviewed tree-identical artifact promoter (#88) and inactive-ACP-model effort advertising (#91), promoted 2026-11-19 from the ci workflow's sha-keyed artifact (dispatch run 44453919307 on `main`, green first pass) — see [verification](docs/fork/verification.md) and the [promotion policy](docs/fork/promotion.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
 **do not use it to update piz**.
+
+**Build/promote flow and runner budget (2026-11-19):** single-page policy in
+[docs/fork/promotion.md](docs/fork/promotion.md) — dispatch `ci` on `main`
+only, one dispatch per promotion, promote the green artifact, reuse
+tree-identical artifacts instead of re-dispatching, and respect the Blacksmith
+3000 runner-min/month ceiling (measured Nov 1–19: ~850 min; failures were 43%).
 
 **Promotion policy (2026-10-24):** promote only from a clean `main`, never
 from patch branches — `promote-piz.sh` refuses otherwise. A branch-only
@@ -1401,3 +1407,31 @@ carries all patches.
 
 Made by GPT-6.1 Sol (OpenAI, via Pi); operator request: promote the tested
 ACP plan build without another identical-tree CI artifact run.
+
+### 2026-11-19 — promotion of f3f79f79 (ACP plan visibility + effort advertising, CI artifact)
+
+- Operator: promote merged #91 "from CI, from main". The PR's push run
+  (44449003054 on `808e4450`) uploads no artifact by design (#81), and a
+  first dispatch on the PR branch was cancelled after ~8 min when the
+  operator chose main-only dispatch. Dispatch `44453919307` on `main` went
+  green first pass (all checks plus selected and `--full` fork-test tiers).
+- `promote-piz-from-ci.sh 44453919307` from clean main installed
+  `dist-runtime-f3f79f790fc649264f955db18a553e31a282e448`:
+  `PROMOTED_FROM`/`PROMOTED_ON` = `f3f79f79`, `PROMOTED_CI_RUN` = 44453919307;
+  `piz --version` → 0.17.2; freshness grep `reasoningEffort` ×2 in
+  `zcode-attach.cjs`, ×19 in `zcode.cjs`; tree clean, `core.hooksPath` unset.
+  Previous pair retained at
+  `apps/zcode-cli/packages/cli/.dist-runtime.ci.5MHP1d.rollback/`.
+- No lockfile/dependency-manifest change since the promoted `92c8c465` (the
+  cli `package.json` dependency block was only reordered; the test list grew)
+  — no post-promote `pnpm install`.
+- Added [docs/fork/promotion.md](docs/fork/promotion.md): the build/promote
+  decision table, promote procedure, artifact-reuse rule and Blacksmith
+  runner-budget rules (measured 2026-11-01..19: 100 ci runs ≈ 850 min;
+  failures 43 %, clustered Nov 9–16; dispatches ≈ 95 min total).
+  verification.md's ambiguous "dispatch once on the candidate" wording is
+  corrected to dispatch-on-`main`; GLOSSARY defines `dist-runtime` and
+  `dispatch run`; AGENTS.md and FORK.md point at the policy.
+- Not exercised live (unchanged from #91's open item): the T3 picker showing
+  the advertised effort choices for an inactive model. No model call, no
+  live-core restart, no wrapper change.

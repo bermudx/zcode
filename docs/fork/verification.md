@@ -31,9 +31,12 @@ green cache-replayed build; pinned by cli `tests/turbo-build-outputs.test.mjs`).
 `dist-runtime-<sha>` is assembled and uploaded **only on manual dispatch**
 (issue #81): a dispatched run executes every check first, so its artifact is
 itself the gate evidence for the sha it uploads. Push runs — `main` included —
-build nothing installable. Dispatch once on the candidate and let it finish green.
-A merge-only commit does not require another dispatch when the candidate's full
-Git tree is identical to clean `main`.
+build nothing installable. Dispatch once on `main`, after merge, when the
+operator asked to promote; do not dispatch a patch branch to build a promotable
+artifact. Procedure, decision table and the Blacksmith runner-budget rules live
+in [promotion.md](promotion.md). A merge-only commit does not require another
+dispatch when the already-dispatched candidate's full Git tree is identical to
+clean `main`.
 
 `sh apps/zcode-cli/scripts/promote-piz-from-ci.sh [run-id] [--repo-root <path>]`
 installs a verified artifact into clean `main`. Without a run id it looks for a

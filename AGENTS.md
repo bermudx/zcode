@@ -32,7 +32,9 @@ It owns fork direction, branch roles, active patches and maintenance policy.
   `promote-piz-from-ci.sh <run-id>` accepts a different build SHA only when its
   full Git tree equals clean main; keep `PROMOTED_FROM` as the build SHA and
   record `PROMOTED_ON`/`PROMOTED_CI_RUN`. Do not spend another full-suite run
-  solely to stamp a merge SHA. See verification.md for provenance and
+  solely to stamp a merge SHA. Build/promote policy (dispatch `ci` on `main`
+  only, one dispatch per promotion, Blacksmith budget rules):
+  `docs/fork/promotion.md`. See verification.md for provenance and
   `--repo-root`. The local-build script does NOT build: run the
   build (`docs/fork/verification.md`) after the merge, then grep `dist/` for
   the change before promoting — it will happily promote a stale `dist/`. `dist-runtime` resolves npm deps from root
