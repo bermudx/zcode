@@ -300,6 +300,23 @@ not hand-copied per call site.
 | Auth | outside ACP: existing `piz login`; no `authMethods` advertised |
 | Disconnect | detach — core sessions survive; the ACP connection only unregisters its sinks |
 
+### Reasoning effort before the first prompt
+
+`session/new` and `session/resume` include the legacy ACP v1 `models` field
+that T3 accepts for model discovery. It uses the same enabled models and
+`provider/model` IDs as the standard `model` config option. Each model's
+`_meta` advertises its own `reasoningEfforts` (`value` and `label`) and
+`reasoningEffort` (the model default, when valid). A model with no levels
+advertises `supportsReasoningEffort: false`.
+
+This lets T3 list Flash's choices in a fresh catalog while GLM-5.3 is
+active, without switching models or sending a prompt. The core snapshot is
+the only source; the adapter adds no discovery requests or state. The
+standard `model` and `thought_level` config options still own selection
+and report the active values. T3 uses the active `thought_level` control as
+the template for the advertised per-model choices; if the active model has
+no such control, T3 may still need to observe a reasoning-capable session.
+
 ### Plan approval content
 
 The core's `ExitPlanMode` input is the sole authority for the plan under review.
