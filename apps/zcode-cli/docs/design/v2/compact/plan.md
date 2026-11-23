@@ -192,8 +192,10 @@ shouldCompact = activeTokenEstimate >= autoThreshold
   `contextWindow` 是两个字段**：`contextWindow` 是"覆盖"（会替换模型窗口，测试与
   host 配置在用），不能表达 `min(cap, model)`；cap 只能收紧，不能放大。
 - 有效窗口 = `min(contextWindowCap, contextWindow ?? 模型窗口)`；`contextWindowCap`
-  缺失/非正 = 与之前完全一致。阈值公式不变：
-  `window − min(maxOutputTokens, 21_000) − 13_000`（262_000 → 约 228K）。
+  缺失/非正时使用上游模型窗口。输出预留与摘要上限按同一个有效窗口计算：
+  `min(maxOutputTokens ?? 32_000, max(21_000, floor(window × 0.08)))`。
+  默认阈值仍为 `window − 输出预留 − 13_000`（262_000 → 228K；不设 cap 的 1M
+  窗口在默认输出预算下 → 955K）。
   `shouldAutoCompact`/`getEffectiveContextWindowSize`/`getAutoCompactThreshold` 与
   microcompact 阈值（由 full-compact 阈值推导）全部经同一个 `resolveCompactContextWindow`。
 - **只影响压缩决策**。不改变 provider 请求限制、preflight 预算、模型目录里的

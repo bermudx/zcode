@@ -241,6 +241,7 @@ export class AgentRuntime {
   /** client 注入 MCP：期望/已生效声明；undefined desired = 未注入过。 */
   private mcpDesiredServers?: Record<string, McpServerConfig>;
   private mcpClientAttached = true;
+  private mcpClientConnectAbort = new AbortController();
   private mcpReconnectNeeded = false;
   private mcpAttachEpoch = 0;
   private mcpApplyTail: Promise<void> = Promise.resolve();

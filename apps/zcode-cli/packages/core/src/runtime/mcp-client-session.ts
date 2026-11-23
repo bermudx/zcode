@@ -6,7 +6,11 @@ import type {
   McpServerConfig,
 } from "@zcode/contracts";
 import { mcpConfigKey } from "@zcode/contracts";
-import { createMcpSession, type McpSession } from "../mcp/runtime/session.js";
+import {
+  createMcpSession,
+  type McpSession,
+  type McpSessionConfigurationSource,
+} from "../mcp/runtime/session.js";
 import { isBorrowedMcpPort } from "../subagent/borrowed-mcp-port.js";
 import type { AgentRuntimeInternal } from "./internal.js";
 import type { AgentRuntimeConfig } from "./types.js";
@@ -39,7 +43,7 @@ export interface McpClientConfigSource {
    * 交给 McpSession 的配置源 view。session.close() 只释放这个 view；override 状态留给
    * 显式清空之后迟到补建的下一个 session。
    */
-  view(): McpConfigurationSource;
+  view(): McpSessionConfigurationSource;
   /**
    * 落挂起标志与 client 声明，并同步通知订阅者。快照身份没变时不通知，返回 false。
    * override 省略 = 沿用当前声明；undefined = 从未声明，继续透传 base。
@@ -56,24 +60,9 @@ export interface McpClientConfigSource {
 function configurationKey(configuration: Configuration): string {
   return mcpConfigKey({
     enabled: configuration.enabled !== false,
-    servers: configuration.servers ?? {},
+    servers: configuration.servers,
     trustedOfficialCuaServerNames: configuration.trustedOfficialCuaServerNames ?? [],
   });
-}
-
-/**
- * view 对外的完整快照。runtime 内部按 Partial 记录（create 时的 config.mcp 可以没有 enabled），
- * McpConfigurationSource 契约要求字段齐全：缺省即「启用、无 server」，与上游 McpSession 对
- * `{}` 的读法一致。
- */
-function fullSnapshot(configuration: Configuration): McpConfigurationSnapshot {
-  return {
-    enabled: configuration.enabled !== false,
-    servers: configuration.servers ?? {},
-    ...(configuration.trustedOfficialCuaServerNames
-      ? { trustedOfficialCuaServerNames: configuration.trustedOfficialCuaServerNames }
-      : {}),
-  };
 }
 
 export function createMcpClientConfigSource(
@@ -97,7 +86,7 @@ export function createMcpClientConfigSource(
     view() {
       const own = new Set<() => void>();
       return {
-        getSnapshot: () => fullSnapshot(snapshot()),
+        getSnapshot: () => snapshot(),
         subscribe(listener) {
           own.add(listener);
           listeners.add(listener);
@@ -143,6 +132,13 @@ function clientMcpConnectOptions(runtime: AgentRuntimeInternal): McpConnectOptio
   };
 }
 
+function clientMcpConnectSignal(runtime: AgentRuntimeInternal): AbortSignal {
+  // 挂起的空快照必须能排队收口，不能继承被取消的旧 attachment。
+  return runtime.mcpClientAttached
+    ? AbortSignal.any([runtime.shutdownSignal, runtime.mcpClientConnectAbort.signal])
+    : runtime.shutdownSignal;
+}
+
 /**
  * 本 runtime 的 McpSession（上游构造期内联的装配）。配置源是 client override 源的 view，
  * 构造期与迟到注入补建走同一份装配。
@@ -155,6 +151,7 @@ export function createRuntimeMcpSession(runtime: AgentRuntimeInternal, port: Mcp
     source: runtime.mcpClientSource?.view(),
     catalog: runtime.isRemoteWorkspace() ? undefined : runtime.mcpToolCatalogPort,
     connectOptions: clientMcpConnectOptions(runtime),
+    resolveConnectSignal: () => clientMcpConnectSignal(runtime),
     logger: runtime.logger,
     trackStartup: (promise) => runtime.trackResidencyBlockingWork(promise),
   });
@@ -280,12 +277,14 @@ export async function setMcpClientAttached(
   this.mcpReconnectNeeded = true;
   this.mcpAttachEpoch += 1;
   if (attached) {
+    this.mcpClientConnectAbort = new AbortController();
     // adoption：等挂起的 teardown 收尾（suspend 排在 apply tail 上），回合边界补连。
     await this.mcpApplyTail;
     return;
   }
-  // detach：同步发布挂起快照。session 立即把连接收敛到空集——在飞的 client connect
-  // 当场作废，而不是留在池里等连接超时（评审 R3）；迟到的完成由 session 的代次丢弃。
+  // 信任层串行处理配置；先取消旧 attachment 的握手等待，否则空快照排在它后面。
+  // 连接仍由 session/port 按空快照释放，不中止整轮或其他租约。
+  this.mcpClientConnectAbort.abort(new Error("MCP client detached"));
   this.mcpClientSource?.update({ suspended: true });
   const suspend = this.mcpApplyTail.then(async () => {
     // 等 owner 收敛完成：session 隔离的 stdio 子进程在 pool 里等到真实退出才返回。
@@ -331,6 +330,7 @@ async function retryClientMcpConnections(
     await port.connectConfiguredServers(desired, {
       ...clientMcpConnectOptions(runtime),
       revalidate: true,
+      signal: clientMcpConnectSignal(runtime),
     });
     return true;
   } catch (error) {
@@ -356,12 +356,13 @@ async function performClientMcpApply(this: AgentRuntimeInternal): Promise<void> 
   const declared = this.mcpDesiredServers;
   // 回合边界的 no-op：没有暂存的声明、也没有补连欠账时不碰 session——initializeMcp 会等
   // startup，整轮边界不能替上游的 background 启动策略等连接。
+  const applied = this.config.mcp?.servers;
   const nothingStaged =
-    declared === undefined || sameMcpDeclaration(declared, this.config.mcp?.servers ?? {});
+    declared === undefined || (applied !== undefined && sameMcpDeclaration(declared, applied));
   if (nothingStaged && !this.mcpReconnectNeeded) return;
   // create 时声明的会话（session/create 的 mcpServers 落在 config.mcp，没有暂存声明）欠
   // 补连时按生效配置补连。
-  const desired = declared ?? this.config.mcp?.servers;
+  const desired = declared ?? applied;
   const epoch = this.mcpAttachEpoch;
   const attached = this.mcpClientAttached;
   const wantsConnections = attached && desired !== undefined && Object.keys(desired).length > 0;

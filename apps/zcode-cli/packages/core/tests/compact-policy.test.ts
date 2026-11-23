@@ -347,9 +347,10 @@ describe("per-session context window cap", () => {
     const config = { contextWindow: 1_000_000, contextWindowCap: 262_000, maxOutputTokens: 32_000 };
     // reserve = min(32K, 21K) = 21K; threshold = 262K - 21K - 13K
     expect(resolveCompactContextWindow(config)).toBe(262_000);
+    expect(getAutoCompactOutputReserveTokens(config)).toBe(21_000);
     expect(getEffectiveContextWindowSize(config)).toBe(241_000);
     expect(getAutoCompactThreshold(config)).toBe(228_000);
-    expect(getAutoCompactThreshold({ ...config, contextWindowCap: undefined })).toBe(966_000);
+    expect(getAutoCompactThreshold({ ...config, contextWindowCap: undefined })).toBe(955_000);
   });
 
   it("never raises a smaller model window", () => {
@@ -394,4 +395,3 @@ describe("per-session context window cap", () => {
     });
   });
 });
-

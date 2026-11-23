@@ -159,9 +159,11 @@ it("registers the wait tool only with an MCP session and offers it only while a 
 
 it("preserves an injected port's directory when the parent does not own server configuration", async () => {
   const parentId = createSessionId("injected-parent");
-  const port = createSnapshotMcpPort({
-    local: { status: mcpStatus("connected"), tools: [tool("local", "ping")], toolsVersion: "1" },
-  });
+  const connectConfiguredServers = vi.fn(async () => ({ statuses: {}, tools: [] }));
+  const port = createSnapshotMcpPort(
+    { local: { status: mcpStatus("connected"), tools: [tool("local", "ping")], toolsVersion: "1" } },
+    { connectConfiguredServers },
+  );
   const parent = createTestAgentRuntime(
     parentId,
     {},
@@ -186,6 +188,10 @@ it("preserves an injected port's directory when the parent does not own server c
     expect((child as unknown as AgentRuntimeInternal).mcpSession!.read().tools).toEqual([
       tool("local", "ping"),
     ]);
+    expect(connectConfiguredServers).not.toHaveBeenCalled();
+    await parent.configureMcpServers({});
+    expect(connectConfiguredServers).toHaveBeenCalledExactlyOnceWith({}, expect.anything());
+    expect((parent as unknown as AgentRuntimeInternal).mcpSession!.read().tools).toEqual([]);
   } finally {
     child.beginShutdown();
     parent.beginShutdown();

@@ -182,6 +182,8 @@ export interface AgentRuntimeInternal
    * adoption 置回 true 并把 mcpReconnectNeeded 立起。
    */
   mcpClientAttached: boolean;
+  /** 只取消当前 attachment 的连接等待，不取消会话回合或其他租约。 */
+  mcpClientConnectAbort: AbortController;
   /** detach 断开过连接，attach 后回合边界需要补连。 */
   mcpReconnectNeeded: boolean;
   /**

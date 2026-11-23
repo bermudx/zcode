@@ -4,6 +4,7 @@ import {
   DefaultRuntimeConfig,
   createProjectId,
   createSessionId,
+  type McpServerConfig,
   type ModelSelection,
 } from "@zcode/contracts";
 import type { AgentRuntime } from "@zcode/core";
@@ -399,10 +400,10 @@ describe("session facade MCP inventory provenance (issue #31)", () => {
     type: "stdio",
     command: "node",
     args: ["repl.mjs"],
-  } as never;
+  } satisfies McpServerConfig;
 
   const baseDeps = (
-    desired: Record<string, never> | undefined,
+    desired: Record<string, McpServerConfig> | undefined,
     port?: { connectServer: (...args: unknown[]) => Promise<unknown>; status: () => Promise<object> },
   ) =>
     ({
@@ -411,7 +412,7 @@ describe("session facade MCP inventory provenance (issue #31)", () => {
         configPort: {} as never,
         sources: {} as never,
       },
-      configuredMcpServers: { node_repl: nodeReplConfig },
+      getConfiguredMcpServers: () => ({ node_repl: nodeReplConfig }),
       runtime: {
         getMcpPort: () => port,
         getConfiguredMcpServers: () => desired,
@@ -448,29 +449,23 @@ describe("session facade MCP inventory provenance (issue #31)", () => {
   });
 });
 
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
-}
-
-
 async function nextTask(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
 it("lists and connects the current MCP configuration instead of the initial map", async () => {
-  let configured: Record<string, { type: string; command: string }> = {
+  let configured: Record<string, McpServerConfig> = {
     old: { type: "stdio", command: "old" },
   };
   const connectServer = vi.fn(async () => ({ status: "connected" }));
   const facade = createSessionFacade({
     configResult: { config: DefaultRuntimeConfig },
-    runtime: {},
+    runtime: {
+      getConfiguredMcpServers: () => undefined,
+      getMcpPort: () => ({ status: async () => ({}), connectServer }),
+    },
     getConfiguredMcpServers: () => configured,
-    mcpPort: { status: async () => ({}), connectServer },
+    untrustedProjectMcpServers: new Set<string>(),
     traceContext: { traceId: "mcp-config" },
     workingDirectory: "/workspace",
   } as never);

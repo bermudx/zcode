@@ -107,9 +107,9 @@ describe("client MCP configuration source", () => {
       enabled: true,
       servers: { created: server("created") },
     });
-    // 空会话：create 时没有声明就是「启用、无 server」——view 按契约给字段齐全的快照。
+    // 未声明不能转成空 map，否则会清掉注入端口已有的目录。
     const empty = createMcpClientConfigSource(undefined);
-    expect(empty.view().getSnapshot()).toEqual({ enabled: true, servers: {} });
+    expect(empty.view().getSnapshot().servers).toBeUndefined();
     declared.close();
     empty.close();
   });
@@ -205,7 +205,7 @@ describe("client MCP runtime configuration", () => {
     expect(first).toBeDefined();
     await runtime.configureMcpServers({});
     // 显式清空：session 收敛到空集后关闭 session 自有 port，工厂 memo 复位。
-    expect(generations[0]?.names()).toEqual([[], ["s1"], []]);
+    expect(generations[0]?.names()).toEqual([["s1"], []]);
     expect(closeCalls).toEqual([1]);
     expect(runtime.getMcpPort()).toBeUndefined();
     await runtime.configureMcpServers({ s2: { ...CLIENT_SERVER } });
@@ -227,7 +227,7 @@ describe("client MCP runtime configuration", () => {
     await runtime.configureMcpServers({ s1: { ...CLIENT_SERVER } });
     await runtime.configureMcpServers({});
     // 注入方拥有的 port 绝不能替注入方 close。
-    expect(names()).toEqual([[], ["s1"], []]);
+    expect(names()).toEqual([["s1"], []]);
     expect(closeCalls).toBe(0);
     expect(runtime.getMcpPort()).toBe(borrowed);
     await runtime.close();
@@ -269,10 +269,10 @@ describe("client MCP runtime configuration", () => {
     });
     const configuring = runtime.configureMcpServers({ s1: { ...CLIENT_SERVER } });
     await tick();
-    expect(names()).toEqual([[], ["s1"]]);
+    expect(names()).toEqual([["s1"]]);
     const detaching = runtime.setMcpClientAttached(false);
     // detach 同步发布空集：port 立即收到，不等在飞的 connect。
-    expect(names()).toEqual([[], ["s1"], []]);
+    expect(names()).toEqual([["s1"], []]);
     gateOpen = false;
     release(); // 即使 connect 不听 abort（迟到成功），这代结果也不能落地。
     await configuring;
@@ -281,7 +281,7 @@ describe("client MCP runtime configuration", () => {
     await runtime.setMcpClientAttached(true);
     // 同配置声明不能因 applied == desired 而跳过欠着的重连。
     await runtime.configureMcpServers({ s1: { ...CLIENT_SERVER } });
-    expect(names()).toEqual([[], ["s1"], [], ["s1"]]);
+    expect(names()).toEqual([["s1"], [], ["s1"]]);
     expect(runtime.getEffectiveMcpConfig()?.servers?.s1?.type).toBe("stdio");
     await runtime.close();
   });
@@ -297,12 +297,12 @@ describe("client MCP runtime configuration", () => {
     });
     const configuring = runtime.configureMcpServers({ s1: { ...CLIENT_SERVER } });
     await tick();
-    expect(names()).toEqual([[], ["s1"]]);
+    expect(names()).toEqual([["s1"]]);
     // 不先放行握手：detach 只等「收敛到空集」这一次重配。
     await runtime.setMcpClientAttached(false);
     expect(closed).toEqual(["s1"]);
     await configuring;
-    expect(names()).toEqual([[], ["s1"], []]);
+    expect(names()).toEqual([["s1"], []]);
     await runtime.close();
   });
 
@@ -317,22 +317,22 @@ describe("client MCP runtime configuration", () => {
     });
     const configuring = runtime.configureMcpServers({ s1: { ...CLIENT_SERVER } });
     await tick();
-    expect(names()).toEqual([[], ["s1"]]);
+    expect(names()).toEqual([["s1"]]);
     // detach 与 adopt 都不先 await——adopt 排在 suspend 之后的 tail 上。
     const detaching = runtime.setMcpClientAttached(false);
     const attaching = runtime.setMcpClientAttached(true);
-    expect(names()).toEqual([[], ["s1"], []]);
+    expect(names()).toEqual([["s1"], []]);
     gateOpen = false;
     release();
     await configuring;
     await detaching;
     await attaching;
     // 被废的 apply 没有再发布任何快照；标志位已复原也不能把结果提交到空连接上。
-    expect(names()).toEqual([[], ["s1"], []]);
+    expect(names()).toEqual([["s1"], []]);
     expect(runtime.getEffectiveMcpConfig()?.servers?.s1).toBeUndefined();
     // 后续同配置声明恰好补连一次（补连欠账由下一个准入操作接住）。
     await runtime.configureMcpServers({ s1: { ...CLIENT_SERVER } });
-    expect(names()).toEqual([[], ["s1"], [], ["s1"]]);
+    expect(names()).toEqual([["s1"], [], ["s1"]]);
     await runtime.close();
   });
 
@@ -352,11 +352,11 @@ describe("client MCP runtime configuration", () => {
       b: { ...CLIENT_SERVER },
     });
     await tick();
-    expect(names()).toEqual([[], ["a"], ["a", "b"]]);
+    expect(names()).toEqual([["a"], ["a", "b"]]);
     await runtime.setMcpClientAttached(false);
     await configuring;
     // 卡在握手的 b 也被收敛——它的 stdio 子进程不是 detach 的漏网之鱼。
-    expect(names()).toEqual([[], ["a"], ["a", "b"], []]);
+    expect(names()).toEqual([["a"], ["a", "b"], []]);
     expect([...closed].sort()).toEqual(["a", "b"]);
     await runtime.close();
   });

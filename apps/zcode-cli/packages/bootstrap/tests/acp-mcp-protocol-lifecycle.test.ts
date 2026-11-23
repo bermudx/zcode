@@ -692,6 +692,9 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
         });
         expect(fixture.apps.get(sessionId)).toBe(appBefore);
         expect(fixture.ownerOf(sessionId)).not.toBe(ownerA);
+        // 子进程退出不等于旧回合结束；让它处理失败的工具调用并正常收尾。
+        await waitTurnRequests(requests, 2);
+        await waitIdle(client2, sessionId);
         const before = requests.length;
         await client2.request(zcodeProtocolMethods.sessionSend, {
           sessionId,
@@ -1520,7 +1523,7 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       // 子进程必须先于 factory 放行死掉。
       client1.close();
       await client1.closed;
-      expect(await waitForExit(pid)).toBe(true);
+      expect(await waitForExit(pid), "blocked MCP child still alive before factory release").toBe(true);
 
       releaseFactory();
       // 迟到登记屏障：sessions.set 后 owner 表出现该 session。
@@ -1539,6 +1542,8 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       expect(processAlive(pid)).toBe(false);
       expect(app).toBeDefined();
     } finally {
+      // 断言失败也必须放行 factory；让 fixture 关闭完整 app，而不是遗漏悬挂的创建请求。
+      releaseFactory();
       client1.close();
       await fixture.close();
       expect(await listPids(dir)).toEqual([]);

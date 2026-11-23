@@ -16,6 +16,10 @@ import { toMcpToolName } from "../name.js";
 import type { McpToolResolution } from "../index.js";
 
 type Configuration = Partial<McpConfigurationSnapshot>;
+export type McpSessionConfigurationSource = Pick<McpConfigurationSource, "subscribe" | "close"> & {
+  getSnapshot(): Configuration;
+};
+
 export interface McpSessionView {
   readonly configuration: Configuration;
   readonly servers: Readonly<Record<string, McpServerToolSnapshot>>;
@@ -86,9 +90,10 @@ export function createMcpSession(options: {
   port: McpPort;
   borrowed?: boolean;
   configuration?: Configuration;
-  source?: McpConfigurationSource;
+  source?: McpSessionConfigurationSource;
   catalog?: McpToolCatalogPort;
   connectOptions: McpConnectOptions;
+  resolveConnectSignal?(): AbortSignal;
   logger?: Logger;
   trackStartup(promise: Promise<McpConnectionSnapshot>): Promise<McpConnectionSnapshot>;
 }) {
@@ -142,16 +147,19 @@ export function createMcpSession(options: {
     const servers = configuration.enabled === false ? {} : (configuration.servers ?? {});
     publication = catalog?.prepare({ servers, ...options.connectOptions });
     const startedAt = Date.now();
-    // 没有 server map 的借用端口只读已有连接；显式空 map 仍由 owner 收敛删除。
+    // 没有 server map 的注入端口只读已有连接；显式空 map 仍由 owner 收敛删除。
     const pending =
-      options.borrowed || (configuration.servers === undefined && !source)
+      options.borrowed || configuration.servers === undefined
         ? Promise.resolve({
             statuses: Object.fromEntries(
               Object.entries(port.getToolSnapshot()).map(([name, row]) => [name, row.status]),
             ),
             tools: Object.values(port.getToolSnapshot()).flatMap((row) => row.tools ?? []),
           })
-        : port.connectConfiguredServers(servers, options.connectOptions);
+        : port.connectConfiguredServers(servers, {
+            ...options.connectOptions,
+            signal: options.resolveConnectSignal?.() ?? options.connectOptions.signal,
+          });
     // pool 在首次 await 前提交租约，通知尚未派发时也能读到 pending。
     publishCatalog();
     startup = options.trackStartup(
@@ -197,7 +205,8 @@ export function createMcpSession(options: {
             const previous = configuration.servers ?? {};
             const changed = Object.keys(previous).filter(
               (name) =>
-                !next.enabled || mcpConfigKey(previous[name]) !== mcpConfigKey(next.servers[name]),
+                next.enabled === false ||
+                mcpConfigKey(previous[name]) !== mcpConfigKey(next.servers?.[name]),
             );
             publication?.invalidate?.(changed);
             configuration = next;

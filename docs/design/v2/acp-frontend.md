@@ -417,8 +417,10 @@ an [override source](../../../GLOSSARY.md)
   upstream base source (disk and plugin configuration); else the configuration
   the session was created with. A client declaration is a complete override and
   is never merged with the base.
-- The view always returns a full snapshot (`enabled`, `servers`), because
-  upstream `McpSession` reads `{}` as "enabled, no servers".
+- A missing server map means the session has no configuration to apply. An
+  injected port keeps its existing directory, and children can borrow that
+  directory. An explicit empty map instead asks the session to remove all
+  connections.
 - Applying, suspending, and closing run on one serialized queue, the
   [apply tail](../../../GLOSSARY.md). A counter that increments on every attach
   and detach lets the runtime discard a result that completes after the
@@ -461,6 +463,8 @@ transport detach
   → synchronously suspend client MCP admission and fence late connection work,
     including sessions whose app factory is still materializing (attachment
     signal is captured before the factory await, not found by a later scan)
+  → cancel the old attachment's connect wait without cancelling its turn;
+    this frees the trust guard's queue to apply the empty configuration
   → disconnect and await session-owned stdio teardown
   → retain runtime/history and in-memory declaration for adoption
   → resume/adoption schedules suspended connections at the next turn boundary

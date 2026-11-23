@@ -87,7 +87,8 @@ export function getEffectiveContextWindowSize(config: AutoCompactPolicyConfig = 
 
 export function getAutoCompactOutputReserveTokens(config: AutoCompactPolicyConfig = {}): number {
   const maxOutputTokens = positiveInt(config.maxOutputTokens);
-  const contextWindow = positiveInt(config.contextWindow) ?? DEFAULT_COMPACT_CONTEXT_WINDOW;
+  // 压缩阈值与摘要预算必须按同一个窗口计算，不能用模型原窗口给已收紧的会话预留输出。
+  const contextWindow = resolveCompactContextWindow(config);
   // 旧 legacy 分支为完整模型输出预留窗口，既过早压缩又要求远端选择；现在至少保留 21K。
   // 修复原因：reserve 曾固定 21K、摘要固定封顶 20K，1M 窗口模型在约 96 万输入时才压缩，
   // 推理和摘要挤在 20K 里常被 length 截断。摘要上限现在等于 reserve，所以大窗口按窗口

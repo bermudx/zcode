@@ -243,7 +243,7 @@ it.each([
   });
   try {
     await writeFile(file, "{}");
-    const store = createSharedZCodeCredentialStore({ filePath: file });
+    const store = createSharedZCodeCredentialStore({ env: TEST_CREDENTIAL_ENV, filePath: file });
     let background: Promise<unknown> | undefined;
     const dispose = store.onDidChange!(() => {
       background ??= gate.then(async () => {

@@ -8,6 +8,7 @@ import {
   createTurnId,
   type Logger,
   type SessionId,
+  type SubagentPort,
 } from "@zcode/contracts";
 import {
   createExploreSubagentPort,
@@ -279,10 +280,27 @@ describe("SendMessage after a cold resume", () => {
       (first as unknown as { runtimeTaskRegistry: { all(): object } }).runtimeTaskRegistry.all(),
     );
     await first.close();
+    if (agentId === undefined) throw new Error("first runtime did not register the Explore agent");
 
     const resumedChildMessages: string[] = [];
+    const restoreOutcomes: string[] = [];
+    const logger: Logger = {
+      debug() {},
+      info(_message, context) {
+        if (
+          context?.event === "subagent.send_message.cold_restore" &&
+          typeof context.outcome === "string"
+        ) {
+          restoreOutcomes.push(context.outcome);
+        }
+      },
+      warn() {},
+      error() {},
+      child: () => logger,
+    };
     const second = createTestAgentRuntime(sessionId, config, {
       eventStore: createTestSessionEventStore(),
+      logger,
       sessionStore,
       modelFactory: createTestModelFactory({
         async generateText(request: { messages: unknown }) {
@@ -293,12 +311,15 @@ describe("SendMessage after a cold resume", () => {
     });
     // 冷恢复的索引在 resume 时从父 transcript 建：之后才能按 agentId 找到上一代的子代理。
     await second.resumeFromStore();
-    const subagentPort = (second as unknown as { subagentPort: any }).subagentPort;
+    const subagentPort = (second as unknown as { subagentPort: SubagentPort }).subagentPort;
 
-    const result = await subagentPort.sendMessage(sendRequest(agentId!, sessionId));
+    const result = await subagentPort.sendMessage!(sendRequest(agentId, sessionId));
 
-    expect(result).toMatchObject({ status: "success", delivery: "resumed_background" });
-    expect(await subagentPort.waitForTask(agentId)).toMatchObject({ status: "completed" });
+    expect(result.status, `${result.error ?? ""} (restore: ${restoreOutcomes.join(", ")})`).toBe(
+      "success",
+    );
+    expect(result.delivery).toBe("resumed_background");
+    expect(await subagentPort.waitForTask!(agentId)).toMatchObject({ status: "completed" });
     expect(resumedChildMessages[0]).toContain("Findings: module A is fine.");
     expect(resumedChildMessages[0]).toContain("Continue the review.");
     await second.close();
