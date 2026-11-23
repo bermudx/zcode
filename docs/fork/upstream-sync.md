@@ -8,22 +8,28 @@ Electron or a heavy core per invocation/session—not merely keeping a TUI alive
 ## Recorded baseline
 
 - Integrated upstream: [`UPSTREAM`](../../UPSTREAM).
-- Last public check: 2026-11-07; main/HEAD was
-  `a9fe401eede6e6e5e01be9048679c206fe6f02d9` ("chore: sync ZCode source
-  v3.17.2", 2026-11-03; desktop 3.17.2 / CLI 0.17.2) and is integrated on
-  `sync/2026-11-07-a9fe401e`.
-- Incoming mainline commits at that check: **one** (a9fe401e's single parent
-  is the previous integrated base `a60ba6a7`; 203 files, +9,635/−1,472).
+- Last public check: 2026-11-23; main/HEAD is
+  `a4b4445141eb7d3b3e99eada9292775383bfc44e` ("chore: sync ZCode source
+  v4.0.0", 2026-11-23; root 4.0.0 / CLI workspace 0.18.0). It is integrated
+  by `sync/2026-11-23-a4b44451` (issue #94). The previous integrated base
+  is `fec97590` (v3.18.2, `sync/2026-11-15-fec97590`).
+- Incoming mainline commits at that check: **one** (a4b44451's single parent
+  is the previous integrated base `fec97590`; 2209 files,
+  +149,753/−24,801).
 - Verify against public source, not upstream's README/app version numbers:
 
 ```sh
 git ls-remote https://github.com/zai-org/ZCode.git HEAD refs/heads/main
 ```
 
-Evidence: [commit](https://github.com/zai-org/ZCode/commit/3c5b227649371507ddc4eb46ac5133afe6db1cab),
+Evidence: [commit](https://github.com/zai-org/ZCode/commit/a4b4445141eb7d3b3e99eada9292775383bfc44e),
 [main API](https://api.github.com/repos/zai-org/ZCode/commits/main),
 [releases API](https://api.github.com/repos/zai-org/ZCode/releases?per_page=5).
 No feature branch is implicitly eligible for integration.
+
+Earlier checks: 2026-11-07, `a9fe401e` (v3.17.2, `sync/2026-11-07-a9fe401e`,
+[commit](https://github.com/zai-org/ZCode/commit/3c5b227649371507ddc4eb46ac5133afe6db1cab));
+2026-11-15, `fec97590` (v3.18.2).
 
 ## Candidate workflow
 

@@ -38,6 +38,8 @@ import type {
   PendingInputEditLock,
 } from "./deps.js";
 import type { BackgroundResultOriginMeta, ContextUsageBreakdownItem } from "@zcode/contracts";
+import type { TurnRequestState } from "./methods/turn-loop-state.js";
+import type { McpSessionView } from "../mcp/runtime/session.js";
 import type { RuntimeCommand, RuntimeCommandId } from "./command-queue.js";
 import type { RuntimeMessageEntry } from "../agent/message-history.js";
 import type {
@@ -47,7 +49,6 @@ import type {
   ActiveTurnSteeringState,
   AgentRuntimeConfig,
   AgentRuntimeDeps,
-  BorrowedMcpAccess,
   ContextUsageCategory,
   ContextUsageConfidence,
   ContextUsageMetric,
@@ -72,9 +73,7 @@ import type {
 } from "./types.js";
 
 export interface AgentRuntimeCoreMethods {
-  updateConfig(
-    patch: Pick<AgentRuntimeConfig, "mode" | "planEnabled" | "language" | "outputStyle">,
-  ): void;
+  updateConfig(patch: Pick<AgentRuntimeConfig, "mode" | "planEnabled" | "outputStyle">): void;
   initializeSessionShellEnvironmentIfNeeded(
     selection: ExecutionShellSelection | (() => ExecutionShellSelection),
   ): boolean;
@@ -287,11 +286,15 @@ export interface AgentRuntimeCoreMethods {
   injectPluginReferenceReminderFromTurn(
     userInput: string,
     traceContext: TraceContext,
+    requestState: TurnRequestState,
+    mcpView: McpSessionView | undefined,
     toolDisallowlist?: readonly string[],
   ): Promise<void>;
   startMcpStartup(traceContext: TraceContext): Promise<McpConnectionSnapshot> | undefined;
-  initializeMcp(traceContext: TraceContext): Promise<void>;
-  refreshMcpToolsIfChanged(traceContext: TraceContext): Promise<void>;
+  initializeMcp(
+    traceContext: TraceContext,
+    options?: { background?: boolean },
+  ): Promise<McpSessionView | undefined>;
   /**
    * client 注入 MCP 的 in-place 配置入口（issue #31）。语义相等的声明直接 no-op；
    * 有在跑/排队/预留回合时只暂存，回合边界由 applyPendingMcpServers 落地。
@@ -299,20 +302,12 @@ export interface AgentRuntimeCoreMethods {
   configureMcpServers(servers: Record<string, McpServerConfig>): Promise<void>;
   /** client 显式 override 的克隆快照；undefined = 未注入过（不是空集）。 */
   getConfiguredMcpServers(): Record<string, McpServerConfig> | undefined;
-  /** 已落地的生效 MCP 配置克隆（APPLIED）；workflow/script 子会话借用父 port 时按它发现。 */
+  /** 已落地的生效 MCP 配置克隆（APPLIED）。 */
   getEffectiveMcpConfig(): AgentRuntimeConfig["mcp"];
   /** 当前 session MCP port；迟到注入后动态可见。 */
   getMcpPort(): McpPort | undefined;
-  /** client attach/detach 闸门：detach 断开并收 stdio 子进程，attach 标记回合边界补连。 */
+  /** client attach/detach 闸门：detach 把连接收敛到空集，attach 标记回合边界补连。 */
   setMcpClientAttached(attached: boolean): Promise<void>;
-  /**
-   * 借用方就绪入口（评审 R3）：等已排队的 apply/startup 落定后返回父侧
-   * {port, APPLIED config, snapshot}；detached/closed 返回空快照。
-   */
-  prepareBorrowedMcp(input: {
-    traceContext: TraceContext;
-    signal: AbortSignal;
-  }): Promise<BorrowedMcpAccess>;
   /** 回合边界入口：把 staged 配置 / attach 补连串行落地；空闲沿也在这里收口。 */
   applyPendingMcpServers(): Promise<void>;
   discoverSkillsForContext(traceContext: TraceContext): Promise<SkillLoadOutcome | undefined>;

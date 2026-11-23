@@ -91,18 +91,16 @@ import { createContextBuilderFromSnapshot } from "./context.js";
 import { loadProjectMemoryRoot } from "./context.js";
 import { logMemorySkipped } from "./context.js";
 import { injectPluginReferenceReminderFromTurn } from "./plugin-reference.js";
+import { initializeMcp } from "./mcp.js";
+import { startMcpStartup } from "./mcp.js";
 import {
   applyPendingMcpServers,
   configureMcpServers,
-  getConfiguredMcpServers,
   getEffectiveMcpConfig,
+  getConfiguredMcpServers,
   getMcpPort,
-  initializeMcp,
-  prepareBorrowedMcp,
-  refreshMcpToolsIfChanged,
   setMcpClientAttached,
-} from "./mcp.js";
-import { startMcpStartup } from "./mcp.js";
+} from "../mcp-client-session.js";
 import { discoverSkillsForContext } from "./context.js";
 import { createConfigOnlyContextSnapshot } from "./context.js";
 import { initializeMessageHistoryFromContext } from "./context.js";
@@ -316,14 +314,12 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.logMemorySkipped = logMemorySkipped;
   proto.injectPluginReferenceReminderFromTurn = injectPluginReferenceReminderFromTurn;
   proto.initializeMcp = initializeMcp;
-  proto.refreshMcpToolsIfChanged = refreshMcpToolsIfChanged;
   proto.configureMcpServers = configureMcpServers;
   proto.getConfiguredMcpServers = getConfiguredMcpServers;
   proto.getEffectiveMcpConfig = getEffectiveMcpConfig;
   proto.getMcpPort = getMcpPort;
   proto.setMcpClientAttached = setMcpClientAttached;
   proto.applyPendingMcpServers = applyPendingMcpServers;
-  proto.prepareBorrowedMcp = prepareBorrowedMcp;
   proto.startMcpStartup = startMcpStartup;
   proto.discoverSkillsForContext = discoverSkillsForContext;
   proto.createConfigOnlyContextSnapshot = createConfigOnlyContextSnapshot;

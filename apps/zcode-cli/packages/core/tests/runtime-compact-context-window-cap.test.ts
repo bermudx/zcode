@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { getAutoCompactThreshold, type AutoCompactPolicyConfig } from "../src/compact/index.js";
 import { setCompactContextWindowCap } from "../src/runtime/methods/config.js";
-import type { AgentRuntimeInternal } from "../src/runtime/internal-methods.js";
+import type { AgentRuntimeInternal } from "../src/runtime/internal.js";
 
 // setCompactContextWindowCap 只读写 this.config.compact；autoCompactIfNeeded / microcompact
 // 每次检查都用 `{ contextWindow: model, ...this.config.compact }` 重新构造策略，所以这里

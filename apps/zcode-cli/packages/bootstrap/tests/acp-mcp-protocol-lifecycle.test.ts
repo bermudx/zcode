@@ -1325,21 +1325,13 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
         ],
       });
       const app = fixture.apps.get(sessionId)!;
-      // 等失败 settle：port 状态出现 bad=failed（或连接彻底缺席且 startup 完成）。
+      // 等失败 settle：port 状态出现 bad=failed。连接收敛由上游 McpSession 负责，fork 不再
+      // 发 apply/startup 的 connect_failed 日志事件，port 快照的终态是唯一稳定事实。
       let settled = false;
       for (let i = 0; i < 400 && !settled; i += 1) {
         const statuses = (await app.runtime.getMcpPort()?.status()) ?? {};
         const bad = (statuses as Record<string, { status?: string }>).bad;
         if (bad?.status === "failed" || bad?.status === "error") settled = true;
-        else if (
-          logs.some(
-            (entry) =>
-              (entry.context as { event?: string })?.event === "mcp.apply.connect_failed" ||
-              (entry.context as { event?: string })?.event ===
-                "mcp.startup.connect_failed",
-          )
-        )
-          settled = true;
         else await new Promise((r) => setTimeout(r, 25));
       }
       expect(settled).toBe(true);

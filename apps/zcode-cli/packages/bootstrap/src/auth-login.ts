@@ -23,6 +23,8 @@ import {
   type LogoutZCodeCliResult,
 } from "./auth-login-contract.js";
 import {
+  CLI_OAUTH_INVALID_FLOW_CODE,
+  CliOAuthError,
   createCodingPlanApiKeyResolver,
   createSharedZCodeCredentialStore,
   createCliOAuthClient,
@@ -69,6 +71,8 @@ export interface CliOAuthLoginFlow {
   credentialGuard: SharedCredentialRecoveryGuard;
   credentialStore: SharedZCodeCredentialStore;
   expectedSession: Record<string, string | null>;
+  // init 响应的 flow 寿命换算到本机时钟后的绝对到期（见 startCliOAuthLoginFlow）。
+  flowExpiresAtMs: number;
   initData: CliOAuthInitData;
   oauthClient: CliOAuthClient;
   pollToken: string;
@@ -81,6 +85,7 @@ export interface StartCliOAuthLoginFlowOptions {
   credentialStore?: LoginZCodeCliOptions["credentialStore"];
   env?: EnvRecord;
   httpClient?: LoginZCodeCliOptions["httpClient"];
+  now?: () => number;
   pollToken?: string;
   providerId?: CodingPlanProviderId;
 }
@@ -90,6 +95,7 @@ export async function startCliOAuthLoginFlow(
   options: StartCliOAuthLoginFlowOptions = {},
 ): Promise<CliOAuthLoginFlow> {
   const env = options.env ?? process.env;
+  const now = options.now ?? Date.now;
   const providerId = options.providerId ?? "zai";
   throwIfAborted(options.abortSignal);
   const credentialStore =
@@ -111,10 +117,18 @@ export async function startCliOAuthLoginFlow(
     oauthClient.init({ pollToken }, { signal: options.abortSignal }),
     options.abortSignal,
   );
+  // Bug 原因：旧逻辑用本机时间减服务端 expires_at，本机时钟偏快 X 秒时 300 秒的 flow 只剩
+  // 300 − X 秒，偏快约 5 分钟以上就每次登录都超时。expires_at 与同一响应的 server_time 同属服务端
+  // 时钟，相减得到与本机时钟无关的剩余寿命；服务端未返回 server_time 时退回本机时间。
+  // start/complete 分属两次调用，寿命在 init 返回时换算成本机时钟上的绝对到期随 flow 传递。
+  const serverNowMs =
+    initData.server_time === undefined ? now() : initData.server_time * 1_000;
+  const flowLifetimeMs = initData.expires_at * 1_000 - serverNowMs;
   return {
     credentialGuard,
     credentialStore,
     expectedSession,
+    flowExpiresAtMs: now() + flowLifetimeMs,
     initData,
     oauthClient,
     pollToken,
@@ -156,7 +170,7 @@ export async function completeCliOAuthLoginFlow(
     : timeoutController.signal;
   const timeoutError = () =>
     new ZCodeCliLoginError("auth_timeout", "Authorization timed out. Please retry login.");
-  const timer = setTimeout(() => timeoutController.abort(timeoutError()), timeoutMs);
+  let timer = setTimeout(() => timeoutController.abort(timeoutError()), timeoutMs);
   try {
     throwIfAborted(signal);
     const credentialStore = options.credentialStore ?? flow.credentialStore;
@@ -169,19 +183,33 @@ export async function completeCliOAuthLoginFlow(
       credentialStore === flow.credentialStore
         ? flow.expectedSession
         : await credentialStore.loadOAuthSessionSnapshot();
+    // 调用方的总超时与 flow 自身寿命（start 半段换算）取较早者；已过期直接按超时处理。
+    const flowDeadlineMs = Math.min(now() + timeoutMs, flow.flowExpiresAtMs);
+    if (flowDeadlineMs <= now()) throw timeoutError();
+    clearTimeout(timer);
+    timer = setTimeout(
+      () => timeoutController.abort(timeoutError()),
+      Math.max(0, flowDeadlineMs - now()),
+    );
     const readyData = await pollUntilReady({
       abortSignal: signal,
-      initData: flow.initData,
+      // pollUntilReady 用本机时间比较 expires_at；换算为本机时钟上的到期时间，偏差不再缩短 flow。
+      initData: { ...flow.initData, expires_at: flowDeadlineMs / 1_000 },
       now,
       oauthClient: flow.oauthClient,
       onPollStatus: options.onPollStatus,
       pollToken: flow.pollToken,
       sleep: options.sleep ?? ((ms) => delay(ms, undefined, { signal })),
-      timeoutMs,
+      timeoutMs: Math.max(0, flowDeadlineMs - now()),
       createError: (code) =>
         code === "auth_timeout"
           ? timeoutError()
           : new ZCodeCliLoginError(code, "Authorization failed. Please retry login."),
+    }).catch((error: unknown) => {
+      // 服务端以 3004 结束 flow（过期或无效），与本地到期一样提示重新登录，不透出 HTTP 状态原文。
+      if (error instanceof CliOAuthError && error.businessCode === CLI_OAUTH_INVALID_FLOW_CODE)
+        throw timeoutError();
+      throw error;
     });
     const resolver =
       options.apiKeyResolver ??
@@ -320,10 +348,11 @@ export async function loginZCodeCli(
       credentialStore: options.credentialStore,
       env,
       httpClient: options.httpClient,
+      now,
       pollToken: options.pollToken,
       providerId: options.providerId,
     });
-    const remainingMs = Math.min(deadlineMs, flow.initData.expires_at * 1_000) - now();
+    const remainingMs = Math.min(deadlineMs, flow.flowExpiresAtMs) - now();
     if (remainingMs <= 0) throw timeoutError();
     clearTimeout(timer);
     timer = setTimeout(() => timeoutController.abort(timeoutError()), remainingMs);

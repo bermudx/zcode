@@ -83,10 +83,10 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
     const detach = context.getClientDetachSignal?.();
     return detach ? AbortSignal.any([detach, abort.signal]) : abort.signal;
   };
+  // 过期按 flow 自身寿命在本机时钟上的到期判断（start 半段已换算），不拿本机时间直接比服务端 expires_at。
   const sweepExpired = (now: () => number): void => {
-    const nowSec = now() / 1_000;
     for (const [flowId, pending] of pendingFlows) {
-      if (pending.flow.initData.expires_at <= nowSec) pendingFlows.delete(flowId);
+      if (pending.flow.flowExpiresAtMs <= now()) pendingFlows.delete(flowId);
     }
   };
 
@@ -104,6 +104,7 @@ export function createProtocolAuthLoginHandlers(deps: ProtocolAuthLoginDeps = {}
         credentialStore: deps.credentialStore,
         env,
         httpClient: deps.httpClient,
+        now: deps.now ?? Date.now,
         providerId: params.provider,
       });
       pendingFlows.set(flow.initData.flow_id, { abort, env, flow });

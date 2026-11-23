@@ -62,6 +62,7 @@ type SessionFacade = Pick<
   | "getMcpAppConnectionSnapshot"
   | "waitForMcpAppConnection"
   | "onMcpAppConnectionInvalidated"
+  | "reconnectMcpAppConnection"
   | "replaceMcpAppProvidedTools"
   | "connectMcpServer"
   | "disconnectMcpServer"
@@ -104,12 +105,16 @@ type SessionFacade = Pick<
   | "updateTargetStatus"
 >;
 
+/** 打开 MCP App 时重连断开连接的等待上限，与 MCP 默认请求超时一致。 */
+const MCP_APP_OPEN_RECONNECT_BUDGET_MS = 30_000;
+
 interface SessionResourceCloseInput {
   beginShutdown: () => void;
   closeBrowserSession: () => Promise<void>;
   closeExecution?: () => Promise<void> | void;
   closeMcp?: () => Promise<void> | void;
   closeNodeReplBrowserBroker?: () => Promise<void> | void;
+  closeSkillCatalog?: () => void;
   closeSessionStore?: () => void;
   logger: Logger;
 }
@@ -123,8 +128,10 @@ interface CreateSessionFacadeDeps {
   closeDynamicWorkflowRuns?: () => Promise<void>;
   closeScriptWorkflowRuns?: () => Promise<void>;
   closeNodeReplBrowserBroker?: () => Promise<void> | undefined;
+  /** 释放本 app 获取的 skill 实时目录引用；Memory agent 等借用同一端口，不能由 runtime 关闭。 */
+  closeSkillCatalog?: () => void;
   configResult: ConfigResult;
-  configuredMcpServers: Record<string, McpServerConfig>;
+  getConfiguredMcpServers(): Record<string, McpServerConfig>;
   configuredDefaultModelSelection?: ModelSelection;
   executionPort: ExecutionPort;
   localSettingStore?: LocalSettingStorePort;
@@ -159,11 +166,11 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
   let appProvidedToolNames: string[] = [];
   // MCP port/声明走 runtime 动态读取（issue #31）：空会话启动后可经
   // configureMcpServers 迟到注入，facade 不能钉死创建时的空快照。
-  // 声明只认 client override（评审 R6）：未注入过回落装配期完整清单——
-  // builtin/官方 server（如 node_repl）在 omitMcpServers 之后仍是可配置事实。
+  // 声明只认 client override（评审 R6）：未注入过回落 app 的实时配置清单
+  // （上游 getConfiguredMcpServers：配置源的当前快照）。
   const currentMcpPort = (): McpPort | undefined => deps.runtime.getMcpPort();
   const currentMcpServers = (): Record<string, McpServerConfig> =>
-    deps.runtime.getConfiguredMcpServers() ?? deps.configuredMcpServers;
+    deps.runtime.getConfiguredMcpServers() ?? deps.getConfiguredMcpServers();
   const requireMcpPort = (): McpPort => {
     const port = currentMcpPort();
     if (!port) throw new Error("MCP is disabled");
@@ -331,6 +338,7 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
                 : undefined,
             closeMcp: deps.ownsMcpPort ? () => currentMcpPort()?.close() : undefined,
             closeNodeReplBrowserBroker: deps.closeNodeReplBrowserBroker,
+            closeSkillCatalog: deps.closeSkillCatalog,
             closeSessionStore: closableSessionStore
               ? () => closableSessionStore.close()
               : undefined,
@@ -429,7 +437,9 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
         throw new Error(`MCP server is not configured: ${name}`);
       }
       const port = requireMcpPort();
+      // 设置页的"连接"是显式操作：同配置也要重新校验，失败的连接据此重连。
       return port.connectServer(name, config, {
+        revalidate: true,
         trace: deps.traceContext,
         workingDirectory: deps.workingDirectory,
       });
@@ -505,6 +515,12 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
       return port?.waitForAppConnection
         ? port.waitForAppConnection(name)
         : (port?.appConnectionSnapshot?.(name) ?? null);
+    },
+    reconnectMcpAppConnection: async (name) => {
+      await currentMcpPort()?.waitForServer?.(name, {
+        reconnect: true,
+        timeoutMs: MCP_APP_OPEN_RECONNECT_BUDGET_MS,
+      });
     },
     callMcpToolForUi: async (serverName, toolName, args, options) => {
       const port = requireMcpPort();
@@ -863,6 +879,7 @@ export async function closeSessionResources(input: SessionResourceCloseInput): P
     ["execution", input.closeExecution],
     ["mcp", input.closeMcp],
     ["node_repl_browser_broker", input.closeNodeReplBrowserBroker],
+    ["skill_catalog", input.closeSkillCatalog],
   ];
 
   // 独立资源并行释放；外部超时不能让仍在收尾的借用者碰到已关闭的 store。

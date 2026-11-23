@@ -1,8 +1,8 @@
 // issue #31：workflow child 借用父 MCP port/生效配置的真实链路回归。
 // 父会话是 createRegistryBackedTestApp 出的真 AgentRuntime + 真 session 隔离
 // stdio 子进程；child 由 createScriptWorkflowAgentRuntime 构造（生产路径，
-// 不是 prepareBorrowedMcp 单测）。每个配置代际各起一个 child 跑一次真
-// executeTurn，断言 child ModelRequest.tools 反映当时父的 APPLIED 面；
+// 不是 createChildMcpAccess 单测）。每个配置代际各起一个 child 跑一次真
+// executeTurn，断言 child ModelRequest.tools 反映当时父已发布的工具面；
 // child close 不得触碰父连接的子进程/工具生命周期。
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -141,7 +141,7 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       const runChild = async (): Promise<ModelRequest> => {
         childOrdinal += 1;
         const before = requests.length;
-        const child = createScriptWorkflowAgentRuntime({
+        const child = await createScriptWorkflowAgentRuntime({
           childSessionId: createSessionId(`wf-child-${childOrdinal}`),
           deps: deps(),
           request: { opts: {} } as never,
@@ -208,10 +208,11 @@ describe("workflow child borrows parent's live MCP port and effective config", (
   }, 60_000);
 
   // 4(a)：正常 workflow facade runner（app.runWorkflow → expert 装配线 →
-  // createWorkflowChildRuntime）与 script 构造器走同一条 borrowMcpAccess /
-  // prepareBorrowedMcp 就绪快照；runWorkflow 自身可能因 fake 模型输出在 phase 层失败，但
+  // createWorkflowChildRuntime）与 script 构造器走同一条上游 createChildMcpAccess
+  // 就绪入口：先等父 runtime 的 apply tail 落定，再读父 McpSession 的视图。
+  // runWorkflow 自身可能因 fake 模型输出在 phase 层失败，但
   // child 的 ModelRequest 已经真实发出，足够断言工具面。
-  it("normal workflow facade runner (runWorkflow): child ModelRequest sees the parent's APPLIED MCP face per generation", async () => {
+  it("normal workflow facade runner (runWorkflow): child ModelRequest sees the parent's published MCP face per generation", async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "workflow-facade-mcp-"));
     const requests: ModelRequest[] = [];
     sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
@@ -295,9 +296,9 @@ describe("workflow child borrows parent's live MCP port and effective config", (
     }
   }, 60_000);
 
-  // 4(a) 加强：facade child 与 script child 都只借 APPLIED 快照——父 turn
+  // 4(a) 加强：facade child 与 script child 都只看父已发布的视图——父 turn
   // 阻塞期间 staged 的配置（含 pending 注入）对两者均不可见。
-  it("active parent turn stages config: both child constructors see the OLD applied face, not the pending one", async () => {
+  it("active parent turn stages config: both child constructors see the OLD published face, not the pending one", async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "workflow-staged-mcp-"));
     const requests: ModelRequest[] = [];
     let releaseParentTurn: (() => void) | undefined;
@@ -356,8 +357,8 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       expect(requests.length).toBe(1);
       await parent.configureMcpServers({ s1: stdioServer("staged") });
 
-      // script child（构造器路径）：mid-turn 构造只看到 OLD applied（空）。
-      const scriptChild = createScriptWorkflowAgentRuntime({
+      // script child（构造器路径）：mid-turn 构造只看到 OLD published（空）。
+      const scriptChild = await createScriptWorkflowAgentRuntime({
         childSessionId: createSessionId("wf-staged-script"),
         deps: {
           agentTelemetry: createModelTelemetry().agentExecution,
@@ -416,9 +417,9 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       const pid = await waitForFile(join(tempRoot, "staged.pid"));
       expect(processAlive(pid)).toBe(true);
 
-      // 边界后的新 child（script 路径）看见新 applied 面。
+      // 边界后的新 child（script 路径）看见新发布的工具面。
       const afterBefore = requests.length;
-      const afterChild = createScriptWorkflowAgentRuntime({
+      const afterChild = await createScriptWorkflowAgentRuntime({
         childSessionId: createSessionId("wf-staged-after"),
         deps: {
           agentTelemetry: createModelTelemetry().agentExecution,
@@ -570,14 +571,19 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       // 屏障：子进程已 spawn、握手被扣 = 父 apply 确实在飞。
       const pid = await waitForFile(join(tempRoot, "s1.pid"));
 
-      const child = createScriptWorkflowAgentRuntime({
+      const before = requests.length;
+      const childReady = createScriptWorkflowAgentRuntime({
         childSessionId: createSessionId("wf-wait-child"),
         deps: makeDeps({ parent, app, modelFactory }),
         request: { opts: {} } as never,
         traceContext: { traceId: "wf-wait-child" } as never,
       });
-      const before = requests.length;
-      const childTurn = child.executeTurn("child waits parent");
+      // 工厂先等父的 apply tail（上游 createChildMcpAccess）：child runtime 到那时才存在。
+      let child: Awaited<typeof childReady> | undefined;
+      const childTurn = (async () => {
+        child = await childReady;
+        await child.executeTurn("child waits parent");
+      })();
       // 闸门还扣着（release 文件不存在是确定事实）：借用方不得抢跑——
       // 有界负向轮询只确认「没有偷发」，正向证明靠 release 后的请求内容。
       for (let i = 0; i < 15 && requests.length === before; i += 1) {
@@ -589,7 +595,7 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       try {
         await childTurn;
       } finally {
-        await child.close().catch(() => undefined);
+        await child?.close().catch(() => undefined);
       }
       const childRequest = requests[before];
       expect(childRequest).toBeTruthy();
@@ -684,7 +690,7 @@ describe("workflow child borrows parent's live MCP port and effective config", (
     }
   }, 60_000);
 
-  it("child cancellation while waiting settles promptly and does not abort the parent's handshake", async () => {
+  it("a caller that stops waiting for its child does not abort the parent's handshake; the late child still closes cleanly", async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "workflow-borrow-cancel-"));
     const requests: ModelRequest[] = [];
     sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
@@ -735,23 +741,16 @@ describe("workflow child borrows parent's live MCP port and effective config", (
       });
       const pid = await waitForFile(join(tempRoot, "s1.pid"));
 
-      const child = createScriptWorkflowAgentRuntime({
+      const childReady = createScriptWorkflowAgentRuntime({
         childSessionId: createSessionId("wf-cancel-child"),
         deps: makeDeps({ parent, app, modelFactory }),
         request: { opts: {} } as never,
         traceContext: { traceId: "wf-cancel-child" } as never,
       });
-      const turn = child.executeTurn("child cancelled mid-wait");
-      // 等待中的 child 直接 close：借用等待必须立刻 settle——只取消「等待」，
-      // 不取消父侧握手。
-      await child.close().catch(() => undefined);
-      // settle 有界：turn 不挂死。
-      await Promise.race([
-        turn.then(() => undefined, () => undefined),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("child turn did not settle")), 10_000),
-        ),
-      ]);
+      // 调用方放弃等待：工厂等的是父自己的 apply，没有也不该有取消通道——
+      // 子调用方放弃只结束自己的等待，父侧握手不受影响。
+      void childReady.catch(() => undefined);
+
       // 父握手未被波及：放行后照常连上。
       await writeFile(releaseFile, "go");
       for (let i = 0; i < 400; i += 1) {
@@ -762,6 +761,17 @@ describe("workflow child borrows parent's live MCP port and effective config", (
         if (statuses?.s1?.status === "connected") break;
         await new Promise((r) => setTimeout(r, 25));
       }
+      expect((await parent.getMcpPort()!.status()).s1?.status).toBe("connected");
+      expect(processAlive(pid)).toBe(true);
+
+      // 迟到建出的 child 有界 settle；它的 close 只收自己的资源，父连接不受影响。
+      const child = await Promise.race([
+        childReady,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("child factory did not settle")), 10_000),
+        ),
+      ]);
+      await child.close();
       expect((await parent.getMcpPort()!.status()).s1?.status).toBe("connected");
       expect(processAlive(pid)).toBe(true);
     } finally {
