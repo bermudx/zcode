@@ -218,7 +218,7 @@ just commits, when budgeting syncs.
 
 | Command | Installed source |
 |---|---|
-| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh` / `scripts/promote-piz-from-ci.sh`, both of which refuse anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `f3f79f79` pair — ACP plan approval visibility (#84), browser-client turbo output declaration (#85), the reviewed tree-identical artifact promoter (#88) and inactive-ACP-model effort advertising (#91), promoted 2026-11-19 from the ci workflow's sha-keyed artifact (dispatch run 44453919307 on `main`, green first pass) — see [verification](docs/fork/verification.md) and the [promotion policy](docs/fork/promotion.md) |
+| `~/.local/bin/piz` | this checkout's `packages/cli/dist-runtime/` matched pair (written only by `scripts/promote-piz.sh` / `scripts/promote-piz-from-ci.sh`, both of which refuse anything but a clean `main`); core pinned to the same dir's `zcode.cjs` via `ZCODE_SERVER_BIN`. Currently the `339179ef` pair — upstream ZCode v4.0.0 sync (#96) plus the flaky-test timing fix (#99), promoted 2026-11-25 from the ci workflow's sha-keyed artifact (dispatch run 45565058617 on `main`, green full tier) — see [verification](docs/fork/verification.md) and the [promotion policy](docs/fork/promotion.md) |
 | `~/.local/bin/zcode` | reference clone's standalone allowance `zcode.cjs` (unchanged; `PATH` `zcode` is not piz) |
 
 The external `zcode-allowance-update` script manages the parked standalone tree;
@@ -1570,3 +1570,27 @@ ACP plan build without another identical-tree CI artifact run.
 Made by GLM-5.4 (Z.ai GLM Coding Plan, via ZCode); operator request: merge
 upstream into piz. The timed 04:01 start did not fire; the work began at
 10:07 on the operator's prompt.
+
+
+### 2026-11-25 — promote upstream v4.0.0 as piz 0.18.0
+
+- Merged PR #96 (`sync/2026-11-23-a4b44451`) into `main`; merged PR #99
+  (`patch/exec-test-timing`, operator-approved) after its selected-tier CI passed.
+  PR #99 only makes the pre-existing flaky Bash descendant-enumeration test use
+  fast progress snapshots; it does not change production behavior.
+- First artifact dispatch 45558241385 on `ea0dacd3` failed in the full tier on
+  issue #68's known flaky test; no artifact was uploaded. Fixed-main dispatch
+  45565058617 on `339179ef533a9aefb6e97f5976fc85b5ce39de49` passed the full tier
+  and uploaded `dist-runtime-339179ef533a9aefb6e97f5976fc85b5ce39de49`.
+- Promoted that CI artifact with `promote-piz-from-ci.sh 45565058617` from clean
+  `main`; `PROMOTED_FROM` and `PROMOTED_ON` are `339179ef533a9aefb6e97f5976fc85b5ce39de49`,
+  `PROMOTED_CI_RUN` is `45565058617`. `piz --version` now reports `0.18.0`.
+- Because the sync changed `pnpm-lock.yaml`, ran pinned `pnpm install
+  --frozen-lockfile` after promotion; it completed successfully. The prepare-step
+  `core.hooksPath` was unset again. No local test or extra build was run.
+- Verification limit: this records build, CI, installation and version identity.
+  Real T3/MCP behavior of the ported client-MCP path remains unverified, as
+  already recorded for PR #96.
+
+Made by swe-2-1-medium (Devin); operator request: build the upstream-sync
+candidate on CI and promote it.
