@@ -1,21 +1,49 @@
 import {
   getCapturedZCodeCuaBrokerCredentials,
+  ZCODE_CUA_OFFICIAL_MCP_NAMESPACE_NAME,
   ZCODE_CUA_OFFICIAL_PLUGIN_ID,
   ZCODE_CUA_PLUGIN_AUTHORITY_ENV_KEY,
   ZCODE_PLUGIN_ID_ENV_KEY,
 } from "@zcode/shared";
-import { registerMcpTools, traceContextToLogContext } from "../deps.js";
+import { createToolRegistry, registerMcpTools, traceContextToLogContext } from "../deps.js";
 import type {
   McpConnectionSnapshot,
   McpPort,
   McpServerConfig,
+  Model,
   TraceContext,
 } from "../deps.js";
-import type { AgentRuntimeInternal, McpConnectOperation } from "../internal.js";
-import type { AgentRuntimeConfig, BorrowedMcpAccess } from "../types.js";
-import type { McpToolDescriptor, PluginReferenceCatalog } from "@zcode/contracts";
+import type { AgentRuntimeInternal, McpServerStatusFacts } from "../internal.js";
+import type { AgentRuntimeConfig } from "../types.js";
+import {
+  classifyServer,
+  mcpUnavailableReason,
+  type McpServerClass,
+  type McpSession,
+  type McpSessionView,
+} from "../../mcp/runtime/session.js";
+import { selectMcpTools, ZCODE_CUA_CANONICAL_MODEL_PREFIX } from "../../mcp/index.js";
+import { isMcpToolName, MCP_TOOL_NAME_PREFIX, toModelVisibleMcpNamePart } from "../../mcp/name.js";
+import type { McpServerWaitPort, ToolEntry } from "../../tool/types.js";
+import { resolveToolSearchMode } from "../../tool/search/exposure.js";
+import { collectToolSearchHistory } from "../../tool/search/history.js";
+import { sanitizeMcpDiagnostic } from "../../tool/search/mcp-diagnostics.js";
+import type { RegularTurnLoopState } from "./turn-loop-state.js";
+import type { ToolSearchExecutionContext, WaitForMcpServersOutput } from "@zcode/contracts";
+import {
+  WAIT_FOR_MCP_SERVERS_TOOL_NAME,
+  resolveMcpToolVisibility,
+  type McpToolDefinition,
+  type McpServerToolSnapshot,
+  type PluginReferenceCatalog,
+} from "@zcode/contracts";
 
-const MCP_SESSION_OAUTH_AUTHORIZATION_TIMEOUT_MS = 15_000;
+/** WaitForMcpServers 等目标离开连接状态的上限。 */
+const MCP_SERVER_WAIT_MS = 5_000;
+/** 未注册 MCP 工具等所属 server 首次连接的预算；同一条 assistant 回复内的调用共用。 */
+const MCP_PENDING_TOOL_WAIT_MS = 10_000;
+/** 按回复记录已用预算的条数上限；超出时删除最早的记录。 */
+const MCP_PENDING_TOOL_WAIT_RESPONSE_LIMIT = 50;
 
 export async function refreshWorkspaceTrustAdmission(
   runtime: AgentRuntimeInternal,
@@ -62,235 +90,423 @@ export function computeOfficialCuaServerNames(
 
 export function startMcpStartup(
   this: AgentRuntimeInternal,
-  traceContext: TraceContext,
+  _traceContext: TraceContext,
 ): Promise<McpConnectionSnapshot> | undefined {
-  if (this.mcpInitialized) return this.mcpStartupPromise;
-  this.mcpInitialized = true;
-
-  // workflow/script 子会话借用父 MCP（评审 R3）：port/config 都不是自己的，
-  // startup 唯一要做的是 await 父侧就绪快照。借用分支先于无 port/disabled
-  // 早退——port 此刻还没有才是常态。
-  if (this.borrowMcpAccess) {
-    const borrowEpoch = this.mcpAttachEpoch;
-    const borrow = this.borrowMcpAccess({
-      signal: this.shutdownSignal,
-      traceContext,
-    })
-      .then((access) => {
-        // 等待期间 child 自己的 shutdown/detach/换代已发生：旧快照不得落地。
-        if (
-          this.mcpClosed ||
-          !this.mcpClientAttached ||
-          borrowEpoch !== this.mcpAttachEpoch
-        ) {
-          return { statuses: {}, tools: [] };
-        }
-        if (access.port) this.mcpPort = access.port;
-        if (access.config !== undefined) {
-          // 保留父 APPLIED 的 enabled/trust 元数据；servers 置空——子会话只做
-          // discovery，绝不接管父连接生命周期。
-          this.config.mcp = { ...access.config, servers: {} };
-        }
-        return access.snapshot;
-      })
-      .catch((error: unknown) => {
-        this.logger?.warn("MCP borrow access failed", {
-          ...traceContextToLogContext(traceContext),
-          errorKind: mcpErrorKind(error),
-          event: "mcp.borrow.failed",
-          module: "core.runtime",
-          status: "failed",
-        });
-        return { statuses: {}, tools: [] };
-      });
-    this.mcpStartupPromise = this.trackResidencyBlockingWork(borrow);
-    return this.mcpStartupPromise;
-  }
-
-  // client detach / 关闭期间不得借 startup 补连或复活 stdio（issue #31）；
-  // attach 后 applyPendingMcpServers 走显式补连路径，不经过这里的 one-shot 门。
-  if (!this.mcpPort || this.config.mcp?.enabled === false || !this.mcpClientAttached) {
-    this.mcpToolsRegistered = true;
-    return undefined;
-  }
-
-  const servers = this.config.mcp?.servers ?? {};
-  if (Object.keys(servers).length === 0) {
-    const startup = Promise.all([this.mcpPort.status(), this.mcpPort.listTools()])
-      .then(([statuses, tools]) => ({ statuses, tools }))
-      .catch((error) => {
-        this.logger?.warn("MCP existing tool discovery failed", {
-          ...traceContextToLogContext(traceContext),
-          error: error instanceof Error ? error.message : String(error),
-          event: "mcp.existing_tools.failed",
-          module: "core.runtime",
-          status: "failed",
-        });
-        return { statuses: {}, tools: [] };
-      });
-    this.mcpStartupPromise = this.trackResidencyBlockingWork(startup);
-    return this.mcpStartupPromise;
-  }
-
-  const startedAt = Date.now();
-  // startup connect 也走 client admission 闸门：detach 中止卡住的握手、epoch 挡住
-  // 迟到完成（评审 S2）；shutdown 照常收口。不用 applySignal——startup 不属于 apply tail。
-  const startupController = new AbortController();
-  const abortFromShutdown = () => startupController.abort(this.shutdownSignal.reason);
-  if (this.shutdownSignal.aborted) {
-    startupController.abort(this.shutdownSignal.reason);
-  } else {
-    this.shutdownSignal.addEventListener("abort", abortFromShutdown, { once: true });
-  }
-  const startupEpoch = this.mcpAttachEpoch;
-  // 在飞登记在 connect await 之前、finally 只删本条记录：constructor startup 与
-  // 并发 apply 各有独立记录，互不覆盖（评审 F1）。
-  const connectOp: McpConnectOperation = {
-    servers,
-    controller: startupController,
-    epoch: startupEpoch,
-  };
-  this.mcpInFlightConnects.add(connectOp);
-  const startup = this.mcpPort
-    .connectConfiguredServers(servers, {
-      // authorization_code MCP 无人完成浏览器授权时，session 启动过去会等默认 5 分钟，
-      // 导致模型请求迟迟不发出；session 只等 15s，授权入口由设置页 mcp/list 展示。
-      signal: startupController.signal,
-      oauthAuthorizationTimeoutMs: MCP_SESSION_OAUTH_AUTHORIZATION_TIMEOUT_MS,
-      trace: traceContext,
-      workingDirectory: this.workingDirectory,
-      workspaceIdentity: this.config.workspaceIdentity?.toString(),
-      ...(this.config.workspaceKey ? { workspaceKey: this.config.workspaceKey } : {}),
-    })
-    .then((snapshot) => {
-      // detach/close/adopt 期间的迟到 startup 完成不算数：suspend 已接管
-      // teardown，不得把旧 owner 的工具快照交给 initializeMcp 注册。
-      if (
-        this.mcpClosed ||
-        startupEpoch !== this.mcpAttachEpoch ||
-        !this.mcpClientAttached
-      ) {
-        return { statuses: {}, tools: [] };
-      }
-      const statusCounts = Object.values(snapshot.statuses).reduce<Record<string, number>>(
-        (counts, status) => {
-          counts[status.status] = (counts[status.status] ?? 0) + 1;
-          return counts;
-        },
-        {},
-      );
-      this.logger?.info("MCP startup completed", {
-        ...traceContextToLogContext(traceContext),
-        durationMs: Date.now() - startedAt,
-        event: "mcp.startup.completed",
-        module: "core.runtime",
-        serverCount: Object.keys(servers).length,
-        status: "completed",
-        statusCounts,
-        toolCount: snapshot.tools.length,
-      });
-      return snapshot;
-    })
-    .catch((error) => {
-      this.logger?.warn("MCP startup failed", {
-        ...traceContextToLogContext(traceContext),
-        durationMs: Date.now() - startedAt,
-        // adapter 错误 message 可能含 command/env/header 凭据——只报类别（评审 R8）。
-        errorKind: mcpErrorKind(error),
-        event: "mcp.startup.failed",
-        module: "core.runtime",
-        status: "failed",
-      });
-      return { statuses: {}, tools: [] };
-    })
-    .finally(() => {
-      this.shutdownSignal.removeEventListener("abort", abortFromShutdown);
-      this.mcpInFlightConnects.delete(connectOp);
-    });
-  this.mcpStartupPromise = this.trackResidencyBlockingWork(startup);
-  this.logger?.debug("MCP startup scheduled", {
-    ...traceContextToLogContext(traceContext),
-    event: "mcp.startup.scheduled",
-    module: "core.runtime",
-    serverCount: Object.keys(servers).length,
-    status: "started",
-  });
-  return this.mcpStartupPromise;
+  return this.mcpSession?.start();
 }
 
 export async function initializeMcp(
   this: AgentRuntimeInternal,
   traceContext: TraceContext,
-): Promise<void> {
-  if (this.mcpToolsRegistered) return;
-
-  const startup = this.startMcpStartup(traceContext);
-  if (!startup || (!this.mcpPort && !this.borrowMcpAccess)) {
-    this.mcpToolsRegistered = true;
-    return;
-  }
-  const initEpoch = this.mcpAttachEpoch;
-
-  try {
+  options: { background?: boolean } = {},
+): Promise<McpSessionView | undefined> {
+  const session = this.mcpSession;
+  const port = this.mcpPort;
+  if (!session || !port) return;
+  // 首输入的准入读取随首次初始化完成；修复前改为每步准备视图后漏掉了这次读取，
+  // 工作区待审核提示要等第二条输入才出现。之后的读取由 turn / steering 的真实新输入触发。
+  if (!this.mcpTrustAdmissionRead) {
+    this.mcpTrustAdmissionRead = true;
     await refreshWorkspaceTrustAdmission(this, traceContext);
-    const snapshot = await startup;
-    this.shutdownSignal.throwIfAborted();
-    // 等 snapshot 期间 boundary apply 可能已完成 connect+注册并把
-    // mcpToolsRegistered 置位、mcpStartupPromise 换成自己的快照；detach/adopt
-    // 亦换了 owner（epoch 变）。任一发生即丢弃这份旧 startup 结果——
-    // 旧快照不得覆盖更新的注册（评审 F1）。
-    if (
-      this.mcpToolsRegistered ||
-      this.mcpStartupPromise !== startup ||
-      !this.mcpClientAttached ||
-      initEpoch !== this.mcpAttachEpoch
-    ) {
-      this.mcpToolsRegistered = true;
-      return;
-    }
-    // 借用路径的 port 在 startup 完成后才装上（评审 R3）；仍然缺席即空工具面。
-    const mcpPort = this.mcpPort;
-    if (!mcpPort) {
-      this.mcpToolsRegistered = true;
-      return;
-    }
-    const serverCount = Object.keys(this.config.mcp?.servers ?? {}).length;
-    const registered = registerMcpTools(this.registry, mcpPort, snapshot.tools, {
-      allowedTools: this.config.toolAllowlist,
-      disallowedTools: this.config.toolDisallowlist,
-      officialCuaServerNames: computeOfficialCuaServerNames(
-        this.config.mcp?.servers ?? {},
-        new Set(this.config.mcp?.trustedOfficialCuaServerNames ?? []),
-      ),
-      // 插件 UI：display.ui 需要 server → pluginId 的归属；catalog 是 session 冻结的唯一权威。
-      pluginIdByServerName: buildPluginIdByServerName(this.config.pluginReferenceCatalog),
-    });
-    if (registered.length > 0) {
-      this.invalidateToolCache();
-    }
-    // A7：记住注册集合与签名，回合边界 refreshMcpToolsIfChanged 据此判断是否重注册。
-    this.registeredMcpToolNames = registered;
-    this.mcpToolsSignature = mcpToolsSignature(snapshot.tools);
-    this.mcpToolListRevision = mcpPort.toolListRevision?.();
-    this.logger?.info("MCP tools registered", {
-      ...traceContextToLogContext(traceContext),
-      event: "mcp.tools.registered",
-      module: "core.runtime",
-      registeredToolCount: registered.length,
-      serverCount,
-      status: "completed",
-    });
-  } catch (error) {
-    this.mcpToolsRegistered = true;
-    this.logger?.warn("MCP initialization failed", {
-      ...traceContextToLogContext(traceContext),
-      error: error instanceof Error ? error.message : String(error),
-      event: "mcp.initialization.failed",
-      module: "core.runtime",
-      status: "failed",
-    });
   }
-  this.mcpToolsRegistered = true;
+  await session.prepare(options.background === true);
+  if (this.shuttingDown) return;
+  const view = session.read();
+  this.mcpServerStatusFacts = computeMcpServerStatusFacts(view.configuration, view.servers);
+  const officialCuaServerNames = computeOfficialCuaServerNames(
+    view.configuration.servers ?? {},
+    new Set(view.configuration.trustedOfficialCuaServerNames ?? []),
+  );
+  const admitted = new Set(
+    [
+      ...selectMcpTools(view.tools, {
+        allowedTools: this.config.toolAllowlist,
+        disallowedTools: this.config.toolDisallowlist,
+        officialCuaServerNames,
+      }),
+    ].map((tool) => tool.name),
+  );
+  const deniedTools = [...selectMcpTools(view.tools, { officialCuaServerNames })]
+    .map((tool) => tool.name)
+    .filter((name) => !admitted.has(name));
+  if (deniedTools.length) this.mcpServerStatusFacts.deniedTools = deniedTools;
+  const signature = mcpToolsSignature(view.tools);
+  if (signature === this.mcpToolsSignature) return view;
+  for (const name of this.registeredMcpToolNames ?? []) this.registry.unregister(name);
+  this.registeredMcpToolNames = registerMcpTools(
+    this.registry,
+    port,
+    view.tools,
+    mcpToolRegistration(this, session, officialCuaServerNames),
+  );
+  for (const name of this.registeredMcpToolNames) {
+    const serverName = this.registry.get(name)?.metadata.mcpPresentation?.serverName;
+    if (serverName) this.offeredMcpTools.set(name, serverName);
+  }
+  this.mcpToolsSignature = signature;
+  this.invalidateToolCache();
+  this.logger?.info("MCP tool snapshot applied", {
+    ...traceContextToLogContext(traceContext),
+    event: "mcp.tools.snapshot_applied",
+    module: "core.runtime",
+    registeredToolCount: this.registeredMcpToolNames.length,
+    serverCount: Object.keys(view.servers).length,
+    status: "completed",
+  });
+  return view;
+}
+
+/**
+ * 按配置顺序给每个 server 分类。pool 在启动开始时同步登记 connecting 记录，
+ * 所以没有记录表示租约已释放或尚未启动，不报告给模型。
+ */
+function computeMcpServerStatusFacts(
+  mcp: AgentRuntimeConfig["mcp"],
+  snapshot: Record<string, McpServerToolSnapshot>,
+): McpServerStatusFacts {
+  const facts: McpServerStatusFacts = { pending: [], needsAuth: [], failed: [], sources: {} };
+  for (const name of new Set([...Object.keys(mcp?.servers ?? {}), ...Object.keys(snapshot)])) {
+    const status = snapshot[name]?.status;
+    const serverClass = classifyServer(mcp ?? {}, name, status);
+    facts.sources[name] = serverClass;
+    // 后台恢复仍是 pending；不能生成“下一条用户消息会重试”的失败承诺。
+    if (serverClass === "pending") facts.pending.push(name);
+    else if (serverClass === "needs_auth") facts.needsAuth.push(name);
+    else if (serverClass === "failed" && status)
+      // 比较与展示使用同一诊断事实，避免控制字符差异触发内容相同的重复公告。
+      facts.failed.push({
+        name: sanitizeMcpDiagnostic(name),
+        ...(status.errorCode === undefined
+          ? {}
+          : { errorCode: sanitizeMcpDiagnostic(status.errorCode) }),
+        ...(status.error === undefined ? {} : { error: sanitizeMcpDiagnostic(status.error) }),
+      });
+  }
+  return facts;
+}
+
+/** step 注册与执行时晚到解析共用同一套准入：名称、allow/deny、官方 CUA 判定与执行时实时解析。 */
+function mcpToolRegistration(
+  runtime: AgentRuntimeInternal,
+  session: McpSession,
+  officialCuaServerNames: ReadonlySet<string>,
+) {
+  return {
+    allowedTools: runtime.config.toolAllowlist,
+    disallowedTools: runtime.config.toolDisallowlist,
+    officialCuaServerNames,
+    pluginIdByServerName: buildPluginIdByServerName(runtime.config.pluginReferenceCatalog),
+    resolveLiveDescriptor: (descriptor: McpToolDefinition, signal?: AbortSignal) =>
+      session.resolve(descriptor, signal),
+  };
+}
+
+/**
+ * 未注册工具报错的原因后缀。主 agent 本次请求提供了 WaitForMcpServers 且所属 server 仍在连接时，
+ * 提示先等待；否则只对本会话提供过的 MCP 工具说明所属 server 的当前状态，其余名称保持原报错。
+ * 修复前模型只看到 "No such tool available"，无法区分 server 断开与工具下线。
+ */
+export function describeUnavailableMcpTool(
+  runtime: AgentRuntimeInternal,
+  toolName: string,
+  model?: Model,
+): string {
+  const view = runtime.mcpSession?.read();
+  if (!view) return "";
+  const connecting =
+    runtime.config.taskType !== "subagent_child" && isMcpServerWaitOffered(runtime, model)
+      ? findServersOfTool(view, toolName).find(
+          (name) =>
+            classifyServer(view.configuration, name, view.servers[name]?.status) === "pending",
+        )
+      : undefined;
+  if (connecting)
+    return `. The MCP server '${connecting}' is still connecting. Call ${WAIT_FOR_MCP_SERVERS_TOOL_NAME} to wait for it, then try again.`;
+  const serverName = runtime.offeredMcpTools.get(toolName);
+  if (!serverName) return "";
+  return `. ${mcpUnavailableReason(
+    classifyServer(view.configuration, serverName, view.servers[serverName]?.status),
+    serverName,
+  )}`;
+}
+
+/**
+ * WaitForMcpServers 是否进入工具列表。ToolSearch 可用时由公告说明连接中的 server，不提供它；
+ * 否则本 step 状态事实有 pending，或主 agent 请求已发送过它（锁存）时提供。
+ * 状态事实只在普通 step 准备时刷新，所以重试、续写看到同一份列表。
+ */
+export function isMcpServerWaitOffered(runtime: AgentRuntimeInternal, model?: Model): boolean {
+  // 工具名单（allowlist）可能没有注册它；没有注册时报错后缀也不能让模型去调用它。
+  if (!runtime.registry.has(WAIT_FOR_MCP_SERVERS_TOOL_NAME)) return false;
+  if (model && resolveToolSearchMode(model, runtime.config.toolSearch?.mode) !== "off")
+    return false;
+  return runtime.mcpServerWaitDeclared || (runtime.mcpServerStatusFacts?.pending.length ?? 0) > 0;
+}
+
+/**
+ * 主 agent 的普通请求发送了 WaitForMcpServers 后锁存：server 连上后工具列表不变，缓存前缀不变。
+ * 子 agent 不锁存，只按自己的 pending 判定。
+ */
+export function latchMcpServerWait(
+  runtime: AgentRuntimeInternal,
+  tools: readonly { name: string }[],
+): void {
+  if (runtime.config.taskType === "subagent_child") return;
+  if (tools.some((tool) => tool.name === WAIT_FOR_MCP_SERVERS_TOOL_NAME))
+    runtime.mcpServerWaitDeclared = true;
+}
+
+function mcpServerNames(view: McpSessionView): string[] {
+  return [
+    ...new Set([...Object.keys(view.configuration.servers ?? {}), ...Object.keys(view.servers)]),
+  ];
+}
+
+/** 官方 CUA 工具的规范名前缀里的 server 段；连接记录名带插件命名空间。 */
+const OFFICIAL_CUA_MODEL_SERVER_PART = ZCODE_CUA_CANONICAL_MODEL_PREFIX.slice(
+  MCP_TOOL_NAME_PREFIX.length,
+  -"__".length,
+);
+
+/** 按配置名或模型可见名匹配；官方 CUA 也认规范名里的 server 段。 */
+function matchesMcpServerName(serverName: string, requested: string): boolean {
+  const part = toModelVisibleMcpNamePart(requested);
+  return (
+    serverName === requested ||
+    toModelVisibleMcpNamePart(serverName) === part ||
+    (serverName === ZCODE_CUA_OFFICIAL_MCP_NAMESPACE_NAME &&
+      part === OFFICIAL_CUA_MODEL_SERVER_PART)
+  );
+}
+
+/** 工具名中的 server 段（模型可见名不含 "__"）对应的连接记录名。 */
+function findServersOfTool(view: McpSessionView, toolName: string): string[] {
+  if (!isMcpToolName(toolName)) return [];
+  const part = toolName.slice(MCP_TOOL_NAME_PREFIX.length).split("__")[0];
+  if (!part) return [];
+  return Object.keys(view.servers).filter((name) => matchesMcpServerName(name, part));
+}
+
+/**
+ * WaitForMcpServers 的端口。目标：传入名称时按名称匹配；否则取全部 pending，没有 pending 时取全部失败的
+ * server。只等仍在连接的目标（≤5 s），不发起连接或授权；之后按当前分类分组。
+ */
+export function createMcpServerWaitPort(runtime: AgentRuntimeInternal): McpServerWaitPort {
+  return {
+    async waitForServers(servers, signal): Promise<WaitForMcpServersOutput> {
+      const initial = runtime.mcpSession?.read();
+      const classOf = (view: McpSessionView | undefined, name: string) =>
+        view ? classifyServer(view.configuration, name, view.servers[name]?.status) : "absent";
+      const names = initial ? mcpServerNames(initial) : [];
+      const requested = servers?.length ? servers : undefined;
+      const pending = names.filter((name) => classOf(initial, name) === "pending");
+      const targets = requested
+        ? names.filter((name) => requested.some((value) => matchesMcpServerName(name, value)))
+        : pending.length
+          ? pending
+          : names.filter((name) => classOf(initial, name) === "failed");
+      const startedAt = Date.now();
+      await Promise.all(
+        targets
+          .filter((name) => pending.includes(name))
+          .map((name) =>
+            runtime.mcpPort?.waitForServer?.(name, { timeoutMs: MCP_SERVER_WAIT_MS, signal }),
+          ),
+      );
+      const view = runtime.mcpSession?.read();
+      const result: Omit<WaitForMcpServersOutput, "ready" | "isError"> = {
+        connected: [],
+        failed: [],
+        stillPending: [],
+        needsAuth: [],
+        disabled: [],
+        unknown: [],
+      };
+      const groupOf = {
+        connected: result.connected,
+        pending: result.stillPending,
+        needs_auth: result.needsAuth,
+        disabled: result.disabled,
+        not_configured: result.unknown,
+        // 没有连接记录的已配置 server 归入失败。
+        absent: result.failed,
+        failed: result.failed,
+      } satisfies Record<McpServerClass, string[]>;
+      for (const name of targets) groupOf[classOf(view, name)].push(name);
+      for (const value of requested ?? [])
+        if (!targets.some((name) => matchesMcpServerName(name, value))) result.unknown.push(value);
+      const ready =
+        result.stillPending.length +
+          result.failed.length +
+          result.needsAuth.length +
+          result.disabled.length +
+          result.unknown.length ===
+        0;
+      runtime.logger?.debug("WaitForMcpServers finished", {
+        event: "mcp.server_wait.completed",
+        module: "core.runtime",
+        waitedMs: Date.now() - startedAt,
+        ready,
+        targetCount: targets.length,
+        pendingCount: result.stillPending.length,
+        failedCount: result.failed.length,
+      });
+      return { ready, ...result, isError: !ready };
+    },
+  };
+}
+
+/**
+ * 本 step registry 没有的 MCP 工具：最新视图已提供时直接返回（server 在 step 之后连上）。所属 server 仍在
+ * 首次连接（还没有目录）时等待它：同一回复内的调用共用 10 秒预算；某次等待用满完整预算仍没有工具，这次
+ * 连接记为用尽，之后不再为它等待。恢复中的 server 保留目录，不等待。
+ */
+export async function resolveUnregisteredMcpTool(
+  runtime: AgentRuntimeInternal,
+  toolName: string,
+  options: { signal?: AbortSignal; responseId?: string },
+): Promise<ToolEntry | undefined> {
+  const session = runtime.mcpSession;
+  const port = runtime.mcpPort;
+  if (!session || !port || !isMcpToolName(toolName)) return undefined;
+  const found = createLiveMcpToolEntry(runtime, session, port, toolName);
+  if (found || !port.waitForServer) return found;
+  const waiting = firstConnectionServers(runtime, session.read(), toolName);
+  const { responseId } = options;
+  const used = responseId ? (runtime.mcpPendingToolWaitByResponse.get(responseId) ?? 0) : 0;
+  const budget = MCP_PENDING_TOOL_WAIT_MS - used;
+  if (!waiting.length || budget <= 0) return undefined;
+  const startedAt = Date.now();
+  try {
+    const results = await Promise.all(
+      waiting.map(([name]) =>
+        port.waitForServer!(name, { timeoutMs: budget, signal: options.signal }),
+      ),
+    );
+    const entry = createLiveMcpToolEntry(runtime, session, port, toolName);
+    // 按等待结果判断是否等满：计时器按毫秒截断，墙钟可能少 1 ms。
+    if (!entry && budget === MCP_PENDING_TOOL_WAIT_MS) {
+      const servers = session.read().servers;
+      waiting.forEach(([name, episode], index) => {
+        if (results[index]?.timedOut && servers[name]?.status.updatedAt === episode)
+          runtime.mcpPendingToolWaitExhausted.set(name, episode);
+      });
+    }
+    return entry;
+  } finally {
+    if (responseId) recordPendingToolWait(runtime, responseId, used + Date.now() - startedAt);
+  }
+}
+
+function createLiveMcpToolEntry(
+  runtime: AgentRuntimeInternal,
+  session: McpSession,
+  port: McpPort,
+  toolName: string,
+): ToolEntry | undefined {
+  // 临时 registry 只用于本次查找，不替换 step 的 registry，也不改变已提供工具的记录。
+  const view = session.read();
+  const registry = createToolRegistry();
+  registerMcpTools(
+    registry,
+    port,
+    view.tools,
+    mcpToolRegistration(
+      runtime,
+      session,
+      computeOfficialCuaServerNames(
+        view.configuration.servers ?? {},
+        new Set(view.configuration.trustedOfficialCuaServerNames ?? []),
+      ),
+    ),
+  );
+  return registry.get(toolName);
+}
+
+/**
+ * 仍在首次连接、尚未用尽等待的 server，附带这次连接的标识（连接状态的 updatedAt：每次开始连接时新建，
+ * 连接中只在发布授权链接时更新，而那时已归类为 needs_auth）。没有目录即首次连接：恢复中的连接保留目录。
+ */
+function firstConnectionServers(
+  runtime: AgentRuntimeInternal,
+  view: McpSessionView,
+  toolName: string,
+): Array<[name: string, episode: string]> {
+  return findServersOfTool(view, toolName).flatMap((name): Array<[string, string]> => {
+    const row = view.servers[name];
+    return row &&
+      row.tools === undefined &&
+      classifyServer(view.configuration, name, row.status) === "pending" &&
+      runtime.mcpPendingToolWaitExhausted.get(name) !== row.status.updatedAt
+      ? [[name, row.status.updatedAt]]
+      : [];
+  });
+}
+
+function recordPendingToolWait(
+  runtime: AgentRuntimeInternal,
+  responseId: string,
+  usedMs: number,
+): void {
+  const waits = runtime.mcpPendingToolWaitByResponse;
+  // Map 按插入顺序迭代：重新插入使本回复成为最新，超出上限时删除最早的回复。
+  waits.delete(responseId);
+  waits.set(responseId, usedMs);
+  for (const oldest of waits.keys()) {
+    if (waits.size <= MCP_PENDING_TOOL_WAIT_RESPONSE_LIMIT) break;
+    waits.delete(oldest);
+  }
+}
+
+/** 实时搜索只创建临时投影，不替换正在执行的批次 registry。 */
+export function createLiveToolSearchContext(
+  runtime: AgentRuntimeInternal,
+  state: RegularTurnLoopState,
+  context: ToolSearchExecutionContext,
+): Pick<ToolSearchExecutionContext, "readLatest" | "waitForPending"> {
+  const managed = new Set(runtime.registeredMcpToolNames);
+  const resident = context.catalog.filter((tool) => !managed.has(tool.name));
+  const { preCompactDiscoveredTools } = collectToolSearchHistory(state.turnRequestState.entries);
+  return {
+    readLatest: () => {
+      const view = runtime.mcpSession?.read();
+      const selected = selectMcpTools(view?.tools ?? [], {
+        allowedTools: runtime.config.toolAllowlist,
+        disallowedTools: [
+          ...(runtime.config.toolDisallowlist ?? []),
+          ...(state.toolDisallowlist ?? []),
+        ],
+        officialCuaServerNames: computeOfficialCuaServerNames(
+          view?.configuration.servers ?? {},
+          new Set(view?.configuration.trustedOfficialCuaServerNames ?? []),
+        ),
+      });
+      const catalog = [...selected]
+        .filter(({ descriptor }) => resolveMcpToolVisibility(descriptor).includes("model"))
+        .map(({ name, aliases, descriptor }) => ({
+          name,
+          aliases,
+          description: descriptor.description,
+          searchHint: descriptor.searchHint,
+          mcp: { serverName: descriptor.serverName, toolName: descriptor.toolName },
+          deferred:
+            descriptor.alwaysLoad !== true &&
+            !(context.mode === "local" && preCompactDiscoveredTools.has(name)),
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const facts = computeMcpServerStatusFacts(view?.configuration, view?.servers ?? {});
+      return {
+        catalog: state.automationCreateLimitReached ? [] : [...resident, ...catalog],
+        pending: facts.pending,
+        failed: facts.failed,
+      };
+    },
+    waitForPending: async (servers, timeoutMs, signal) => {
+      await Promise.all(
+        servers.map((name) => runtime.mcpPort?.waitForServer?.(name, { timeoutMs, signal })),
+      );
+    },
+  };
 }
 
 /**
@@ -307,522 +523,12 @@ function buildPluginIdByServerName(
   return map;
 }
 
-function mcpToolsSignature(descriptors: readonly McpToolDescriptor[]): string {
-  return descriptors
-    .map((tool) => `${tool.serverName}\u0001${tool.toolName}\u0001${tool.description ?? ""}`)
-    .sort()
-    .join("\n");
-}
-
-/**
- * client 注入 MCP 声明的语义指纹（issue #31）：对象键递归排序（server 列表与
- * env/headers 的键序无关），数组保序（stdio argv 顺序有语义）。env/header 值参与
- * 比较——凭据轮换必须触发重连。
- */
-function mcpConfigFingerprint(servers: Record<string, McpServerConfig>): string {
-  const sortValue = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(sortValue);
-    if (value !== null && typeof value === "object") {
-      const record = value as Record<string, unknown>;
-      const sorted: Record<string, unknown> = {};
-      for (const key of Object.keys(record).sort()) sorted[key] = sortValue(record[key]);
-      return sorted;
-    }
-    return value;
-  };
-  return JSON.stringify(sortValue(servers));
-}
-
-/** MCP 相关错误的脱敏类别：adapter/config 错误 message 可能回显 command/env/header/URL。 */
-function mcpErrorKind(error: unknown): string {
-  if (error instanceof Error) return error.name || "Error";
-  return typeof error;
-}
-
-/**
- * 只返回 client 显式 override（克隆快照），undefined = 从未注入过——facade 据此回落
- * 默认完整清单（含 builtin），不能拿 undefined 当空集、也不能把内部 desired 裸引用给出。
- */
-export function getConfiguredMcpServers(
-  this: AgentRuntimeInternal,
-): Record<string, McpServerConfig> | undefined {
-  return this.mcpDesiredServers === undefined
-    ? undefined
-    : structuredClone(this.mcpDesiredServers);
-}
-
-export function getMcpPort(this: AgentRuntimeInternal): McpPort | undefined {
-  return this.mcpPort;
-}
-
-/**
- * 已落地的生效 MCP 配置克隆——只读 config.mcp（APPLIED），绝不读 pending desired。
- * 子会话借用不直接走这里：borrowMcpAccess/prepareBorrowedMcp 返回同款 APPLIED
- * 快照（含代际栅栏，评审 R3）；本 getter 服务其余只读调用方。
- */
-export function getEffectiveMcpConfig(
-  this: AgentRuntimeInternal,
-): AgentRuntimeConfig["mcp"] {
-  return this.config.mcp === undefined ? undefined : structuredClone(this.config.mcp);
-}
-
-export async function configureMcpServers(
-  this: AgentRuntimeInternal,
-  servers: Record<string, McpServerConfig>,
-): Promise<void> {
-  if (this.mcpClosed) return;
-  const next = structuredClone(servers);
-  // 「相同声明」比对的是当前生效声明（staged desired，否则 create 时的
-  // config.mcp.servers）——首次 identical resume 在 mcpDesiredServers 仍
-  // undefined 时也必须识别为 unchanged，否则 retry 判定根本到不了（评审 R2-修复）。
-  const currentDeclaration = this.mcpDesiredServers ?? this.config.mcp?.servers;
-  const unchanged =
-    currentDeclaration === undefined
-      ? // 从未声明过的会话显式下发（含空集）：仍按「变更」暂存，保住
-        // desired={} 的显式清空 provenance，不把首次下发吞成 no-op。
-        false
-      : mcpConfigFingerprint(currentDeclaration) === mcpConfigFingerprint(next);
-  // 语义相等（含凭据、键序无关的对象）不等于活连接（评审 R2-修复）：port 上
-  // 已 failed/disconnected/missing 的期望 server 需要显式 retry。读 status
-  // 前后的 desired/epoch 都必须复核——迟到读不得覆盖更新的配置或复活 detach。
-  if (unchanged && !this.mcpReconnectNeeded) {
-    const epoch = this.mcpAttachEpoch;
-    const desiredBefore = this.mcpDesiredServers;
-    const desiredVersion = this.mcpDesiredVersion;
-    const retryRequested = await detectMcpRetryNeeded(this, next);
-    // status 读期间 desired 可能被并发 configure 替换——迟到的健康判定不得
-    // 按旧声明立 retry，也不得覆盖更新的 desired（保留最新声明）。
-    if (
-      this.mcpClosed ||
-      epoch !== this.mcpAttachEpoch ||
-      this.mcpDesiredVersion !== desiredVersion ||
-      this.mcpDesiredServers !== desiredBefore
-    ) {
-      return;
-    }
-    if (!retryRequested) return;
-    // 声明没变、连接死了：不推进 desired 版本，只立补连旗标走既有边界路径。
-    this.mcpReconnectNeeded = true;
-  }
-  if (!unchanged) {
-    this.mcpDesiredServers = next;
-    this.mcpDesiredVersion += 1;
-  }
-  // 有在跑 / 排队 / 预留的回合时只暂存——本轮继续用旧连接，回合边界再落地。
-  if (this.hasActiveOrQueuedTurnWork()) return;
-  await this.applyPendingMcpServers();
-}
-
-/**
- * 显式 configure/resume 的 retry 判定（评审 R2-修复）：只看当前 port.status 的
- * 活事实——期望启用、不在在飞 connect、且 live 状态为 failed/disconnected/
- * missing 的 server 才算欠连；connecting/disabled/untrusted 一律不打扰。
- * 返回 false 时调用方保持原 no-op 语义（status 不可读时保守不判 retry）。
- */
-async function detectMcpRetryNeeded(
-  runtime: AgentRuntimeInternal,
-  servers: Record<string, McpServerConfig>,
-): Promise<boolean> {
-  const desiredEnabled = Object.entries(servers)
-    .filter(([, config]) => config.enabled !== false)
-    .map(([name]) => name);
-  if (desiredEnabled.length === 0) return false;
-  // 有期望却没 port：资源缺失需重建（createMcpPort 在 apply 里补建）。
-  const port = runtime.mcpPort;
-  if (!port) return true;
-  const inFlight = new Set<string>();
-  for (const op of runtime.mcpInFlightConnects) {
-    for (const name of Object.keys(op.servers)) inFlight.add(name);
-  }
-  const statuses = await port.status().catch(() => undefined);
-  if (statuses === undefined) return false;
-  for (const name of desiredEnabled) {
-    if (inFlight.has(name)) continue;
-    const status = statuses[name]?.status;
-    if (status === undefined || status === "failed" || status === "disconnected") {
-      return true;
-    }
-  }
-  return false;
-}
-
-export async function setMcpClientAttached(
-  this: AgentRuntimeInternal,
-  attached: boolean,
-): Promise<void> {
-  if (this.mcpClosed || attached === this.mcpClientAttached) return;
-  // detach：同步落下闸门——pending connect 的迟到结果与新准入都被挡在 applied 侧；
-  // epoch 递增使在飞 apply 的迟到完成失效（old-owner 不能覆盖新 attachment）。
-  this.mcpClientAttached = attached;
-  this.mcpAttachEpoch += 1;
-  if (attached) {
-    // adoption：等挂起的 teardown 收尾（suspend 也排在 apply tail 上），回合边界补连。
-    await this.mcpApplyTail;
-    return;
-  }
-  // 连接即将断开：applied 快照不再等于活连接，先立 reconnect 旗标——
-  // 否则 detach 与 attach 之间的一次 boundary apply 会看到「已应用」而永远不再补连。
-  this.mcpReconnectNeeded = true;
-  const port = this.mcpPort;
-  // teardown 覆盖四张表的并集：已应用、desired、config 来源、全部在飞 connect
-  // 登记——缺任何一张都会漏掉「被替换但仍在握手」的 server（评审 S2/F1）。
-  // 先取完并集再逐个 abort controller，顺序与登记语义无关但保持快照先行。
-  const suspendedNames = new Set<string>([
-    ...Object.keys(this.mcpAppliedServers ?? {}),
-    ...Object.keys(this.mcpDesiredServers ?? {}),
-    ...Object.keys(this.config.mcp?.servers ?? {}),
-  ]);
-  const detachedReason = new Error("MCP client detached");
-  for (const op of this.mcpInFlightConnects) {
-    for (const name of Object.keys(op.servers)) suspendedNames.add(name);
-  }
-  // 取消在飞 client connect（不动整轮 abort）：卡在握手的 stdio 立即被拒绝，
-  // 而不是留在池里等默认连接超时（评审 R3）。startup connect 走同一闸门。
-  for (const op of this.mcpInFlightConnects) op.controller.abort(detachedReason);
-  const suspend = this.mcpApplyTail.then(async () => {
-    if (!port) return;
-    const failed: string[] = [];
-    for (const name of suspendedNames) {
-      try {
-        // 逐 server 断开而非 lease.close()：lease 保持可重连，session 隔离条目在
-        // zero-grace session 池里立即收 stdio 子进程（issue #31 detach 语义）。
-        await port.disconnectServer(name);
-      } catch (error) {
-        failed.push(name);
-        this.logger?.warn("MCP client suspend disconnect failed", {
-          errorKind: mcpErrorKind(error),
-          event: "mcp.client_suspend.disconnect_failed",
-          module: "core.runtime",
-          serverName: name,
-        });
-      }
-    }
-    // 断连失败不能沉默成功：计数上报，调用方（detach 边界）拿到真实失败。
-    if (failed.length > 0) {
-      throw new Error(`MCP suspend disconnect failed for ${failed.length} server(s)`);
-    }
-  });
-  this.mcpApplyTail = suspend.catch(() => undefined);
-  this.trackResidencyBlockingWork(suspend);
-  await suspend;
-}
-
-export async function applyPendingMcpServers(this: AgentRuntimeInternal): Promise<void> {
-  const apply = this.mcpApplyTail.then(() => {
-    // 每次 apply 独立 AbortController：detach 经在飞登记表取消 client connect，
-    // 不扩散成整轮 shutdown abort（评审 R3）。shutdown 仍要收口在飞 connect。
-    const controller = new AbortController();
-    const abortFromShutdown = () => controller.abort(this.shutdownSignal.reason);
-    if (this.shutdownSignal.aborted) {
-      controller.abort(this.shutdownSignal.reason);
-    } else {
-      this.shutdownSignal.addEventListener("abort", abortFromShutdown, { once: true });
-    }
-    return performMcpApply.call(this, controller).finally(() => {
-      this.shutdownSignal.removeEventListener("abort", abortFromShutdown);
-    });
-  });
-  this.mcpApplyTail = apply.catch(() => undefined);
-  this.trackResidencyBlockingWork(apply);
-  await apply;
-}
-
-async function performMcpApply(
-  this: AgentRuntimeInternal,
-  applyController: AbortController,
-): Promise<void> {
-  const applySignal = applyController.signal;
-  // 一次 tail 可以消化多轮 stage；每轮开始重读最新 desired，避免应用过期配置。
-  while (!this.mcpClosed) {
-    const desiredVersion = this.mcpDesiredVersion;
-    if (
-      desiredVersion === this.mcpAppliedVersion &&
-      !this.mcpReconnectNeeded &&
-      // 未注入过的会话没有欠账；注入过的会话 applied 快照必已落地。
-      !(this.mcpDesiredServers !== undefined && this.mcpAppliedServers === undefined)
-    ) {
-      return;
-    }
-    if (!this.mcpClientAttached) {
-      // detach 期间不补连；attach 会立 reconnect 旗标。
-      this.mcpAppliedVersion = desiredVersion;
-      return;
-    }
-    const desired =
-      this.mcpDesiredServers !== undefined
-        ? this.mcpDesiredServers
-        : (this.config.mcp?.servers ?? {});
-    const applied =
-      this.mcpAppliedServers !== undefined
-        ? this.mcpAppliedServers
-        : (this.config.mcp?.servers ?? {});
-    if (!this.mcpReconnectNeeded && mcpConfigFingerprint(desired) === mcpConfigFingerprint(applied)) {
-      this.mcpAppliedServers = this.mcpDesiredServers;
-      this.mcpAppliedVersion = desiredVersion;
-      return;
-    }
-    let port = this.mcpPort;
-    if (!port && Object.keys(desired).length > 0) {
-      // 迟到注入：空会话首个非空声明在这里补建 session port；工厂缺席则报边界错。
-      port = this.createMcpPort?.();
-      this.mcpPort = port;
-      if (!port) {
-        throw new Error("Client MCP servers were provided but this session has no MCP port factory");
-      }
-    }
-    if (!port) {
-      if (this.mcpDesiredServers !== undefined && Object.keys(desired).length === 0) {
-        // 无 port 的显式清空：旧工具名仍需注销。
-        const previous = new Set(this.registeredMcpToolNames ?? []);
-        for (const name of previous) this.registry.unregister(name);
-        if (previous.size > 0) {
-          this.registeredMcpToolNames = [];
-          this.invalidateToolCache();
-        }
-      }
-      this.mcpAppliedServers =
-        this.mcpDesiredServers !== undefined ? structuredClone(desired) : this.mcpAppliedServers;
-      this.mcpAppliedVersion = desiredVersion;
-      this.mcpReconnectNeeded = false;
-      return;
-    }
-    // 连接开始时的 attachment epoch：connect/注册期间的 detach/attach 使本轮结果
-    // 过期——只有当前 attached owner 允许提交 apply / 清 reconnect 旗标（评审 R2）。
-    const epoch = this.mcpAttachEpoch;
-    // reconnect/显式 retry 触发的全量 connect 必须让池复用层重校验缓存条目：
-    // failed 的就地重连、live 的 ping 保活复用（评审 R2-修复）。
-    const revalidate = this.mcpReconnectNeeded;
-    // 在飞登记跟随本次 connect await、finally 只删本条：startup 与并发/后续
-    // apply 的记录互不覆盖，detach 并集按全表补齐在飞 server（评审 S2/F1）。
-    const connectOp: McpConnectOperation = {
-      servers: desired,
-      controller: applyController,
-      epoch,
-    };
-    this.mcpInFlightConnects.add(connectOp);
-    let snapshot: McpConnectionSnapshot;
-    try {
-      snapshot = await port.connectConfiguredServers(desired, {
-        revalidate,
-        signal: applySignal,
-        oauthAuthorizationTimeoutMs: MCP_SESSION_OAUTH_AUTHORIZATION_TIMEOUT_MS,
-        trace: this.rootTraceContext,
-        workingDirectory: this.workingDirectory,
-        workspaceIdentity: this.config.workspaceIdentity?.toString(),
-      });
-    } catch (error) {
-      // 被 detach/shutdown 撤销的操作必须退出（评审 S1）：applySignal 是一次性的，
-      // epoch 变了还继续 loop 只会用已撤销的 signal 反复拒绝，挂死 suspend/adopt。
-      if (this.mcpClosed || epoch !== this.mcpAttachEpoch || applySignal.aborted) {
-        return;
-      }
-      // 当前 owner 的失败：欠账保留（appliedVersion 不前移），下一边界重试；
-      // 诊断只报类别与计数，不回显 adapter 错误 message（可能含凭据）。
-      this.logger?.warn("MCP apply connect failed", {
-        errorKind: mcpErrorKind(error),
-        event: "mcp.apply.connect_failed",
-        module: "core.runtime",
-        serverCount: Object.keys(desired).length,
-        status: "failed",
-      });
-      return;
-    } finally {
-      this.mcpInFlightConnects.delete(connectOp);
-    }
-    // 迟到完成不得覆盖更新状态：连接期间 desired 变了 / attachment 变了 / runtime 关了
-    // 都丢弃本轮结果。同一 epoch 的 desired 更新可以续下一轮；attachment 撤销只能退出——
-    // applySignal 已经作废，revoked operation 不得再发起新连接（评审 S1）。
-    if (this.mcpClosed || epoch !== this.mcpAttachEpoch || !this.mcpClientAttached) {
-      return;
-    }
-    if (desiredVersion !== this.mcpDesiredVersion) {
-      continue;
-    }
-    // 显式重注册而非靠 toolListRevision 求和：清空/替换时旧的注册名必须先注销。
-    const previous = new Set(this.registeredMcpToolNames ?? []);
-    for (const name of previous) this.registry.unregister(name);
-    const registered = registerMcpTools(this.registry, port, snapshot.tools, {
-      allowedTools: this.config.toolAllowlist,
-      disallowedTools: this.config.toolDisallowlist,
-      officialCuaServerNames: computeOfficialCuaServerNames(
-        desired,
-        new Set(this.config.mcp?.trustedOfficialCuaServerNames ?? []),
-      ),
-      pluginIdByServerName: buildPluginIdByServerName(this.config.pluginReferenceCatalog),
-    });
-    this.registeredMcpToolNames = registered;
-    this.mcpToolsSignature = mcpToolsSignature(snapshot.tools);
-    this.mcpToolListRevision = port.toolListRevision?.();
-    // one-shot 门也同步：空会话注入后 initializeMcp 不得再走「无 server 早退」旧分支。
-    this.mcpInitialized = true;
-    this.mcpToolsRegistered = true;
-    this.mcpStartupPromise = Promise.resolve(snapshot);
-    this.invalidateToolCache();
-    // R5：生效配置只在整轮边界提交——subagent/startup 读 config.mcp 必须看到
-    // 与连接一致的 servers/enabled；本回合已冻结的 admission 不受影响。
-    if (this.mcpDesiredServers !== undefined) {
-      this.config.mcp = {
-        ...this.config.mcp,
-        enabled: Object.keys(desired).length > 0,
-        servers: structuredClone(desired),
-      };
-    }
-    this.logger?.info("MCP configured servers applied", {
-      ...traceContextToLogContext(this.rootTraceContext),
-      event: "mcp.apply.completed",
-      module: "core.runtime",
-      registeredToolCount: registered.length,
-      removedToolCount: previous.size,
-      serverCount: Object.keys(desired).length,
-      status: "completed",
-    });
-    if (this.mcpDesiredServers !== undefined && Object.keys(desired).length === 0) {
-      // client 显式清空（[]）：释放 session 自有资源；工厂 memo 复位，再次注入拿全新 port。
-      // 借用式 port（无 createMcpPort——注入方拥有）只断开连接，不代替注入方关资源（评审 R7）。
-      if (this.createMcpPort) {
-        await port.close();
-        this.mcpPort = undefined;
-      }
-    }
-    this.mcpAppliedServers =
-      this.mcpDesiredServers !== undefined ? structuredClone(desired) : this.mcpAppliedServers;
-    this.mcpAppliedVersion = desiredVersion;
-    this.mcpReconnectNeeded = false;
-    return;
-  }
-}
-
-const EMPTY_BORROWED_MCP: BorrowedMcpAccess = {
-  snapshot: { statuses: {}, tools: [] },
-};
-
-/**
- * 子会话借用入口（评审 R3）：等本 runtime 已排队的 apply tail 与 startup
- * 落定，再按当前 port/status/tools 读一份快照。只等独立的 MCP 工作，从不
- * 等父 turn 本身，也绝不替父落地 staged desired——active 回合内的 pending
- * 配置对借用方不可见（保持 APPLIED 快照语义）。调用方 signal + 本 runtime
- * shutdown 只取消「等待」，不取消父侧 connect。
- */
-export async function prepareBorrowedMcp(
-  this: AgentRuntimeInternal,
-  input: { traceContext: TraceContext; signal: AbortSignal },
-): Promise<BorrowedMcpAccess> {
-  const ABORTED = Symbol("mcp.borrow.aborted");
-  // 等待/发现统一走这条：调用方 signal + 本 runtime shutdown 只取消「等」，
-  // 不取消父侧 connect/status 本身。
-  const raceAbort = async <T>(work: Promise<T>): Promise<T | typeof ABORTED> => {
-    const combined = AbortSignal.any([input.signal, this.shutdownSignal]);
-    if (combined.aborted) return ABORTED;
-    let abort: (() => void) | undefined;
-    try {
-      return await Promise.race<T | typeof ABORTED>([
-        work,
-        new Promise<never>((_, reject) => {
-          abort = () => reject(combined.reason);
-          combined.addEventListener("abort", abort, { once: true });
-        }),
-      ]);
-    } catch {
-      return ABORTED;
-    } finally {
-      if (abort) combined.removeEventListener("abort", abort);
-    }
-  };
-  // work 失败不等于 abort：tail/startup 落定（含失败）都继续走栅栏重读；
-  // 只有调用方/父 shutdown 信号才算取消。
-  const waitFor = async (work: Promise<unknown>): Promise<boolean> =>
-    (await raceAbort(work.then(
-      () => true as const,
-      () => true as const,
-    ))) === true;
-  // tail/startup 在等待期间可能被新一轮工作替换——重读身份直到两次捕获一致。
-  // 发现读（status/listTools）也必须在同一栅栏内：读期间发生 queued apply、
-  // detach+adopt 或 port 换代会让 config/port/status 混代——任何身份变化都
-  // 丢弃本轮并重读稳定的 applied 面（评审 R3-返工）。
-  for (;;) {
-    const tail = this.mcpApplyTail;
-    const startup = this.mcpStartupPromise;
-    if (!(await waitFor(tail))) return EMPTY_BORROWED_MCP;
-    if (!(await waitFor(startup ?? Promise.resolve()))) return EMPTY_BORROWED_MCP;
-    if (tail !== this.mcpApplyTail || startup !== this.mcpStartupPromise) continue;
-    // owner 在等待期间变了（detach/shutdown）：detached 的正确答案是空；
-    // 旧快照不得交还给借用方。
-    if (this.mcpClosed || !this.mcpClientAttached) return EMPTY_BORROWED_MCP;
-    const epoch = this.mcpAttachEpoch;
-    const appliedVersion = this.mcpAppliedVersion;
-    const configRef = this.config.mcp;
-    const config = configRef === undefined ? undefined : structuredClone(configRef);
-    const port = this.mcpPort;
-    if (!port || config?.enabled === false) {
-      return { ...EMPTY_BORROWED_MCP, ...(config !== undefined ? { config } : {}) };
-    }
-    const statuses = await raceAbort(port.status().catch(() => ({})));
-    if (statuses === ABORTED) return EMPTY_BORROWED_MCP;
-    const tools = await raceAbort(port.listTools().catch(() => []));
-    if (tools === ABORTED) return EMPTY_BORROWED_MCP;
-    if (this.mcpClosed || !this.mcpClientAttached || input.signal.aborted) {
-      return EMPTY_BORROWED_MCP;
-    }
-    if (
-      epoch !== this.mcpAttachEpoch ||
-      appliedVersion !== this.mcpAppliedVersion ||
-      tail !== this.mcpApplyTail ||
-      startup !== this.mcpStartupPromise ||
-      port !== this.mcpPort ||
-      configRef !== this.config.mcp
-    ) {
-      continue;
-    }
-    return {
-      ...(config !== undefined ? { config } : {}),
-      port,
-      snapshot: { statuses, tools },
-    };
-  }
-}
-
-/**
- * 回合开始前刷新 MCP 工具表。只有端口报告 tools/list_changed 计数变化时才重新 listTools
- * （adapter 对收到通知的 server 重拉），再比较工具签名，变了就注销旧的、注册新的并失效工具缓存。
- * 不实现 toolListRevision 的端口（mock / 静态 server）永远不刷新；回合内也不刷新（已拍板）。
- */
-export async function refreshMcpToolsIfChanged(
-  this: AgentRuntimeInternal,
-  traceContext: TraceContext,
-): Promise<void> {
-  const mcpPort = this.mcpPort;
-  if (!mcpPort || !this.mcpToolsRegistered) return;
-  const revision = mcpPort.toolListRevision?.();
-  if (revision === undefined || revision === this.mcpToolListRevision) return;
-  let descriptors: McpToolDescriptor[];
-  try {
-    descriptors = await mcpPort.listTools();
-  } catch {
-    return;
-  }
-  this.mcpToolListRevision = revision;
-  const signature = mcpToolsSignature(descriptors);
-  if (this.mcpToolsSignature === signature) return;
-  const previous = new Set(this.registeredMcpToolNames ?? []);
-  for (const name of previous) this.registry.unregister(name);
-  const registered = registerMcpTools(this.registry, mcpPort, descriptors, {
-    allowedTools: this.config.toolAllowlist,
-    disallowedTools: this.config.toolDisallowlist,
-    officialCuaServerNames: computeOfficialCuaServerNames(
-      this.config.mcp?.servers ?? {},
-      new Set(this.config.mcp?.trustedOfficialCuaServerNames ?? []),
-    ),
-    pluginIdByServerName: buildPluginIdByServerName(this.config.pluginReferenceCatalog),
-  });
-  this.registeredMcpToolNames = registered;
-  this.mcpToolsSignature = signature;
-  this.invalidateToolCache();
-  this.logger?.info("MCP tools re-registered after list_changed", {
-    ...traceContextToLogContext(traceContext),
-    event: "mcp.tools.reregistered",
-    module: "core.runtime",
-    removedToolCount: previous.size,
-    registeredToolCount: registered.length,
-    status: "completed",
-  });
+function mcpToolsSignature(descriptors: readonly McpToolDefinition[]): string {
+  return (
+    descriptors
+      // 名称不变的 schema、权限注解和暴露策略变化同样必须替换定义。
+      .map((tool) => JSON.stringify(tool))
+      .sort()
+      .join("\n")
+  );
 }

@@ -1,10 +1,11 @@
 import { STORAGE_MIGRATION_COMMAND } from "@zcode/shared/sqlite-migrations";
+import { ZCODE_PLUGIN_ID_ENV_KEY } from "@zcode/shared/mcp";
 import { interceptTuiStderr, isTuiInvocation } from "./tui-stderr.js";
 import { interceptKnownRuntimeWarnings } from "./runtime-warnings.js";
 import { installStderrConsoleBoundary } from "./protocol-console.js";
-import { setCliProcessTitle } from "./process-name.js";
+import { setCliProcessTitle, setPluginHostProcessTitle } from "./process-name.js";
+import { applyCliRuntimeEnvSanitization, mintStandaloneCuaCredentialsIfEligible } from "./env.js";
 import { rewriteAttachArgv } from "./attach/attach-argv.js";
-import { applyCliRuntimeEnvSanitization } from "./env.js";
 import { ensureSeaRuntimeTools } from "./sea-runtime-tools.js";
 import { isPluginHostInvocation, runPluginHostCommand } from "./plugin-host-command.js";
 import { scheduleCliExitWatchdog } from "./shutdown.js";
@@ -20,12 +21,24 @@ async function main(): Promise<void> {
   // 不走 --attach 布尔位：该旗标已被 prompt 文件附件占用且为多值 string）。
   const argv = rewriteAttachArgv(process.argv.slice(2));
   // 存储模式也可运行在 Host Worker 中，不能修改整个 Host 的进程名称。
-  if (argv[0] !== STORAGE_MIGRATION_COMMAND && !argv.includes("--prepare-storage")) setCliProcessTitle();
+  if (argv[0] !== STORAGE_MIGRATION_COMMAND && !argv.includes("--prepare-storage")) {
+    // 插件宿主复用 CLI 入口；统一改名会把 MCP 进程误标成 Agent，须在加载插件前按角色命名。
+    if (isPluginHostInvocation(argv)) {
+      setPluginHostProcessTitle(process.env[ZCODE_PLUGIN_ID_ENV_KEY]);
+    } else {
+      setCliProcessTitle();
+    }
+  }
   // 真实 zcode CLI 进程里仍可能有少量路径直接读取 process.env。
   // 入口先清洗用户 shell 注入的 NODE_ENV、代理和证书变量；网络变量只封存给后续 Bash/tool 子进程恢复。
   applyCliRuntimeEnvSanitization(process.env);
   const isProtocol = argv[0] === STORAGE_MIGRATION_COMMAND || isProtocolServerInvocation(argv);
   const isTui = isTuiInvocation(argv);
+  mintStandaloneCuaCredentialsIfEligible({
+    isProtocol,
+    isPluginHost: isPluginHostInvocation(argv),
+    platform: process.platform,
+  });
   if (isProtocol) installProtocolStderrBoundary(process.stderr);
   // socket 监听模式的 app-server 由 attach 客户端以 stdio 全断开方式 detached 拉起；
   // stdin 的 EOF/close 不能当 Host 断开处理，否则服务端启动即自杀。

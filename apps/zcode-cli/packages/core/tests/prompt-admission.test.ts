@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createSessionId } from "@zcode/contracts";
 import { AgentRuntime } from "../src/runtime.js";
+import { createClientMcpPort } from "./mcp-client-port-fixture.js";
+import { tool } from "./mcp-runtime-fixture.js";
 import { createTestSessionEventStore } from "./test-event-store.js";
 import { createTestModelFactory } from "./test-runtime-model.js";
 
@@ -296,13 +298,24 @@ it("renders a human guide through real admission and keeps the ongoing turn", as
 it("freezes admission facts before a blocked MCP apply; tools change before the next model request (S5/R4)", async () => {
     const modelGate = deferred<unknown>();
     const connectStarted = deferred<void>();
-    const connectGate = deferred<void>();
     const events: string[] = [];
     const requests: Array<{
       providerId: string;
       systemText: string;
       toolNames: string[];
     }> = [];
+    // 工具来自 port 的内存快照（上游 McpSession 只读 getToolSnapshot）：s1 的握手
+    // 放行后才把 echo 发布进快照。
+    const { port: mcpPort, release: releaseConnect } = createClientMcpPort({
+      gate: (name) => name === "s1",
+      toolsFor: (name) => (name === "s1" ? [{ ...tool("s1", "echo"), description: "injected" }] : []),
+      onConnect: (name) => {
+        if (name === "s1") connectStarted.resolve();
+      },
+      onSettled: (name) => {
+        if (name === "s1") events.push("mcp-applied");
+      },
+    });
     const runtime = new AgentRuntime(
       createSessionId("prompt-admission-mcp-freeze"),
       {
@@ -312,37 +325,7 @@ it("freezes admission facts before a blocked MCP apply; tools change before the 
       },
       {
         eventStore: createTestSessionEventStore(),
-        mcpPort: {
-          connectConfiguredServers: async () => {
-            connectStarted.resolve();
-            await connectGate.promise;
-            events.push("mcp-applied");
-            return {
-              statuses: {
-                s1: { status: "connected", transport: "stdio", toolCount: 1, updatedAt: "now" },
-              },
-              tools: [
-                {
-                  serverName: "s1",
-                  toolName: "echo",
-                  description: "injected",
-                  inputSchema: { type: "object", properties: {} },
-                },
-              ],
-            };
-          },
-          connectServer: async () => ({
-            status: "connected",
-            transport: "stdio",
-            toolCount: 1,
-            updatedAt: "now",
-          }),
-          disconnectServer: async () => undefined,
-          status: async () => ({}),
-          listTools: async () => [],
-          callTool: async () => ({ content: [{ type: "text", text: "pong" }] }),
-          close: async () => {},
-        } as never,
+        mcpPort,
         modelFactory: createTestModelFactory({
           async generateText(request, observation) {
             events.push("model-request");
@@ -380,7 +363,7 @@ it("freezes admission facts before a blocked MCP apply; tools change before the 
     await connectStarted.promise;
     runtime.setSessionModelSelection({ providerId: "provider-b", modelId: "model-b" });
     runtime.updateConfig({ outputStyle: { name: "new-style", prompt: "new" } });
-    connectGate.resolve(undefined);
+    releaseConnect();
     await second;
     // 回合 2：apply 先于首个 model request 完成（新工具已注册——tool 面即 NEW），
     // 但 admission facts 是冻结的旧选择/旧 outputStyle——被废的迟变更不渗进已准入回合。

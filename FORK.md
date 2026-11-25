@@ -127,7 +127,7 @@ submission/acceptance status is **unverified**; no fork PR links have been recor
 | P003 | pi frontend: tui-pi, CLI selection/build wiring, architecture registration, clipboard image paste (`ctrl+v`/`alt+v`), `/skill` argument completion, kitty key-release filtering in chord dispatch, constant three-row footer (activity + pwd/branch row + two-zone stats row; 2026-10-27 verbatim pi parity: `↑↓R[W] CH% $cost ctx(auto)` segment gates + ctx threshold coloring + `•` identity separators + provider-prefix rule + provider-balance-style pwd-row quota slot), startup `PiBanner` (logo/version/hints/model scope), `userBg` user message block, `markdown*` terminal theme, transcript rendering polish (borderless volume-balanced markdown tables with fence-aware scanning + narrow-table width guard, `json`-fence pretty-printing for provider tool narration, thought/tool part-row restyle + inter-part rhythm; `TranscriptMarkdown` in tui-pi), `!` shell escape (interactive bash/zsh `$SHELL` `+m -ic` in an isolated session/process group so rc aliases/functions apply, non-bash/zsh, missing or non-executable `$SHELL` falls back to deterministic non-interactive `/bin/bash -c`; `!!` opt-out; output keeps the tail at 64k chars / 2000 lines and spills the full output to `<tmpdir>/piz-shell-<hex>.log` (0600) with a `[Output truncated. Full output: …]` notice in block, transcript row, status line and collapsed display — resolution history: interactive `80729ec8`/`f5241576` → deterministic `8888d7e9` (pi port) → interactive again `07e8b06a` on the hardened runner; `8888d7e9`'s head truncation superseded by `8fbbfba5`) | `570ebd20` through `7e859585` and later skills/image-paste commits plus `b0468c92`, `76335676`, `4422deb7`, `058685af`, `4163f747`, `63f379a2`, `f4780a2b`, `!` port `80729ec8`→`8888d7e9`→`8fbbfba5`, interactive resolution `4d0b7a5a`/`07e8b06a`; tui-pi tests incl. projection, composer, history (incl. kitty press/repeat/release), panels, terminal-drain, mentions, shell, wrapping, image-paste, banner, footer and transcript-markdown; [design](apps/zcode-cli/docs/design/v2/tui-pi-frontend.md) | Upstream frontend meets our interaction and resource requirements |
 | P004 | Shared core and thin attach client: bootstrap socket listener, CLI attach/spawn/build, root shared protocol; attach `/skill` list + suggestions via `skills/referenceCatalog` additive fields; attach custom-command catalog via new `commands/referenceCatalog` (composer `/` panel + `/help`; expansion stays in the core input facade, local `listAttachCustomCommands` scan removed); coding-plan quota read via new `usage/codingPlanQuota` (account-level snapshot fetched core-side from the Registry's coding-plan provider — API-key access from provider config **or** zhipu-account individual-coding-plan entitlement via the account credential port `providerRuntimeHeadersPort` (2026-10-28; same owner as model-request auth, manual plan key or OAuth-derived project token), feeding the tui-pi footer quota cluster; readUsageQuota absent → cluster silent; tui-pi failure diagnostics deduped per message + 60s idle-tick backoff so permanent no-credential states log exactly once per episode); herdr pane lifecycle reporter for `zcode-attach` (bounded retry + 30s heartbeat re-assert + always-on throttled stderr diagnostics, since a single lost `working` report pins herdr idle/done for a whole turn) plus `ZCODE_ATTACH_CORE` spawn marker suppressing the shared core's zcode hook; attach bare `/resume` opens the commandCenter session picker (workspace-scoped `session/list`, full schema validation, current session excluded, updatedAt desc — no latest-session guessing) and `/resume <id|unique-prefix>` shares the entry resolver with workspace on `session/resume`; startup + `/new` `session/create` uses `persistence:"deferred"` so unsent drafts stay out of `session/list` until the first accepted send promotes them | `32dc8799` through later attach fixes including `61abbc11`, plus `887668fb`..`d68db6ab` and the 2026-10-24 reporter-durability commit; CLI attach tests, bootstrap socket-listener + skill-reference-catalog, root shared attach contract, `attach-herdr-reporter` (incl. retry/argv-reuse/heartbeat regressions) + `app-server-spawn` marker tests; `patch/resume-session-picker` attach-adapter picker/error regressions + deferred create assertions, bootstrap `session-selection-protocol` deferred→immediate admission; [design](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md) | Upstream shared-core mode covers no-plugin isolation, matched builds, sessions, reconnect and low per-client cost |
 | P005 | Interactive unresolved slash input routed as a normal prompt | piz `2f55f457`; allowance has a different patch `c6b36ad5`; coverage (audited 2026-10-26): verbatim forward incl. attachments + default no-opt-in "Unknown command" + headless e2e `--prompt /nope` + attach e2e via real command center asserting exactly one `session/send` + custom-command expansion precedence + recognized builtins staying local (cli.unit / attach-adapter); TUI-lane wiring pinned by `ff7bf885` (2026-10-26); still open: attach unresolved-slash **with attachments** over a real socket | Upstream equivalent verified on piz, including recognized slash commands |
-| P006 | `piz acp`: stable ACP v1 stdio adapter inside the thin client (`zcode-attach.cjs`), one lazy core lane per `cwd`; `session/new`/`session/resume`/`session/close`, `session/prompt`/`session/cancel`/`session/update`, `session/request_permission` answering with core's `option.response`, form elicitation for `AskUserQuestion` (string enum; multi-select as typed text) and explicit approve/reject for `ExitPlanMode`, plan/build modes, model config option plus the GLM compact cap, client MCP ignored and logged, auth outside ACP | `patch/acp-frontend`; CLI `tsc --noEmit`; `tests/acp-project.test.ts`, `tests/acp-agent.test.ts`, replaced `routes acp to the ACP stdio adapter`; built-binary stdio handshake (initialize) with pure JSON stdout; T3 0.1.6 acceptance (cancel vs rollback order, live-turn resume, form rendering, full GLM turn, RSS, signing) **not run** | Retire when ACP v1 is superseded or T3 drops the local ACP command |
+| P006 | `piz acp`: stable ACP v1 stdio adapter inside the thin client (`zcode-attach.cjs`), one lazy core lane per `cwd`; `session/new`/`session/resume`/`session/close`, `session/prompt`/`session/cancel`/`session/update`, `session/request_permission` answering with core's `option.response`, form elicitation for `AskUserQuestion` (string enum; multi-select as typed text) and explicit approve/reject for `ExitPlanMode`, plan/build modes, model config option plus the GLM compact cap, client-declared MCP through `session/new`/`session/resume` `mcpServers` (issue #31; see the client-MCP row under later carried behavior), auth outside ACP | `patch/acp-frontend`; CLI `tsc --noEmit`; `tests/acp-project.test.ts`, `tests/acp-agent.test.ts`, replaced `routes acp to the ACP stdio adapter`; built-binary stdio handshake (initialize) with pure JSON stdout; T3 0.1.6 acceptance (cancel vs rollback order, live-turn resume, form rendering, full GLM turn, RSS, signing) **not run** | Retire when ACP v1 is superseded or T3 drops the local ACP command |
 
 **Session-health invariants (merged `9abdd086`, promoted in the `e37ed9d9` pair):**
 draft-aware subagent reads preserve deferred persistence and real missing-parent
@@ -170,6 +170,26 @@ Count these interfaces when budgeting syncs.
 | Per-session auto-compact window cap: additive `compactContextWindow` on `session/create`/`session/resume` + `session/setCompactContextWindow`, core `compact.contextWindowCap` = min(cap, model window), compaction-only (no provider limits, no protocol/snapshot denominators — 2026-11-02 revision: the footer ctx gauge clamps client-side via the same predicate, `patch/footer-compact-gauge`); cap constants/predicates live in `@zcode/shared` `compact-context-window.ts` (single source for wire + display); piz attach sets 262_000 for GLM (`/^glm-/i`) and follows model switches/resume — spec [compact/plan.md M2.1](apps/zcode-cli/docs/design/v2/compact/plan.md); v4 `createSession` deliberately untouched | `patch/compact-context-window`, merged `158a31d2`; display clamp `25bf5e32`/`9fd03361` (post-rebase SHAs) | P004 (shared protocol + attach client) + core compact |
 | Attach exit-resume hint: after normal TUI exit (exit 0 + bound session id) the attach client prints `Resume this session with:` + `piz|zcode attach --resume <id>` to stdout once the terminal is restored; id follows /new /resume /fork via `getMainSessionId`; empty sessions print too (predictability over content-gating); signal exits and non-0 exits silent; opentui-frontend lane deviation recorded in spec | `patch/exit-resume-hint` `40e25506` + review fix-pass `c47d1e63`; suite-stability rides along in `6e16e0ce`; spec [tui-attach-shared-core.md](apps/zcode-cli/docs/design/v2/tui-attach-shared-core.md); 4 regressions `tests/attach-exit-resume-hint.test.ts` | P004 (attach client) |
 | Provider auth-failure log payload: 401/403 model failures log `providerErrorType/Message/Code` + cause-chain-extracted (TerminalStreamChunkError), credential-shape-redacted, 1500-char-capped `providerResponseBody`, plus the previously dropped `errorCode/errorPhase/exceptionType/providerRequestId`; log-only — status events, session events, classification, retry policy unchanged | `patch/auth-failure-diagnostics` `3cf8e1ff` (builder: second agent, operator-authorized; 4 regressions `runner-status-fanout.test.ts`); spec [stream-error-retry.md](apps/zcode-cli/docs/design/v2/model/stream-error-retry.md) | P001 (adapters model runner diagnostics) |
+
+**Client-declared MCP over ACP (issue #31), merged #34 on 2026-11-12:**
+`session/new`/`session/resume` `mcpServers` is a complete session override
+(`[]` means none). Client servers are session-owned with session isolation
+and are trusted configuration from the owning protocol client. A
+`--no-plugins` core skips disk and plugin MCP but honors the declaration and
+creates its MCP port lazily. Since the 4.0.0 sync the declaration reaches
+upstream `McpSession` only through the fork's [override
+source](GLOSSARY.md) (`core/src/runtime/mcp-client-session.ts`): the
+runtime publishes one snapshot at a [turn boundary](GLOSSARY.md), a detach
+publishes the empty set, an [adoption](GLOSSARY.md) republishes, and an
+unchanged declaration with dead servers gets one `revalidate` reconnect per
+explicit configure/resume ([reconnect debt](GLOSSARY.md)). The fork's own
+apply and startup paths (`prepareBorrowedMcp`, `borrowMcpAccess`,
+`mcpInFlightConnects`, the version-tracked apply in `methods/mcp.ts`) were
+retired in that port; `methods/mcp.ts` is upstream's file again. Contract:
+[acp-frontend.md](docs/design/v2/acp-frontend.md) "Client MCP extension".
+Evidence: [the fork report](docs/fork/reports/acp-mcp-tools.md) covers the
+implementation before the port and is history. The ported implementation
+has no real-T3 acceptance yet. Maps to P006 and P004.
 
 At import, piz differed from the upstream base by 37 commits / 155 files /
 15,878 insertions / 443 deletions, before these maintenance documents. This is
@@ -1435,3 +1455,118 @@ ACP plan build without another identical-tree CI artifact run.
 - Not exercised live (unchanged from #91's open item): the T3 picker showing
   the advertised effort choices for an inactive model. No model call, no
   live-core restart, no wrapper change.
+
+### 2026-11-23 — upstream sync 4.0.0 (issue #94, sync/2026-11-23-a4b44451)
+
+- Base `fec97590` (v3.18.2) → `a4b44451` ("chore: sync ZCode source
+  v4.0.0", 2026-11-23; root 4.0.0, CLI workspace 0.18.0). One mainline
+  commit: its single parent is the previous base; 2209 files,
+  +149,753/−24,801. Public main checked the same day with `git ls-remote`.
+- Timing: the operator asked at 01:22 for the merge to start at 04:01. A
+  background `sleep` was meant to wake the session. It died, nothing ran,
+  and the work started at 10:07 on the operator's prompt. A timed start
+  needs a scheduled automation, not a sleeping shell.
+- `git merge --no-ff --no-commit` on `main` `46a9688e`. 30 files conflicted
+  and were resolved by hand; no blanket ours/theirs. No fork-deleted path
+  conflicted, and the six fork-deleted prefixes are still untracked.
+- Resolutions off the MCP seam (14 files):
+  - `cli/src/arguments.ts`, `main.ts`, `tui-command.ts`, i18n `en-US` /
+    `zh-CN`, `cli/package.json`: fork options, argv rewrite, socket-listener
+    lifecycle (`closeOnInputEnd` off in listener mode), pi frontend loader
+    and `/skill` suggestions. The fork delta is line-identical before and
+    after the merge.
+  - `cli/src/run.ts` and `docs/model-provider-project-access-token.md`:
+    fork delta unchanged.
+  - `bootstrap/src/zcode-protocol/workspace-model-runtime.ts`: both sides
+    kept.
+  - `bootstrap/src/auth-login.ts`: upstream's server-clock flow lifetime is
+    threaded through the fork's `startCliOAuthLoginFlow` /
+    `completeCliOAuthLoginFlow` split (`flowExpiresAtMs`); the Z.ai
+    business-token exchange (#71) stays in the complete half.
+  - `bootstrap/tests/process-provider-registry-runtime.test.ts`: the shared
+    secret goes through upstream's `ZCODE_CREDENTIAL_SECRET` env shape.
+  - `apps/zcode-cli/package.json`: upstream's version line.
+  - `architecture-policy.yaml` and `tool/00-tool-change-chain.md`: union,
+    plus the entries the MCP port needs (below).
+- MCP seam (16 files): upstream 4.0.0 moved MCP connection ownership into
+  `McpSession` (`core/src/mcp/runtime/session.ts`), fed by a configuration
+  source. The fork's client-declared MCP code (issue #31) was ported onto
+  that model instead of keeping a second apply path:
+  - New `core/src/runtime/mcp-client-session.ts` (432 lines) owns an
+    [override source](GLOSSARY.md). The runtime publishes one snapshot at a
+    [turn boundary](GLOSSARY.md); a detach publishes the empty set; an
+    [adoption](GLOSSARY.md) republishes; an unchanged declaration with dead
+    servers gets one `revalidate` reconnect per explicit configure/resume
+    ([reconnect debt](GLOSSARY.md)).
+  - Retired: `prepareBorrowedMcp`, `borrowMcpAccess`, `mcpInFlightConnects`,
+    `mcpDesiredVersion` / `mcpAppliedVersion` / `mcpAppliedServers`, the
+    fork's own apply and startup paths, and their `connect_failed` log
+    events. `core/src/runtime/methods/mcp.ts` is upstream's file again
+    (534 lines; the fork had 828), so its line-count exemption and debt
+    entry are gone.
+  - Kept: turn-boundary application; a counter that discards an apply which
+    completes after the attachment changed; the lazy MCP port for empty
+    no-plugins sessions; session-isolated awaited closes in
+    `adapters/src/mcp/pool.ts`; and children borrowing the parent's view.
+  - New in the port: an unchanged declaration at a turn boundary is a
+    no-op; sessions created with a declaration retry from the applied
+    config; children wait for the [apply tail](GLOSSARY.md) and the
+    connecting servers, then read the parent view once.
+  - Entry wiring: the desktop entry keeps upstream's
+    `mcpStartupPolicy: "background"`; the no-plugins shared core gets
+    `noPlugins` and the default blocking startup.
+  - Tests re-traced against the port: `acp-mcp-protocol-lifecycle` (the
+    dead CMCP13 branch dropped), `client-mcp-lifecycle`,
+    `workflow-child-mcp-borrow`, `mcp-client-config`, plus a new
+    `mcp-client-port-fixture`. `prompt-admission`,
+    `runtime-compact-context-window-cap` and `runtime-config` tests were
+    adapted to upstream's shapes. None of these ran locally (CI only).
+  - Specs: [acp-frontend.md](docs/design/v2/acp-frontend.md) has a
+    "Configuration source" section and marks the November 12 real-T3 pass as
+    pre-port history; `tool/00-tool-change-chain.md` and
+    [the fork report](docs/fork/reports/acp-mcp-tools.md) say the same.
+    GLOSSARY defines override source, apply tail, reconnect debt, turn
+    boundary and adoption.
+- Seam review of files only one side touched: the fork delta was compared
+  before and after the merge on every fork-changed file that upstream also
+  changed — 414 identical, 31 reviewed by reading. One bad automatic merge
+  (swapped hunks in `core/src/subagent/runner.ts`) was fixed.
+- `pnpm-lock.yaml`: merged. A script compared all 60 importers: each
+  manifest specifier equals its lockfile specifier after overrides and
+  auto-installed peers, every version has a package entry, and every
+  workspace package has an importer. The fork delta is fork importers and
+  fork deps only. `pnpm install --frozen-lockfile` was not run.
+- Architecture check locally with `--base 46a9688e`: OK after one baseline
+  refresh. `cli/src/attach/attach-session.ts` grew from 863 to 867 lines; it
+  is byte-identical to `main`, and the earlier PRs that grew it did not have
+  it in scope. 22 of the 29 runtime line-count exemptions are stale
+  (harmless).
+- Static checks written for this sync, because local typecheck, lint and
+  tests are not allowed: 327 fork-delta TypeScript files parse; their
+  forward imports and the 952 named imports that reach them from 8,778
+  tracked files resolve; 72 hand-merged TypeScript files lost no upstream
+  export; no import became unused (325 files compared with a baseline).
+- Patch dispositions:
+  - P001 (signing / extra usage): retained. The fork delta on 18
+    signing-area files is line-identical before and after the merge.
+    Allowance eligibility is not claimed from this.
+  - P002 (TUI projection): retained. No `tui` file conflicted.
+  - P003 (tui-pi): retained. The frontend seam in `tui-command.ts` is kept.
+  - P004 (shared core, attach, no-plugins): retained. Socket listener,
+    attach options and the no-plugins gate are unchanged; the MCP resolver
+    and entry wiring moved with the port.
+  - P005 (unresolved slash input): retained.
+  - P006 (ACP frontend): retained. Client MCP now runs on `McpSession`.
+- Open problems / unverified:
+  - No local build, typecheck, lint or test ran (CI only). CI on the pushed
+    head is the first real gate for the port.
+  - The real-T3 and real-MCP behaviour of the ported client-MCP code is
+    unverified. The November 12 pass covers the code before the port.
+  - The attach lane drops five launch-only options, two of which arrived
+    with 4.0.0: issue #95.
+  - `cli/src/attach/attach-session.ts` is 67 lines over the 800-line
+    ceiling (baselined debt).
+
+Made by GLM-5.4 (Z.ai GLM Coding Plan, via ZCode); operator request: merge
+upstream into piz. The timed 04:01 start did not fire; the work began at
+10:07 on the operator's prompt.

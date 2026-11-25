@@ -692,6 +692,9 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
         });
         expect(fixture.apps.get(sessionId)).toBe(appBefore);
         expect(fixture.ownerOf(sessionId)).not.toBe(ownerA);
+        // 子进程退出不等于旧回合结束；让它处理失败的工具调用并正常收尾。
+        await waitTurnRequests(requests, 2);
+        await waitIdle(client2, sessionId);
         const before = requests.length;
         await client2.request(zcodeProtocolMethods.sessionSend, {
           sessionId,
@@ -1325,21 +1328,13 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
         ],
       });
       const app = fixture.apps.get(sessionId)!;
-      // 等失败 settle：port 状态出现 bad=failed（或连接彻底缺席且 startup 完成）。
+      // 等失败 settle：port 状态出现 bad=failed。连接收敛由上游 McpSession 负责，fork 不再
+      // 发 apply/startup 的 connect_failed 日志事件，port 快照的终态是唯一稳定事实。
       let settled = false;
       for (let i = 0; i < 400 && !settled; i += 1) {
         const statuses = (await app.runtime.getMcpPort()?.status()) ?? {};
         const bad = (statuses as Record<string, { status?: string }>).bad;
         if (bad?.status === "failed" || bad?.status === "error") settled = true;
-        else if (
-          logs.some(
-            (entry) =>
-              (entry.context as { event?: string })?.event === "mcp.apply.connect_failed" ||
-              (entry.context as { event?: string })?.event ===
-                "mcp.startup.connect_failed",
-          )
-        )
-          settled = true;
         else await new Promise((r) => setTimeout(r, 25));
       }
       expect(settled).toBe(true);
@@ -1528,7 +1523,7 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       // 子进程必须先于 factory 放行死掉。
       client1.close();
       await client1.closed;
-      expect(await waitForExit(pid)).toBe(true);
+      expect(await waitForExit(pid), "blocked MCP child still alive before factory release").toBe(true);
 
       releaseFactory();
       // 迟到登记屏障：sessions.set 后 owner 表出现该 session。
@@ -1547,6 +1542,8 @@ describe("protocol-level client MCP lifecycle (real socket + real app)", () => {
       expect(processAlive(pid)).toBe(false);
       expect(app).toBeDefined();
     } finally {
+      // 断言失败也必须放行 factory；让 fixture 关闭完整 app，而不是遗漏悬挂的创建请求。
+      releaseFactory();
       client1.close();
       await fixture.close();
       expect(await listPids(dir)).toEqual([]);

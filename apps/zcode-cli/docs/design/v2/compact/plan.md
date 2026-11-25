@@ -33,7 +33,7 @@ hook results
 
 | 名称 | 初始值 | 用途 |
 | --- | ---: | --- |
-| summary output reserve | `min(modelMaxOutputTokens, 32_000)` | 给 summary 输出和后续请求留空间；没有模型输出上限时默认按 32k 预留。 |
+| summary output reserve | `min(modelMaxOutputTokens, max(21_000, contextWindow × 8%))` | 给 summary 输出和后续请求留空间，也是 summary 请求的 max_tokens；现行算法见 [模型请求输出上限策略](../../../../../../docs/model-request-output-tokens.md)。 |
 | auto compact buffer | `13_000` | 自动 compact 不等到满窗才触发。 |
 | warning/error buffer | `20_000` | UI/SDK 的 context warning。 |
 | manual compact buffer | `3_000` | 自动 compact 关闭时的阻塞保护。 |
@@ -114,7 +114,7 @@ Core 不直接读写文件、不读 `process.env`、不直接调用 provider SDK
 4. 运行 `PreCompact` hook，合并用户指令和 hook 指令。
 5. 构造 no-tools summary prompt。
 6. 通过 provider adapter 发起单轮 summary 请求。
-7. 清洗 `<analysis>`，只保留 `<summary>`。
+7. 按 README「摘要文本的选取」选出一个文本块，清洗 `<analysis>`，只保留 `<summary>`。
 8. 生成 boundary 和 compact summary。
 9. 追加 post-compact attachments。
 10. 写入 session log / message part。
@@ -133,7 +133,8 @@ Core 不直接读写文件、不读 `process.env`、不直接调用 provider SDK
 
 - 自定义 `/compact 重点保留测试输出` 会进入 summary prompt。
 - hook 指令会被追加，用户指令在前。
-- summary agent 尝试 tool call 时被拒绝，并转为失败或重试。
+- 摘要回复带 tool call 时，工具不执行；选出的块有摘要（成对的 `<summary>` 或行首 `<summary>`）时用它生成摘要。只有 tool call，或只有开场白（例如 "Let me read the file first."）时失败（auto 同一次压缩内重试）。
+- 摘要回复有多个文本块时，用最后一个含 `<summary>` 的块；都不含时用最后一个块。
 - compact 后下一轮 context builder 不再包含旧历史。
 - compact 失败不会写入半截 boundary。
 
@@ -151,7 +152,7 @@ Core 不直接读写文件、不读 `process.env`、不直接调用 provider SDK
 策略：
 
 ```text
-effectiveWindow = contextWindowForModel - min(modelMaxOutputTokens, 32_000)
+effectiveWindow = contextWindowForModel - min(modelMaxOutputTokens, max(21_000, contextWindowForModel × 8%))
 autoThreshold = effectiveWindow - 13_000
 shouldCompact = activeTokenEstimate >= autoThreshold
 ```
@@ -191,8 +192,10 @@ shouldCompact = activeTokenEstimate >= autoThreshold
   `contextWindow` 是两个字段**：`contextWindow` 是"覆盖"（会替换模型窗口，测试与
   host 配置在用），不能表达 `min(cap, model)`；cap 只能收紧，不能放大。
 - 有效窗口 = `min(contextWindowCap, contextWindow ?? 模型窗口)`；`contextWindowCap`
-  缺失/非正 = 与之前完全一致。阈值公式不变：
-  `window − min(maxOutputTokens, 21_000) − 13_000`（262_000 → 约 228K）。
+  缺失/非正时使用上游模型窗口。输出预留与摘要上限按同一个有效窗口计算：
+  `min(maxOutputTokens ?? 32_000, max(21_000, floor(window × 0.08)))`。
+  默认阈值仍为 `window − 输出预留 − 13_000`（262_000 → 228K；不设 cap 的 1M
+  窗口在默认输出预算下 → 955K）。
   `shouldAutoCompact`/`getEffectiveContextWindowSize`/`getAutoCompactThreshold` 与
   microcompact 阈值（由 full-compact 阈值推导）全部经同一个 `resolveCompactContextWindow`。
 - **只影响压缩决策**。不改变 provider 请求限制、preflight 预算、模型目录里的

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { getAutoCompactThreshold, type AutoCompactPolicyConfig } from "../src/compact/index.js";
 import { setCompactContextWindowCap } from "../src/runtime/methods/config.js";
-import type { AgentRuntimeInternal } from "../src/runtime/internal-methods.js";
+import type { AgentRuntimeInternal } from "../src/runtime/internal.js";
 
 // setCompactContextWindowCap 只读写 this.config.compact；autoCompactIfNeeded / microcompact
 // 每次检查都用 `{ contextWindow: model, ...this.config.compact }` 重新构造策略，所以这里
@@ -41,13 +41,13 @@ describe("setCompactContextWindowCap", () => {
 
   it("takes effect on the next policy build, never raising a smaller model window", () => {
     const rt = fakeRuntime();
-    expect(thresholdFor(rt, 1_000_000)).toBe(1_000_000 - 21_000 - 13_000);
+    expect(thresholdFor(rt, 1_000_000)).toBe(955_000);
 
     setCompactContextWindowCap.call(rt, 262_000);
     expect(thresholdFor(rt, 1_000_000)).toBe(228_000);
     expect(thresholdFor(rt, 128_000)).toBe(128_000 - 21_000 - 13_000);
 
     setCompactContextWindowCap.call(rt, undefined);
-    expect(thresholdFor(rt, 1_000_000)).toBe(966_000);
+    expect(thresholdFor(rt, 1_000_000)).toBe(955_000);
   });
 });

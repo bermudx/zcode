@@ -209,6 +209,31 @@ describe("auto compact policy", () => {
     ).toBe(166_000);
   });
 
+  it.each([
+    // 8% 不足 21K 时保持 21K，阈值与旧算法相同。
+    { contextWindow: 262_500, maxOutputTokens: 128_000, reserve: 21_000, threshold: 228_500 },
+    { contextWindow: 500_000, maxOutputTokens: 128_000, reserve: 40_000, threshold: 447_000 },
+    { contextWindow: 1_000_000, maxOutputTokens: 128_000, reserve: 80_000, threshold: 907_000 },
+    // 比例 reserve 仍不超过模型输出上限。
+    { contextWindow: 1_000_000, maxOutputTokens: 64_000, reserve: 64_000, threshold: 923_000 },
+  ])(
+    "reserves max(21K, 8% of $contextWindow) capped by $maxOutputTokens",
+    ({ contextWindow, maxOutputTokens, reserve, threshold }) => {
+      const config = { contextWindow, maxOutputTokens };
+
+      expect(getAutoCompactOutputReserveTokens(config)).toBe(reserve);
+      expect(getEffectiveContextWindowSize(config)).toBe(contextWindow - reserve);
+      expect(getAutoCompactThreshold(config)).toBe(threshold);
+      expect(
+        shouldAutoCompact({
+          config,
+          messages: ENOUGH_MESSAGES,
+          tokenOverride: { source: "provider_usage", tokenCount: threshold },
+        }),
+      ).toMatchObject({ outputReserveTokens: reserve, shouldCompact: true, threshold });
+    },
+  );
+
   it("surfaces provider context usage as the token count truth source", () => {
     const decision = shouldAutoCompact({
       config: {
@@ -322,9 +347,10 @@ describe("per-session context window cap", () => {
     const config = { contextWindow: 1_000_000, contextWindowCap: 262_000, maxOutputTokens: 32_000 };
     // reserve = min(32K, 21K) = 21K; threshold = 262K - 21K - 13K
     expect(resolveCompactContextWindow(config)).toBe(262_000);
+    expect(getAutoCompactOutputReserveTokens(config)).toBe(21_000);
     expect(getEffectiveContextWindowSize(config)).toBe(241_000);
     expect(getAutoCompactThreshold(config)).toBe(228_000);
-    expect(getAutoCompactThreshold({ ...config, contextWindowCap: undefined })).toBe(966_000);
+    expect(getAutoCompactThreshold({ ...config, contextWindowCap: undefined })).toBe(955_000);
   });
 
   it("never raises a smaller model window", () => {
@@ -369,4 +395,3 @@ describe("per-session context window cap", () => {
     });
   });
 });
-

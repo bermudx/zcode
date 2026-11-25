@@ -367,6 +367,12 @@ Status: implemented; disposable and isolated real-T3 source-runtime evidence
 recorded in [the fork report](../../fork/reports/acp-mcp-tools.md). Not installed.
 `additionalDirectories` forwarding is not part of this extension.
 
+Upstream v4.0.0 moved MCP connection ownership into `McpSession`, and the fork
+was ported onto that model (see "Configuration source" below). The fork report
+and the November 12 real-T3 pass describe the implementation before that port:
+they are history, not acceptance of the ported code. Real-T3 acceptance of the
+ported implementation is not recorded yet. Terms: [GLOSSARY.md](../../../GLOSSARY.md).
+
 ### Admission and ownership
 
 - `initialize` advertises HTTP and SSE MCP support; stdio is ACP's baseline.
@@ -397,6 +403,41 @@ recorded in [the fork report](../../fork/reports/acp-mcp-tools.md). Not installe
   configuration are written to logs, events, session history, or disk caches.
   Diagnostics use session/trace identifiers, counts, and stable error kinds.
 
+### Configuration source
+
+Upstream v4 gives each session one owner of MCP connections: `McpSession`
+(`core/src/mcp/runtime/session.ts`). It reads a configuration source, and each
+new snapshot makes it connect, replace, or remove servers and withdraw or
+publish tools. The fork adds no second owner. It wraps the upstream source in
+an [override source](../../../GLOSSARY.md)
+(`core/src/runtime/mcp-client-session.ts`) and hands `McpSession` a view of it.
+
+- Snapshot order: a detached session publishes `{ enabled: false, servers: {} }`.
+  Otherwise the snapshot is the client declaration, if there is one; else the
+  upstream base source (disk and plugin configuration); else the configuration
+  the session was created with. A client declaration is a complete override and
+  is never merged with the base.
+- A missing server map means the session has no configuration to apply. An
+  injected port keeps its existing directory, and children can borrow that
+  directory. An explicit empty map instead asks the session to remove all
+  connections.
+- Applying, suspending, and closing run on one serialized queue, the
+  [apply tail](../../../GLOSSARY.md). A counter that increments on every attach
+  and detach lets the runtime discard a result that completes after the
+  attachment changed.
+- A [turn boundary](../../../GLOSSARY.md) with nothing staged and no
+  [reconnect debt](../../../GLOSSARY.md) does not touch the session and does
+  not wait for connections. Upstream's background startup policy stays in
+  effect.
+- The runtime reconnects without a configuration change only when reconnect
+  debt exists: after [adoption](../../../GLOSSARY.md), or when an identical
+  declaration arrives and the port reports a desired server as failed,
+  disconnected, or missing. It then asks the port to revalidate the applied
+  servers once. A session declared at `session/create` has no staged
+  declaration, so it retries from its applied configuration.
+- Closing the session releases only the view. The runtime owns the base source
+  and closes it at shutdown.
+
 ### Lazy resources and the no-plugins boundary
 
 `--no-plugins` continues to prohibit automatic plugin, builtin MCP, and
@@ -422,6 +463,8 @@ transport detach
   → synchronously suspend client MCP admission and fence late connection work,
     including sessions whose app factory is still materializing (attachment
     signal is captured before the factory await, not found by a later scan)
+  → cancel the old attachment's connect wait without cancelling its turn;
+    this frees the trust guard's queue to apply the empty configuration
   → disconnect and await session-owned stdio teardown
   → retain runtime/history and in-memory declaration for adoption
   → resume/adoption schedules suspended connections at the next turn boundary
@@ -454,14 +497,13 @@ shared-core restart while this adapter lives
 - Warm/adopted resume must not replace the ACP handle or its in-flight waiter.
   Identical live settings remain connected; changed settings wait for the
   current turn to finish. No restart or cancellation is used for refresh.
-- Workflow children borrow the parent's MCP surface through an asynchronous
-  readiness dependency, not a constructor-time snapshot: a child waits for the
-  parent's already-scheduled startup/boundary apply to settle, then discovers
-  the applied tool set on the parent's port. Discovery is generation-fenced:
-  if the parent's attachment, apply, port, or applied configuration changes
-  while the status/tool reads are in flight, the stale read is discarded and
-  discovery retries against the new generation — a borrower never receives a
-  mixed-generation snapshot. Borrowers never own, connect,
+- Workflow children borrow the parent's MCP surface, not a constructor-time
+  snapshot. A child waits for the parent's [apply tail](../../../GLOSSARY.md)
+  to settle and for scoped servers that are still connecting, then takes the
+  parent session's view in one synchronous read. Status and tools come from
+  that single read, so a borrower never receives a mixed-generation view. When
+  the parent detached or was replaced during the wait, the child sees the
+  current state: no MCP for a detached parent. Borrowers never own, connect,
   disconnect, or cancel the parent's transports, and never apply the parent's
   pending staged configuration during an active parent turn.
 - Fork copies the most recently accepted client declaration, including a

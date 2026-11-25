@@ -104,7 +104,7 @@ export function createWorkflowFacade(deps: CreateWorkflowFacadeDeps): WorkflowFa
         sessionId: childSessionId,
         traceId: childTraceContext.traceId,
       });
-      const childRuntime = createWorkflowChildRuntime(deps, {
+      const childRuntime = await createWorkflowChildRuntime(deps, {
         childSessionId,
         childTraceContext,
         workflowKind,
@@ -273,18 +273,20 @@ export function createWorkflowFacade(deps: CreateWorkflowFacadeDeps): WorkflowFa
   });
 }
 
-function createWorkflowChildRuntime(
+async function createWorkflowChildRuntime(
   deps: CreateWorkflowFacadeDeps,
   options: {
     childSessionId: SessionId;
     childTraceContext: TraceContext;
     workflowKind: string;
   },
-): AgentRuntime {
+): Promise<AgentRuntime> {
+  const childMcp = await deps.runtime.createChildMcpAccess();
   return new AgentRuntime(
     options.childSessionId,
     {
       ...deps.runtimeConfig,
+      mcp: childMcp.config,
       agentName: options.workflowKind === "expert" ? "zcode-expert" : "zcode-workflow",
       // workflow child 不在 Guarded 合同内；只隔离父任务模式，不继承审批。
       mode: "yolo",
@@ -343,8 +345,7 @@ function createWorkflowChildRuntime(
               disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),
             }))
           : undefined,
-      // child 借用父 MCP 面（评审 R3）：startup await 父侧就绪快照，构造期不冻结。
-      borrowMcpAccess: (input) => deps.runtime.prepareBorrowedMcp(input),
+      ...childMcp.deps,
       eventSink: deps.eventSink,
       modelFactory: deps.modelFactory,
       resolveEffectiveModelSelection: deps.appOptions.resolveEffectiveModelSelection,

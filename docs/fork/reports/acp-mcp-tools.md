@@ -13,6 +13,15 @@ client declaration. An independent reconnect re-check returned `PASS+NOTES`.
 Nothing is installed, pushed, or promoted. This file records only observed
 evidence.
 
+Historical after the upstream v4.0.0 sync (`a4b44451`). The fork machinery named
+below (`prepareBorrowedMcp`, `borrowMcpAccess`, `mcpInFlightConnects`, the fork
+apply and startup paths in `methods/mcp.ts`) was replaced by upstream
+`McpSession` plus the fork's override configuration source
+(`core/src/runtime/mcp-client-session.ts`). The observations below stay evidence
+for the behaviour measured on the code before that port. They are not evidence
+for the ported implementation. The current contract is
+`docs/design/v2/acp-frontend.md`, section "Configuration source".
+
 Historical detail: `/home/daniel/.local/state/piz-acp-mcp-009cbbe5/rework5.md`
 (rework-5 pass; supersedes rework4 and earlier notes, which record previous
 passes and are not restated here),

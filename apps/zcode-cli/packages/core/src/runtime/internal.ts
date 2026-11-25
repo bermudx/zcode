@@ -1,8 +1,12 @@
+import type { AgentRuntime } from "./agent-runtime.js";
+import type { McpSession } from "../mcp/runtime/session.js";
+import type { McpClientConfigSource } from "./mcp-client-session.js";
 import { PermissionService, ToolScheduler } from "./deps.js";
-import type { ModelRequestSessionFeature } from "@zcode/contracts";
+import type { ModelRequestSessionFeature, ToolSearchMcpState } from "@zcode/contracts";
 import type { PromptSnapshot } from "./helpers/prompt-snapshot.js";
 import type { TotalTokensBudgetState } from "./helpers/total-tokens-budget.js";
 import type { InstructionRefreshReason } from "../context/types.js";
+import type { McpServerClass } from "../mcp/runtime/session.js";
 import type {
   Logger,
   ModelSelection,
@@ -23,11 +27,11 @@ import type {
   HookRunner,
   ImageProcessorPort,
   PdfDocumentPort,
-  McpConnectionSnapshot,
   McpServerConfig,
   SkillLoadOutcome,
   SkillPort,
   McpPort,
+  McpToolCatalogPort,
   DynamicWorkflowRunPort,
   ModelCatalogPort,
   SubagentPort,
@@ -52,6 +56,7 @@ import type {
   PendingModelChangeTimeline,
   ProviderRuntimeHeadersPort,
   MainTurnCacheHitAggregate,
+  McpStartupPolicy,
   RuntimeTurnFileChangeMap,
 } from "./types.js";
 import type { RuntimeCommandQueue } from "./command-queue.js";
@@ -70,16 +75,14 @@ import type { RuntimeTelemetryFacade } from "../telemetry/runtime-telemetry.js";
 import type { WorkspaceHookRuntimeAdmissionPort } from "../hooks/workspace-hook-runtime-admission.js";
 
 /**
- * 一个在飞 client MCP connect 操作（startup 或 boundary apply 的单次 connect
- * await）。servers 是开连时的不可变声明快照，controller 持有本次 connect 的
- * signal，epoch 是登记时的 attachment 代次——只作登记时点诊断，判定仍以
- * 当前 mcpAttachEpoch 为准。
+ * 状态事实：pending / needsAuth / failed 写入公告 metadata；sources 与 deniedTools 只在内存中
+ * 用于计算撤销原因，不持久化。
  */
-export interface McpConnectOperation {
-  readonly servers: Readonly<Record<string, McpServerConfig>>;
-  readonly controller: AbortController;
-  readonly epoch: number;
-}
+export type McpServerStatusFacts = ToolSearchMcpState & {
+  needsAuth: string[];
+  sources: Record<string, McpServerClass>;
+  deniedTools?: string[];
+};
 
 export interface AgentRuntimeInternal
   extends AgentRuntimeCoreMethods, AgentRuntimeTurnMethods, AgentRuntimeHookMethods {
@@ -97,6 +100,7 @@ export interface AgentRuntimeInternal
   eventSinks: Set<SessionEventSink>;
   now: () => Date;
   isRemoteWorkspace: () => boolean;
+  createChildMcpAccess: AgentRuntime["createChildMcpAccess"];
   registry: ToolRegistry;
   executor: ToolExecutor;
   hookRunner?: HookRunner;
@@ -104,6 +108,7 @@ export interface AgentRuntimeInternal
   modelFactory: AgentRuntimeDeps["modelFactory"];
   modelIoDir?: string;
   providerRuntimeHeadersPort?: ProviderRuntimeHeadersPort;
+  readReplyLanguage?: AgentRuntimeDeps["readReplyLanguage"];
   browserControlPort?: AgentRuntimeDeps["browserControlPort"];
   modelRequestAdmission?: AgentRuntimeDeps["modelRequestAdmission"];
   sessionModelSelection: ModelSelection | undefined;
@@ -145,65 +150,66 @@ export interface AgentRuntimeInternal
   contextSourcePort?: ContextSourcePort;
   skillPort?: SkillPort;
   mcpPort?: McpPort;
-  mcpStartupPromise?: Promise<McpConnectionSnapshot>;
+  mcpSession?: McpSession;
+  mcpStartupPolicy: McpStartupPolicy;
+  /** MCP 初始化已读取过一次工作区准入；之后由真实新输入触发重读。 */
+  mcpTrustAdmissionRead: boolean;
   /**
    * 迟到注入补建 session MCP port 的同步工厂（issue #31 client MCP）。
    * 由 bootstrap 的 app 装配注入；空会话首个显式 server 到来前不得调用它。
    */
   createMcpPort?: () => McpPort | undefined;
+  /** 进程级 MCP 工具目录缓存（上游 deps.mcpToolCatalogPort）；迟到补建的 session 与构造期用同一份。 */
+  mcpToolCatalogPort?: McpToolCatalogPort;
+  /**
+   * client 声明 / detach 的配置源（mcp-client-session.ts）：McpSession 只认它的快照，
+   * 声明、挂起与 adoption 都经它发布。上游的配置源（磁盘 / plugin）由它透传，runtime 关闭时关闭。
+   */
+  mcpClientSource?: McpClientConfigSource;
   /**
    * client attachment 信号的退订函数（评审 R1）：只存退订，不存第二份生命周期
    * 状态；信号 abort 后自清，beginShutdown 兜底解除。
    */
   mcpDetachUnsubscribe?: () => void;
   /**
-   * 借用方 MCP 入口（评审 R3）：workflow/script 子会话由父注入；startup 阶段
-   * await 一次拿 {port, config, snapshot}，缺席即普通自有 port 语义。
-   */
-  borrowMcpAccess?: AgentRuntimeDeps["borrowMcpAccess"];
-  /**
    * client 注入 MCP 的期望/已生效配置（`Record<serverName, config>`）。undefined =
-   * 从未收到 client 声明，继续用 config.mcp.servers；显式 {} = client 清空，
-   * 不回退文件/plugin 配置。版本号只在 desired 变化时递增，apply 按版本判断是否欠账。
+   * 从未收到 client 声明，继续透传上游配置源；显式 {} = client 清空，
+   * 不回退文件/plugin 配置。
    */
   mcpDesiredServers?: Record<string, McpServerConfig>;
-  mcpDesiredVersion: number;
-  mcpAppliedVersion: number;
-  /** 当前连接集合对应的配置快照；undefined = 仍是启动时 config.mcp.servers。 */
-  mcpAppliedServers?: Record<string, McpServerConfig>;
   /**
-   * client 侧 attach/detach 闸门。false 时同步拒绝新的 client stdio 准入，
-   * 迟到连接结果不得复活子进程；adoption 置回 true 并把 mcpReconnectNeeded 立起。
+   * client 侧 attach/detach 闸门。false 时连接收敛到空集、新声明只暂存；
+   * adoption 置回 true 并把 mcpReconnectNeeded 立起。
    */
   mcpClientAttached: boolean;
-  /**
-   * attach/detach 代次。performMcpApply 在 connect 前取样、await 后比对：
-   * 代次变了（detach/adopt/close）本轮结果作废——只有当前 attached owner
-   * 允许提交 apply 与清 reconnect 旗标（评审 R2）。
-   */
-  mcpAttachEpoch: number;
-  /**
-   * 全部在飞 client MCP connect 操作的登记表（startup 与 boundary apply 各一条/
-   * 次）。每次 connect await 前登记、finally 只删自己那条——单标量会被
-   * constructor startup 与并发 apply 互相覆盖，导致 detach 并集漏掉在飞条目、
-   * 子进程泄漏（评审 F1）。detach 先取全表 server 名并集再 abort 各自 controller；
-   * beginShutdown abort 全部在飞记录。
-   */
-  mcpInFlightConnects: Set<McpConnectOperation>;
+  /** 只取消当前 attachment 的连接等待，不取消会话回合或其他租约。 */
+  mcpClientConnectAbort: AbortController;
   /** detach 断开过连接，attach 后回合边界需要补连。 */
   mcpReconnectNeeded: boolean;
+  /**
+   * attachment 换代计数：每次 attach/detach 翻转 +1。apply 只比当前标志位挡不住
+   * 「detach 后又 adopt」的往返（标志位已复原），连接期间的 apply 必须按它作废。
+   */
+  mcpAttachEpoch: number;
   /** 串行化所有 configure/attach/detach 的应用尾部；防迟到完成覆盖新配置。 */
   mcpApplyTail: Promise<void>;
   /** runtime 关闭后置位；之后的 configure/apply 一律拒绝落地。 */
   mcpClosed: boolean;
   residencyBlockingWorkCount: number;
   residencyBlockingWork: Set<Promise<unknown>>;
-  mcpInitialized: boolean;
-  mcpToolsRegistered: boolean;
   /** 初始化 / 上次刷新时注册的 MCP 工具名与集合签名。 */
   registeredMcpToolNames?: string[];
+  /** 本会话曾向模型提供过的 MCP 工具名 → server 名；工具离开目录后用于说明原因。 */
+  offeredMcpTools: Map<string, string>;
+  /** 主 agent 请求已发送过 WaitForMcpServers：之后一直提供（锁存，只在内存）。 */
+  mcpServerWaitDeclared: boolean;
+  /** assistant 回复 id → 未注册工具已用的等待毫秒数；同一回复内的调用共用预算。 */
+  mcpPendingToolWaitByResponse: Map<string, number>;
+  /** server 名 → 已等满预算的那次连接（连接状态的 updatedAt）；同一次连接不再等待。 */
+  mcpPendingToolWaitExhausted: Map<string, string>;
   mcpToolsSignature?: string;
-  mcpToolListRevision?: number;
+  /** 最近一次应用快照时的 server 状态分类；ToolSearch 公告与请求工具投影读它。 */
+  mcpServerStatusFacts?: McpServerStatusFacts;
   subagentPort?: SubagentPort;
   getAgentDefinitions: NonNullable<AgentRuntimeDeps["getAgentDefinitions"]>;
   prepareAgentDefinitions: (input: {
@@ -236,6 +242,8 @@ export interface AgentRuntimeInternal
   needsPlanModeExitReminder: boolean;
   /** 恢复时对账出的「上一代 runtime 退出时被中断的后台 Agent」提醒，下一轮请求前落盘后清空。 */
   pendingPreviousRuntimeAgentNotice?: string;
+  /** resume 时从父 transcript 建的 agentId → 子代理输出文件；冷恢复后 SendMessage 按它找 metadata.json。 */
+  transcriptAgentOutputFiles: Map<string, string>;
   latestConversationMessageId?: MessageId;
   latestAssistantMessageId?: MessageId;
   latestAssistantTurnId?: TurnId;
