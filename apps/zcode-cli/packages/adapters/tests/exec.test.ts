@@ -411,7 +411,13 @@ describe("NodeExecutionAdapter", () => {
     "keeps Bash descendant enumeration out of generic argv cancellation",
     async () => {
       const outputRootDir = await mkdtemp(join(tmpdir(), "zcode-exec-generic-group-stop-"));
-      const adapter = new NodeExecutionAdapter({ outputRootDir });
+      // 后台快照只随 progress 事件更新；默认 2s 阈值正好覆盖本测试的轮询窗口，
+      // runner 稍慢就会读不到 worker pid，并在 close 时被继承 pipe 的 worker 卡住。
+      const adapter = new NodeExecutionAdapter({
+        outputRootDir,
+        progressIntervalMs: 10,
+        progressThresholdMs: 0,
+      });
       let workerPid = Number.NaN;
       const workerScript = "setInterval(() => {}, 10_000);";
       const launcherScript = [
