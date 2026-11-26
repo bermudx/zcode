@@ -873,6 +873,7 @@ function makeBrokerContext(options?: {
   respond?: (method: string) => Promise<unknown>;
   sessionEntries?: () => Promise<unknown[]>;
   sessionAutoResolutionControlsEnabled?: boolean;
+  useClaimedSessionRecord?: boolean;
 }) {
   const registry = new V4InteractionRegistry();
   const requestClient = vi.fn(
@@ -896,17 +897,29 @@ function makeBrokerContext(options?: {
     requestClient,
     v4Interactions: registry,
     ...(options?.sessionAutoResolutionControlsEnabled !== undefined
-      ? {
-          sessions: new Map([
-            [
-              "s1",
-              {
-                askUserQuestionAutoResolutionControlsEnabled:
-                  options.sessionAutoResolutionControlsEnabled,
-              },
-            ],
-          ]),
-        }
+      ? options.useClaimedSessionRecord
+        ? {
+            claimedSessionRecords: new Map([
+              [
+                "s1",
+                {
+                  askUserQuestionAutoResolutionControlsEnabled:
+                    options.sessionAutoResolutionControlsEnabled,
+                },
+              ],
+            ]),
+          }
+        : {
+            sessions: new Map([
+              [
+                "s1",
+                {
+                  askUserQuestionAutoResolutionControlsEnabled:
+                    options.sessionAutoResolutionControlsEnabled,
+                },
+              ],
+            ]),
+          }
       : {}),
   } as unknown as ZCodeProtocolAgentServerContext;
   return {
@@ -1183,11 +1196,51 @@ describe("broker × v4 竞速", () => {
           },
         }),
       );
-      await new Promise((r) => setTimeout(r, 0));
+      await vi.advanceTimersByTimeAsync(0);
       await vi.advanceTimersByTimeAsync(600_000);
 
       expect(registry.has("ask_acp_no_timeout")).toBe(true);
       registry.resolve("ask_acp_no_timeout", { freeText: "B 口味" });
+      await expect(pending).resolves.toMatchObject({
+        decision: "modify",
+        modifiedInput: { answers: { "要哪种？": "B 口味" } },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AskUserQuestion：温暖收养后仍读取 claimed record 的无倒计时能力", async () => {
+    vi.useFakeTimers();
+    try {
+      const { broker, registry } = makeBrokerContext({
+        sessionAutoResolutionControlsEnabled: false,
+        useClaimedSessionRecord: true,
+      });
+      const pending = broker.requestPermission(
+        permissionRequest({
+          requestId: "ask_acp_adopted_no_timeout",
+          toolName: "AskUserQuestion",
+          input: {
+            questions: [
+              {
+                header: "口味",
+                question: "要哪种？",
+                multiSelect: false,
+                options: [
+                  { label: "A", description: "a" },
+                  { label: "B", description: "b" },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(600_000);
+
+      expect(registry.has("ask_acp_adopted_no_timeout")).toBe(true);
+      registry.resolve("ask_acp_adopted_no_timeout", { freeText: "B 口味" });
       await expect(pending).resolves.toMatchObject({
         decision: "modify",
         modifiedInput: { answers: { "要哪种？": "B 口味" } },

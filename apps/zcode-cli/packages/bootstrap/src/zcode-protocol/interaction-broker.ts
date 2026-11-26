@@ -656,6 +656,15 @@ function normalizeAskUserQuestionAnswers(
   return Object.keys(answers).length > 0 ? answers : undefined;
 }
 
+function findInteractionSessionRecord(
+  context: ZCodeProtocolAgentServerContext,
+  sessionId: string,
+) {
+  // 收养后 record 从旧 context.sessions 转入 claimedSessionRecords；迟到 broker
+  // 闭包仍必须看到同一 record 的客户端能力，否则会把无倒计时客户端误判为可计时。
+  return context.sessions?.get(sessionId) ?? context.claimedSessionRecords?.get(sessionId);
+}
+
 function createInteractionRegistrationOptions(
   request: PermissionBrokerRequest,
   kind: V4InteractionRegistrationOptions["kind"],
@@ -670,12 +679,12 @@ function createInteractionRegistrationOptions(
       ? {
           // ACP 等无倒计时/暂停控件的 owner 只取消本 session 的计时资格；
           // 不写全局 gate，避免 shared core 中其他客户端被一起关闭。
-          ...(context.sessions?.get(String(request.sessionId))
+          ...(findInteractionSessionRecord(context, String(request.sessionId))
             ?.askUserQuestionAutoResolutionControlsEnabled === false
             ? { autoResolutionControlsEnabled: false }
             : {}),
           onAutoResolutionUpdated: async (autoResolution) => {
-            const record = context.sessions?.get(String(request.sessionId));
+            const record = findInteractionSessionRecord(context, String(request.sessionId));
             if (!record) return;
             try {
               await record.app.runtime.recordUserInputAutoResolutionUpdate({
