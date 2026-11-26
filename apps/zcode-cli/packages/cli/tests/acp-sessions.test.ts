@@ -57,6 +57,8 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
   const socketPath = join(directory, "core.sock");
   const sockets = new Set<Socket>();
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const runtimePreferenceResponses: Array<Record<string, unknown>> = [];
+  let runtimePreferenceRequestSeq = 0;
   const upload = {
     respond: undefined as ((method: string) => Promise<void>) | undefined,
   };
@@ -93,16 +95,28 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
       let newline: number;
       while ((newline = buffer.indexOf("\n")) >= 0) {
         const message = JSON.parse(buffer.slice(0, newline)) as {
-          id: string; method: string; params: Record<string, unknown>;
+          id: string; method?: string; params?: Record<string, unknown>; result?: unknown;
         };
         buffer = buffer.slice(newline + 1);
-        requests.push(message);
-        const sessionId = String(message.params.sessionId ?? `session-${requests.length}`);
+        if (message.method === undefined) {
+          if (String(message.id).startsWith("runtime-preferences-")) {
+            runtimePreferenceResponses.push(message as Record<string, unknown>);
+          }
+          continue;
+        }
+        const params = message.params ?? {};
+        requests.push({ method: message.method, params });
+        const sessionId = String(params.sessionId ?? `session-${requests.length}`);
         let result: unknown = {};
         let error: { code: number; message: string } | undefined;
         if (message.method === "session/create") {
           resident.add(sessionId);
           result = snapshot(sessionId);
+          socket.write(`${JSON.stringify({
+            id: `runtime-preferences-${++runtimePreferenceRequestSeq}`,
+            method: "session/requestRuntimePreferences",
+            params: { scope: "runtime-materialization", sessionId },
+          })}\n`);
         } else if (message.method === "session/resume") {
           if (rejectResume) {
             error = { code: -32000, message: "injected resume failure" };
@@ -130,11 +144,11 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
             resident.delete(sessionId);
           }
         } else if (message.method.startsWith("v4/attachment/")) {
-          const { uploadId } = message.params;
+          const { uploadId } = params;
           const reply = message.method === "v4/attachment/begin"
             ? { nextChunkIndex: 0, state: "staging", uploadId }
             : message.method === "v4/attachment/chunk"
-              ? { nextChunkIndex: Number(message.params.chunkIndex) + 1, uploadId }
+              ? { nextChunkIndex: Number(params.chunkIndex) + 1, uploadId }
               : message.method === "v4/attachment/commit"
                 ? { ref: `zcode-artifact://${String(uploadId)}` }
                 : {};
@@ -143,9 +157,9 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
             return reply;
           });
         } else if (message.method === "v4/command") {
-          result = { commandId: message.params.commandId, status: "accepted", revisionAtDecision: 0 };
-          if (message.params.type === "sendText") {
-            promptInput = String(message.params.commandId);
+          result = { commandId: params.commandId, status: "accepted", revisionAtDecision: 0 };
+          if (params.type === "sendText") {
+            promptInput = String(params.commandId);
             notify(sessionId, "turn_started", { inputId: promptInput });
           }
         }
@@ -181,7 +195,7 @@ async function fixture(t: test.TestContext, workflowMode: DynamicWorkflowMode = 
     await rm(directory, { recursive: true, force: true });
   });
   return {
-    catalogs, sessions, requests, sockets, notify, connectedRefs, socketPath, upload,
+    catalogs, sessions, requests, runtimePreferenceResponses, sockets, notify, connectedRefs, socketPath, upload,
     get connectionCount() { return connectionCount; },
     get promptInput() { return promptInput; },
     rejectClose: (reject: boolean) => { rejectClose = reject; },
@@ -209,6 +223,17 @@ test("ACP real lane connects for new/resume and closes its owned socket", async 
   assert.equal(f.connectionCount, 1);
   await f.sessions.closeAll();
   await until(() => f.sockets.size === 0);
+});
+
+test("ACP declares no AskUserQuestion countdown controls in runtime preferences", async (t) => {
+  const f = await fixture(t);
+  await f.sessions.open("/workspace");
+
+  await until(() => f.runtimePreferenceResponses.length > 0);
+  assert.deepEqual(f.runtimePreferenceResponses[0]?.result, {
+    askUserQuestionAutoResolutionControlsEnabled: false,
+    nativeSearchEnhancementsEnabled: false,
+  });
 });
 
 test("ACP lanes for different cwds converge on the single core and keep per-cwd workspace refs", async (t) => {

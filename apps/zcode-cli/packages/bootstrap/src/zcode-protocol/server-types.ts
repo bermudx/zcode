@@ -129,6 +129,8 @@ export interface ZCodeProtocolSessionRecord {
   totalTokensReminderEnabled: boolean;
   /** Agent 是否总在后台运行；创建或冷恢复时从 Host 读一次，fork 与旁路会话沿用父记录。 */
   agentAlwaysBackgroundEnabled: boolean;
+  /** owner 客户端是否能呈现 AskUserQuestion 倒计时/暂停控件；false 时本 session 不启动自动结束。 */
+  askUserQuestionAutoResolutionControlsEnabled?: boolean;
   modelContextBudgetStrategy: ZCodeModelContextBudgetStrategy;
   createdAt: number;
   deliveryKind?: ZCodeDeliveryKind;

@@ -668,6 +668,12 @@ function createInteractionRegistrationOptions(
     ...(initialAutoResolution ? { initialAutoResolution } : {}),
     ...(kind === "askUserQuestion" && context
       ? {
+          // ACP 等无倒计时/暂停控件的 owner 只取消本 session 的计时资格；
+          // 不写全局 gate，避免 shared core 中其他客户端被一起关闭。
+          ...(context.sessions?.get(String(request.sessionId))
+            ?.askUserQuestionAutoResolutionControlsEnabled === false
+            ? { autoResolutionControlsEnabled: false }
+            : {}),
           onAutoResolutionUpdated: async (autoResolution) => {
             const record = context.sessions?.get(String(request.sessionId));
             if (!record) return;

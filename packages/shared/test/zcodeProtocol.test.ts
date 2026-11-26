@@ -2754,6 +2754,7 @@ describe("ZCode Protocol", () => {
       }),
     ).toMatchObject({
       askUserQuestionAutoResolutionEnabled: true,
+      askUserQuestionAutoResolutionControlsEnabled: true,
       memoryEnabled: false,
       modelContextBudgetStrategy: DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
     });
@@ -2761,9 +2762,13 @@ describe("ZCode Protocol", () => {
       zcodeSessionRuntimePreferencesResultSchema.parse({
         nativeSearchEnhancementsEnabled: true,
         askUserQuestionAutoResolutionEnabled: false,
+        askUserQuestionAutoResolutionControlsEnabled: false,
         modelContextBudgetStrategy: "preflight-v1",
-      }).askUserQuestionAutoResolutionEnabled,
-    ).toBe(false);
+      }),
+    ).toMatchObject({
+      askUserQuestionAutoResolutionEnabled: false,
+      askUserQuestionAutoResolutionControlsEnabled: false,
+    });
     expect(() =>
       zcodeSessionRuntimePreferencesResultSchema.parse({
         nativeSearchEnhancementsEnabled: true,

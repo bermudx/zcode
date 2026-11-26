@@ -2081,6 +2081,7 @@ history。重点检查：
 
 - `requiresUserInteraction`、permission broker、TUI/ZCode app-server request-response、pending/resume、非交互 session 降级。
 - 不把交互流程写死在 TUI，ZCode app-server 也必须能承载。
+- AskUserQuestion 自动结束必须有可见倒计时与暂停控件。ACP 等不能呈现这些控件的 owner 在 runtime preferences 声明能力缺失；core 按 session 记录取消计时资格，不得把全局设置或其他客户端一并关闭。
 
 ### Background / long-running tool
 

@@ -67,6 +67,8 @@ export type V4InteractionAutoResolution =
 export interface V4InteractionRegistrationOptions {
   sessionId: string;
   kind: "askUserQuestion" | "pluginInstall" | "other";
+  /** session owner 客户端是否具备倒计时/暂停控件；false 只取消本 registration 的计时资格。 */
+  autoResolutionControlsEnabled?: boolean;
   fullAccess?: (mode: "guarded" | "yolo") => Promise<void>;
   initialAutoResolution?: V4InteractionAutoResolution;
   onAutoResolutionUpdated?: (state: V4InteractionAutoResolution) => void | Promise<void>;
@@ -123,7 +125,10 @@ export class V4InteractionRegistry {
       token,
       autoResolutionEligible:
         previous?.autoResolutionEligible ??
-        (options?.kind === "askUserQuestion" ? this.askUserQuestionAutoResolutionEnabled : false),
+        (options?.kind === "askUserQuestion"
+          ? this.askUserQuestionAutoResolutionEnabled &&
+            options.autoResolutionControlsEnabled !== false
+          : false),
       ...(previous?.autoResolution || options?.initialAutoResolution
         ? { autoResolution: previous?.autoResolution ?? options?.initialAutoResolution }
         : {}),
