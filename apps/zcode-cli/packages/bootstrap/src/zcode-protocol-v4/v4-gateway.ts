@@ -30,6 +30,7 @@ import type {
   MessageWithParts,
   SessionEvent,
   TargetChangedPayload,
+  TurnCompletePayload,
   TurnId,
   FileSystemErrorCode,
 } from "@zcode/contracts";
@@ -375,6 +376,8 @@ export interface V4GatewayHost {
     event: SessionEvent,
     snapshot: ConversationSnapshot,
   ): void;
+  /** Recheck a ready queue after live turn completion, never during hydration replay. */
+  onLiveTurnComplete?(sessionId: string): void;
   /** 完整 chunk transaction commit 后一次性写 session artifact。 */
   putSessionAttachment?(
     sessionId: string,
@@ -1159,6 +1162,25 @@ export class ConversationV4Gateway {
         this.host.onHighspeedTurnTerminal?.(sessionId, event, publisher.getSnapshot());
       } catch (error) {
         this.host.onError?.("v4.projection.highspeedMetrics", error);
+      }
+    }
+    if (
+      !this.hydrationBuffers.has(sessionId) &&
+      event.type === SessionEventType.TurnComplete &&
+      (event.payload as TurnCompletePayload).resultType === "success"
+    ) {
+      const snapshot = publisher.getSnapshot();
+      const head = snapshot.queue.items[0];
+      if (
+        snapshot.queue.autoDrain &&
+        head?.dispatch.state === "queued" &&
+        head.editLock === undefined
+      ) {
+        try {
+          this.host.onLiveTurnComplete?.(sessionId);
+        } catch (error) {
+          this.host.onError?.("v4.projection.liveTurnComplete", error);
+        }
       }
     }
     if (
