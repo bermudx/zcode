@@ -1940,6 +1940,8 @@ BG41 的 E2E 剪枝：只覆盖本地 workspace、一个 background Agent、父 
 
 BG42 的状态组合按本次实机复现收敛：只覆盖本地 workspace、单个 background Agent completion、独立 notification model request in-flight、一个 text queue item，以及首次点击和同项重试的幂等边界。active-loop notification 合流、notification batch、tool/approval、goal/compact/model switch、附件、remote workspace、手机 `web-remote-replayable` 和重连恢复不做排列组合；这些状态不能从桌面 continuous 的 Core/Bootstrap authority 回归外推。
 
+BG43 覆盖两种提交顺序：input 已入队后提交 `TurnComplete`，或 `TurnComplete` 已提交但 Core 尚未释放 foreground 时 input 才入队。后一种顺序也必须安排同一 deferred queue 重评；不能因为终态提交时队列为空而丢掉唤醒。两种顺序都只在 Core idle 后提升。
+
 BG43/BG44 按竞态审计后的高风险组合收敛：BG43 只验证自动 drain 的非抢占语义，BG44 只验证显式 promotion 与后一条 notification 的 Core 调度顺序。两者不与 goal/compact/附件、多个 queue item、notification batch、remote workspace、手机 `web-remote-replayable` 或重连恢复做笛卡尔积；上述组合沿用各自既有 case，不能从本地 desktop continuous 的 focused 复现外推。
 
 BG45 的 E2E 剪枝：只覆盖本地 desktop continuous、单个 foreground child、单个 background child、一个文件 barrier 和同一 main continuation request；不与多个 child、失败/取消、queue/goal/compact、remote workspace 或手机 replayable 做笛卡尔积，child 独立 completion 仍由负向断言固定为不存在。

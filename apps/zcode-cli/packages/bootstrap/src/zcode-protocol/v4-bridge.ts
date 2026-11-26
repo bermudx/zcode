@@ -1771,7 +1771,7 @@ export function createConversationV4Gateway(
           });
         });
     },
-    onLiveTurnComplete: (sessionId) => {
+    onQueueReadyForRecheck: (sessionId) => {
       const record = context.sessions.get(sessionId);
       if (!record) return;
       // 后台 notification turn 由 Core 自己启动，不经过 v4 prompt 的 finally；

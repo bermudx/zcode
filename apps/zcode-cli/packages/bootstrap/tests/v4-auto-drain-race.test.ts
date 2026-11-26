@@ -39,7 +39,7 @@ describe("v4 queue auto-drain foreground races", () => {
     vi.useRealTimers();
   });
 
-  it("BG43：Core-only notification 活跃时 auto-drain 不得抢占 foreground", async () => {
+  it.each(["before", "after"] as const)("BG43: queue %s completion", async (admissionOrder) => {
     vi.useFakeTimers();
     let sessionEventSink: ((event: SessionEvent) => void) | undefined;
     let sequenceNumber = 0;
@@ -184,30 +184,32 @@ describe("v4 queue auto-drain foreground races", () => {
       );
     };
     startNotification("turn-notification-bg43", 1);
-    emitEvent(
-      SessionEventType.TurnSteerQueued,
-      {
-        pendingInputId: "queue-bg43",
-        inputId: "source-bg43",
-        input: "BG43 queued text",
-        inputPreview: "BG43 queued text",
-        inputSize: 16,
-        delivery: "queue",
-        targetTurnId: "turn-notification-bg43",
-        queueLength: 1,
-        intent: {
-          sourceCommandId: "source-bg43",
-          queueItemId: "queue-bg43",
-          clientId: "desktop-bg43",
-          kind: "sendText",
-          admissionSeq: 1,
-          admittedAt: 1_700_000_000_002,
-          requestedDelivery: "queue",
-          admittedDelivery: "queue",
+    const enqueuePrompt = () =>
+      emitEvent(
+        SessionEventType.TurnSteerQueued,
+        {
+          pendingInputId: "queue-bg43",
+          inputId: "source-bg43",
+          input: "BG43 queued text",
+          inputPreview: "BG43 queued text",
+          inputSize: 16,
+          delivery: "queue",
+          targetTurnId: "turn-notification-bg43",
+          queueLength: 1,
+          intent: {
+            sourceCommandId: "source-bg43",
+            queueItemId: "queue-bg43",
+            clientId: "desktop-bg43",
+            kind: "sendText",
+            admissionSeq: 1,
+            admittedAt: 1_700_000_000_002,
+            requestedDelivery: "queue",
+            admittedDelivery: "queue",
+          },
         },
-      },
-      "turn-notification-bg43",
-    );
+        "turn-notification-bg43",
+      );
+    if (admissionOrder === "before") enqueuePrompt();
     emitEvent(SessionEventType.QueueAutoDrainChanged, { autoDrain: true });
 
     const subscriptionRequestId = "subscribe-bg43";
@@ -231,16 +233,20 @@ describe("v4 queue auto-drain foreground races", () => {
     }
     expect(assembled.frame.payload.snapshot.queue).toMatchObject({
       autoDrain: true,
-      items: [
-        expect.objectContaining({
-          queueItemId: "queue-bg43",
-          dispatch: { state: "queued" },
-        }),
-      ],
+      items:
+        admissionOrder === "before"
+          ? [
+              expect.objectContaining({
+                queueItemId: "queue-bg43",
+                dispatch: { state: "queued" },
+              }),
+            ]
+          : [],
     });
 
     // Background notification turns do not pass through the normal v4 prompt
-    // finally. Their committed terminal event must schedule the idle recheck.
+    // finally. Whether the queue or the terminal event commits last, it must
+    // schedule the idle recheck.
     emitEvent(
       SessionEventType.TurnComplete,
       {
@@ -252,6 +258,7 @@ describe("v4 queue auto-drain foreground races", () => {
       },
       "turn-notification-bg43",
     );
+    if (admissionOrder === "after") enqueuePrompt();
     await vi.advanceTimersByTimeAsync(100);
     expect(activeForegroundExecutionId).toBe("notification-bg43");
     expect(stopActiveForegroundExecution).not.toHaveBeenCalled();
