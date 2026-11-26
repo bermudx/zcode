@@ -742,15 +742,27 @@ export function createConversationV4Gateway(
         return;
       }
     }
+    // 读取 goal 期间，prompt finally 或另一个命令可提升、替换或暂停队首。
+    // 不能把已失效项的提升失败误判为当前队列需要暂停。
+    if (context.sessions.get(record.app.sessionId) !== record) return;
+    const currentHead = context.v4Gateway?.getQueueHead(record.app.sessionId);
+    if (currentHead?.queueItemId !== head.queueItemId) return;
     if (
       !shouldAutoDrainV4QueueHead({
-        autoDrain: head.autoDrain,
-        dispatchState: head.dispatchState,
-        editLocked: head.editLocked,
-        sessionBusy: Boolean(record.activeAbortController) || coreForegroundBusy,
+        autoDrain: currentHead.autoDrain,
+        dispatchState: currentHead.dispatchState,
+        editLocked: currentHead.editLocked,
+        sessionBusy: false,
         targetStatus,
       })
     ) {
+      return;
+    }
+    if (
+      record.activeAbortController !== undefined ||
+      record.app.runtime.getActiveForegroundExecutionId() !== undefined
+    ) {
+      scheduleAutoDrainRetry(record);
       return;
     }
     // 暂停队列恢复后，旧项只存在于投影而不在新 activeTurn 内存中；普通文本也必须
@@ -1758,6 +1770,13 @@ export function createConversationV4Gateway(
             sessionId,
           });
         });
+    },
+    onQueueReadyForRecheck: (sessionId) => {
+      const record = context.sessions.get(sessionId);
+      if (!record) return;
+      // 后台 notification turn 由 Core 自己启动，不经过 v4 prompt 的 finally；
+      // 普通 ACP sendText 的队列准入也没有 afterLegacyStateMutation 可重评队列。
+      scheduleAutoDrainRetry(record);
     },
     onHighspeedTurnTerminal: (sessionId, event, snapshot) => {
       persistHighspeedTimingOnTurnTerminal(context, sessionId, event, snapshot);

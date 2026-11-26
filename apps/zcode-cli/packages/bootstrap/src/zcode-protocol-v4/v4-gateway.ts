@@ -30,6 +30,7 @@ import type {
   MessageWithParts,
   SessionEvent,
   TargetChangedPayload,
+  TurnCompletePayload,
   TurnId,
   FileSystemErrorCode,
 } from "@zcode/contracts";
@@ -375,6 +376,8 @@ export interface V4GatewayHost {
     event: SessionEvent,
     snapshot: ConversationSnapshot,
   ): void;
+  /** Recheck a ready queue at live turn completion or at a late admission. */
+  onQueueReadyForRecheck?(sessionId: string): void;
   /** 完整 chunk transaction commit 后一次性写 session artifact。 */
   putSessionAttachment?(
     sessionId: string,
@@ -1159,6 +1162,30 @@ export class ConversationV4Gateway {
         this.host.onHighspeedTurnTerminal?.(sessionId, event, publisher.getSnapshot());
       } catch (error) {
         this.host.onError?.("v4.projection.highspeedMetrics", error);
+      }
+    }
+    if (
+      this.host.onQueueReadyForRecheck &&
+      !this.hydrationBuffers.has(sessionId) &&
+      ((event.type === SessionEventType.TurnComplete &&
+        (event.payload as TurnCompletePayload).resultType === "success") ||
+        event.type === SessionEventType.TurnSteerQueued)
+    ) {
+      const snapshot = publisher.getSnapshot();
+      const head = snapshot.queue.items[0];
+      if (
+        snapshot.queue.autoDrain &&
+        head?.dispatch.state === "queued" &&
+        head.editLock === undefined &&
+        (event.type === SessionEventType.TurnComplete ||
+          // 完成事件先于 Core 释放 foreground；晚到的入队也要唤醒。
+          snapshot.control.phase === "completedSuccess")
+      ) {
+        try {
+          this.host.onQueueReadyForRecheck(sessionId);
+        } catch (error) {
+          this.host.onError?.("v4.projection.queueReadyForRecheck", error);
+        }
       }
     }
     if (
