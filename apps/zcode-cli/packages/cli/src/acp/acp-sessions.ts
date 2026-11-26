@@ -285,6 +285,9 @@ export class AcpCoreSessions implements AcpCorePort {
       // 冷恢复的 session/resume 会冷物化 record：不带灰度字段会让 core fail-closed，
       // core 重启后已激活的会话丢掉工作流工具面。
       recoveryDynamicWorkflow: this.workflowGate,
+      // ACP elicitation 没有倒计时或暂停控件；声明能力缺失，core 才能按 session
+      // 停止 AskUserQuestion 自动收口，而不是把 shared-core 的全局设置一起关掉。
+      runtimePreferences: { askUserQuestionAutoResolutionControlsEnabled: false },
       locale: "en-US",
       logger: this.options.logger,
       socketPath,

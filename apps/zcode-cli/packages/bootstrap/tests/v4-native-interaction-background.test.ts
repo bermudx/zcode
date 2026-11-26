@@ -359,6 +359,32 @@ describe("V4InteractionRegistry", () => {
     expect(permissionResolve).toHaveBeenCalledWith({ optionId: "allowOnce" });
   });
 
+  it("keeps queued AskUserQuestion untimed when its session client lacks countdown controls", async () => {
+    vi.useFakeTimers();
+    const registry = new V4InteractionRegistry();
+    const firstResolve = vi.fn();
+    const askResolve = vi.fn();
+    const askUpdates = vi.fn();
+
+    registry.register("permission-first", firstResolve, {
+      kind: "other",
+      sessionId: "s1",
+    });
+    registry.register("ask-acp-second", askResolve, {
+      autoResolutionControlsEnabled: false,
+      kind: "askUserQuestion",
+      sessionId: "s1",
+      onAutoResolutionUpdated: askUpdates,
+    });
+
+    registry.resolve("permission-first", { optionId: "allowOnce" });
+    await vi.advanceTimersByTimeAsync(600_000);
+
+    expect(askUpdates).not.toHaveBeenCalled();
+    expect(askResolve).not.toHaveBeenCalled();
+    expect(registry.has("ask-acp-second")).toBe(true);
+  });
+
   it("supports an injected runtime clock window for desktop GUI candidates", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-13T00:00:00.000Z"));
@@ -846,6 +872,8 @@ describe("v4 原生 cancelBackgroundWork", () => {
 function makeBrokerContext(options?: {
   respond?: (method: string) => Promise<unknown>;
   sessionEntries?: () => Promise<unknown[]>;
+  sessionAutoResolutionControlsEnabled?: boolean;
+  useClaimedSessionRecord?: boolean;
 }) {
   const registry = new V4InteractionRegistry();
   const requestClient = vi.fn(
@@ -868,6 +896,31 @@ function makeBrokerContext(options?: {
     },
     requestClient,
     v4Interactions: registry,
+    ...(options?.sessionAutoResolutionControlsEnabled !== undefined
+      ? options.useClaimedSessionRecord
+        ? {
+            claimedSessionRecords: new Map([
+              [
+                "s1",
+                {
+                  askUserQuestionAutoResolutionControlsEnabled:
+                    options.sessionAutoResolutionControlsEnabled,
+                },
+              ],
+            ]),
+          }
+        : {
+            sessions: new Map([
+              [
+                "s1",
+                {
+                  askUserQuestionAutoResolutionControlsEnabled:
+                    options.sessionAutoResolutionControlsEnabled,
+                },
+              ],
+            ]),
+          }
+      : {}),
   } as unknown as ZCodeProtocolAgentServerContext;
   return {
     broker: createProtocolInteractionBroker(context),
@@ -1112,6 +1165,85 @@ describe("broker × v4 竞速", () => {
       await expect(pending).resolves.toMatchObject({
         decision: "modify",
         modifiedInput: { answers: {} },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AskUserQuestion：owner 无倒计时控件时等待显式回答，不自动收口", async () => {
+    vi.useFakeTimers();
+    try {
+      const { broker, registry } = makeBrokerContext({
+        sessionAutoResolutionControlsEnabled: false,
+      });
+      const pending = broker.requestPermission(
+        permissionRequest({
+          requestId: "ask_acp_no_timeout",
+          toolName: "AskUserQuestion",
+          input: {
+            questions: [
+              {
+                header: "口味",
+                question: "要哪种？",
+                multiSelect: false,
+                options: [
+                  { label: "A", description: "a" },
+                  { label: "B", description: "b" },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(600_000);
+
+      expect(registry.has("ask_acp_no_timeout")).toBe(true);
+      registry.resolve("ask_acp_no_timeout", { freeText: "B 口味" });
+      await expect(pending).resolves.toMatchObject({
+        decision: "modify",
+        modifiedInput: { answers: { "要哪种？": "B 口味" } },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AskUserQuestion：温暖收养后仍读取 claimed record 的无倒计时能力", async () => {
+    vi.useFakeTimers();
+    try {
+      const { broker, registry } = makeBrokerContext({
+        sessionAutoResolutionControlsEnabled: false,
+        useClaimedSessionRecord: true,
+      });
+      const pending = broker.requestPermission(
+        permissionRequest({
+          requestId: "ask_acp_adopted_no_timeout",
+          toolName: "AskUserQuestion",
+          input: {
+            questions: [
+              {
+                header: "口味",
+                question: "要哪种？",
+                multiSelect: false,
+                options: [
+                  { label: "A", description: "a" },
+                  { label: "B", description: "b" },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(600_000);
+
+      expect(registry.has("ask_acp_adopted_no_timeout")).toBe(true);
+      registry.resolve("ask_acp_adopted_no_timeout", { freeText: "B 口味" });
+      await expect(pending).resolves.toMatchObject({
+        decision: "modify",
+        modifiedInput: { answers: { "要哪种？": "B 口味" } },
       });
     } finally {
       vi.useRealTimers();

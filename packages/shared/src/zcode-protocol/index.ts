@@ -2349,6 +2349,9 @@ export const zcodeSessionRuntimePreferencesResultSchema = z
     appControlEnabled: z.boolean().optional(),
     memoryEnabled: z.boolean().default(false),
     askUserQuestionAutoResolutionEnabled: z.boolean().default(true),
+    // 客户端能力事实：能呈现 AskUserQuestion 倒计时/暂停控件时才允许计时；
+    // 旧 Host 缺省按具备能力处理，保持桌面五分钟自动继续兼容。
+    askUserQuestionAutoResolutionControlsEnabled: z.boolean().default(true),
     integratedTerminalShell: integratedTerminalShellSelectionSchema.optional(),
     // 兼容旧 Host：缺少字段时在协议解析边界使用当前默认策略。
     modelContextBudgetStrategy: zcodeModelContextBudgetStrategySchema.default(

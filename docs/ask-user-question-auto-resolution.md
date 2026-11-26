@@ -4,6 +4,8 @@
 
 普通 `AskUserQuestion` 默认不应无限阻塞运行中的 task。每个到达交互队首的普通问答获得一个由 CLI/runtime 管理的五分钟窗口；用户未回答时，runtime 以空答案成功收口，让模型使用最佳判断继续。侧栏只投影该权威状态，不自行决定超时。
 
+例外：当前 owner 客户端在 runtime 物化时声明自己不能呈现倒计时/暂停控件（ACP 即属此类）时，该 session 的普通问答不获得计时资格，永久等待显式回答、拒绝或取消。不能因为客户端看不见 countdown 而静默收口。
+
 普通权限请求和 `ExitPlanMode` 计划审批不参与自动结束。
 
 用户可以在设置页关闭“提问自动继续”。配置默认开启以保持升级兼容；关闭后，当前所有普通
@@ -60,8 +62,9 @@ setting re-enabled ──> 仅之后新注册的 Ask 可进入 hiddenGrace
 - `snoozed`：`startedAt`、`snoozedAt`；不再包含 deadline。
 - 生产常量固定为 `visibleAt = startedAt + 60_000`、`deadlineAt = startedAt + 300_000`。测试通过注入 clock/scheduler 缩短等待，不能改变产品值。
 - Registry 为每个问答在注册时记录计时资格。全局设置关闭会撤销所有当前问答的资格；重新开启不得回填已有 registration。
+- 计时资格是全局设置与 session owner 客户端能力的合取：任一关闭都没有 deadline。无倒计时/暂停控件的客户端只影响它物化出的 session 及其继承子 session，不把该选择写成全局设置。
 
-只有队首普通 `AskUserQuestion` 获得 `startedAt`。后续 pending interaction 在前项出队后才开始自己的完整五分钟，避免排队时间消耗其回答窗口。
+只有队首普通 `AskUserQuestion` 获得 `startedAt`。后续 pending interaction 在前项出队后才开始自己的完整五分钟，避免排队时间消耗其回答窗口；无资格的问答即使之后到达队首也不开始五分钟。
 
 ## 权威链路与恢复边界
 
@@ -113,6 +116,7 @@ AskUserQuestion tool ───────────> CLI interaction coordina
   RPC 端口。设置同步必须同时推送到这些**已缓存**的 Bot runtime，且禁止为了同步偏好新建远端
   Host/Agent；新建 Bot runtime 在暴露 task/session service 前先应用最新偏好。
 - 设置同步不按 `clientMode` 分叉；它改变 shared-host runtime 的同一权威 registry。变更后的 interaction 事实仍分别通过桌面 `continuous` 与手机 `replayable` 投递。
+- ACP owner 在 `session/requestRuntimePreferences` 中声明 `askUserQuestionAutoResolutionControlsEnabled: false`。这是客户端能力事实，不是 AppSettings 分叉；session record 保存该值，fork/subagent 继承。温暖 session 被其他客户端收养时保守保留无计时；冷恢复由新的 owner 重新声明。
 
 ## 有效用户操作
 
@@ -186,6 +190,7 @@ hiddenGrace ── 首次有效操作 ──> snoozed
 - sessions-index 的后台摘要和 desktop continuous / web replayable 恢复；
 - 三种侧栏 row、双主题、中英文与桌面/手机布局；
 - 默认开启、关闭前注册、计时中关闭、关闭期间注册与重新开启不追溯；
+- 无 countdown/snooze 控件的 ACP owner：队首与排队问答都不自动收口，fork/subagent 继承同一资格，桌面 owner 冷恢复仍按默认计时；
 - Q09–Q14、Q23–Q25 conversation cases。
 
 明确剪枝：

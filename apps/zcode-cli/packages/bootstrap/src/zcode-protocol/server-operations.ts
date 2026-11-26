@@ -216,6 +216,7 @@ interface SessionStartupPreferences {
   toolSearchMode: AppToolSearchMode;
   totalTokensReminderEnabled: boolean;
   agentAlwaysBackgroundEnabled: boolean;
+  askUserQuestionAutoResolutionControlsEnabled: boolean;
   resolveInitialBashShellSelection: () => Promise<ExecutionShellSelection | undefined>;
 }
 
@@ -4016,6 +4017,8 @@ async function requestSessionRuntimePreferences(
       // 增强搜索维持原有默认开启，其他协议/传输错误仍阻止 runtime 创建。
       return {
         askUserQuestionAutoResolutionEnabled: true,
+        // 旧 Host 不认识客户端能力字段时保持既有桌面计时行为。
+        askUserQuestionAutoResolutionControlsEnabled: true,
         memoryEnabled: false,
         modelContextBudgetStrategy: DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
         nativeSearchEnhancementsEnabled: true,
@@ -4048,6 +4051,8 @@ async function resolveSessionStartupPreferences(
       toolSearchMode: source.parent.toolSearchMode,
       totalTokensReminderEnabled: source.parent.totalTokensReminderEnabled,
       agentAlwaysBackgroundEnabled: source.parent.agentAlwaysBackgroundEnabled,
+      askUserQuestionAutoResolutionControlsEnabled:
+        source.parent.askUserQuestionAutoResolutionControlsEnabled ?? true,
       resolveInitialBashShellSelection: async () => inheritedShellSelection,
     };
   }
@@ -4074,6 +4079,8 @@ async function resolveSessionStartupPreferences(
     toolSearchMode: runtimePreferences.toolSearchMode,
     totalTokensReminderEnabled: runtimePreferences.totalTokensReminderEnabled,
     agentAlwaysBackgroundEnabled: runtimePreferences.agentAlwaysBackgroundEnabled,
+    askUserQuestionAutoResolutionControlsEnabled:
+      runtimePreferences.askUserQuestionAutoResolutionControlsEnabled,
     resolveInitialBashShellSelection: async () => {
       const executionPreferences = await requestSessionRuntimePreferences(
         context,
@@ -4338,6 +4345,8 @@ async function createRecord(
     toolSearchMode: startupPreferences.toolSearchMode,
     totalTokensReminderEnabled: startupPreferences.totalTokensReminderEnabled,
     agentAlwaysBackgroundEnabled: startupPreferences.agentAlwaysBackgroundEnabled,
+    askUserQuestionAutoResolutionControlsEnabled:
+      startupPreferences.askUserQuestionAutoResolutionControlsEnabled,
     ...(parentSessionId ? { parentSessionId } : {}),
     persistence: "persistence" in params ? (params.persistence ?? "immediate") : "immediate",
     protocolEventSequences: new Map(),
