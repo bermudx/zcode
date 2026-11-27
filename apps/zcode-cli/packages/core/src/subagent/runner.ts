@@ -159,7 +159,11 @@ export interface ExploreSubagentPortOptions {
   logger?: Logger;
 }
 
-export function createExploreSubagentPort(options: ExploreSubagentPortOptions): SubagentPort {
+type RunnerOptions = ExploreSubagentPortOptions & {
+  writeArtifacts(agentId: string, write: () => Promise<void>): Promise<void>;
+};
+
+export function createExploreSubagentPort(portOptions: ExploreSubagentPortOptions): SubagentPort {
   const pending = new Set<Promise<unknown>>();
   const cleanupErrors: unknown[] = [];
   const shutdown = new AbortController();
@@ -176,12 +180,24 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
     );
     return work;
   };
-  const runExploreAgent = options.runExploreAgent;
+  const runExploreAgent = portOptions.runExploreAgent;
   // child session → 正在执行的 child runtime。task 记为终态时 child 可能还在收尾（看门狗超时、停止后），
   // SendMessage 恢复只认这里：执行 promise settle 才移除，不用 registry 状态或超时推断。
   const liveChildRuns = new Map<SessionId, Promise<ExploreSubagentRuntimeResult>>();
-  options = {
-    ...options,
+  const artifactWrites = new Map<string, Promise<void>>();
+  const options: RunnerOptions = {
+    ...portOptions,
+    writeArtifacts(agentId, write) {
+      // 停止、正常收尾和恢复使用同一目录。批次间不能交错；前一批失败也不能阻止停止落盘。
+      const previous = artifactWrites.get(agentId);
+      const current = previous ? previous.then(write, write) : write();
+      artifactWrites.set(agentId, current);
+      const release = () => {
+        if (artifactWrites.get(agentId) === current) artifactWrites.delete(agentId);
+      };
+      void current.then(release, release);
+      return current;
+    },
     runExploreAgent: (request, runOptions) => {
       const work = runExploreAgent(request, {
         ...runOptions,
@@ -277,7 +293,9 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
         }),
       );
       try {
-        await writeAgentMetadataFile(lifecycle, request, "running");
+        await options.writeArtifacts(lifecycle.agentId, () =>
+          writeAgentMetadataFile(lifecycle, request, "running"),
+        );
       } catch (error) {
         // 启动元数据写入失败时，child runtime 还没有开始执行；
         // 保留 running task 会让父 runtime 误以为仍有后台任务并持续 defer。
@@ -584,7 +602,9 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
         if (!completedClaimed) {
           throw createSubagentStoppedByUserError(lifecycle, request);
         }
-        await writeCompletedAgentArtifacts(lifecycle, request, completed.output);
+        await options.writeArtifacts(lifecycle.agentId, () =>
+          writeCompletedAgentArtifacts(lifecycle, request, completed.output),
+        );
         const undelivered = takeUndeliveredMessages(
           options,
           registry,
@@ -670,7 +690,9 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
           };
         });
         if (!failedClaimed) throw error;
-        await writeFailedAgentArtifacts(lifecycle, request, errorMessage);
+        await options.writeArtifacts(lifecycle.agentId, () =>
+          writeFailedAgentArtifacts(lifecycle, request, errorMessage),
+        );
         const undelivered = takeUndeliveredMessages(
           options,
           registry,
@@ -755,7 +777,9 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
         }),
       );
       try {
-        await writeAgentMetadataFile(lifecycle, request, "running");
+        await options.writeArtifacts(lifecycle.agentId, () =>
+          writeAgentMetadataFile(lifecycle, request, "running"),
+        );
       } catch (error) {
         // setup 失败时移除 registry 记录，避免 fake running background task。
         registry.remove(lifecycle.agentId);
@@ -1439,7 +1463,7 @@ function createMessageRedelivery(
 }
 
 async function resumeTerminalAgentInBackground(
-  options: ExploreSubagentPortOptions,
+  options: RunnerOptions,
   profiles: readonly AgentProfile[],
   registry: RuntimeTaskRegistry,
   abortControllers: Map<string, AbortController>,
@@ -1489,10 +1513,12 @@ async function resumeTerminalAgentInBackground(
     }),
   );
   try {
-    await writeAgentMetadataFile(lifecycle, resumeRequest, "running", {
-      resumedAt: new Date().toISOString(),
-      resumedFromMessageId: message.id,
-    });
+    await options.writeArtifacts(lifecycle.agentId, () =>
+      writeAgentMetadataFile(lifecycle, resumeRequest, "running", {
+        resumedAt: new Date().toISOString(),
+        resumedFromMessageId: message.id,
+      }),
+    );
   } catch (error) {
     // SendMessage resume setup 失败不能覆盖原 terminal task；
     // 还原旧 snapshot，避免一个未启动的新 turn 卡成 running。
@@ -1951,7 +1977,7 @@ function guardSubagentPromiseWithAbort<T>(
 }
 
 async function runBackgroundAgent(
-  options: ExploreSubagentPortOptions,
+  options: RunnerOptions,
   request: SubagentRunRequest,
   lifecycle: SubagentLifecycle,
   registry: RuntimeTaskRegistry,
@@ -2148,7 +2174,7 @@ type TrackSubagentWork = <T>(work: Promise<T>, critical?: boolean) => Promise<T>
 interface UndeliveredMessageContext {
   abortControllers: Map<string, AbortController>;
   getProfiles: () => readonly AgentProfile[];
-  options: ExploreSubagentPortOptions;
+  options: RunnerOptions;
   registry: RuntimeTaskRegistry;
   track: TrackSubagentWork;
 }
@@ -2293,7 +2319,7 @@ async function redeliverUndeliveredMessages(
   const { model, modelOverride } = first.redelivery;
   try {
     const result = await resumeTerminalAgentInBackground(
-      options,
+      context.options,
       context.getProfiles(),
       registry,
       context.abortControllers,
@@ -2436,7 +2462,7 @@ function createAgentBackgroundedOutput(
 }
 
 async function finalizeBackgroundCompletion(
-  options: ExploreSubagentPortOptions,
+  options: RunnerOptions,
   request: SubagentRunRequest,
   lifecycle: SubagentLifecycle,
   registry: RuntimeTaskRegistry,
@@ -2447,7 +2473,16 @@ async function finalizeBackgroundCompletion(
   if (!current || current.executionId !== lifecycle.executionId || isTerminalRuntimeTask(current))
     return;
 
-  await writeCompletedAgentArtifacts(lifecycle, request, completed.output);
+  await options.writeArtifacts(lifecycle.agentId, () =>
+    writeCompletedAgentArtifacts(lifecycle, request, completed.output),
+  );
+  const afterArtifactWrite = registry.get(lifecycle.agentId);
+  if (
+    !afterArtifactWrite ||
+    afterArtifactWrite.executionId !== lifecycle.executionId ||
+    isTerminalRuntimeTask(afterArtifactWrite)
+  )
+    return;
   // 修复说明：drain 与终态 update 之间不能有 await；否则此间排队的 SendMessage 会被
   // withoutRuntimeMessageState 剥离而静默丢失。
   const undelivered = takeUndeliveredMessages(
@@ -2544,7 +2579,7 @@ async function finalizeBackgroundCompletion(
 }
 
 async function finalizeBackgroundFailure(
-  options: ExploreSubagentPortOptions,
+  options: RunnerOptions,
   request: SubagentRunRequest,
   lifecycle: SubagentLifecycle,
   registry: RuntimeTaskRegistry,
@@ -2561,7 +2596,16 @@ async function finalizeBackgroundFailure(
   const errorMessage = error instanceof Error ? selectExecutionErrorMessage(error) : String(error);
   const completedAt = new Date();
   const totalDurationMs = Date.now() - lifecycle.startedAt;
-  await writeFailedAgentArtifacts(lifecycle, request, errorMessage);
+  await options.writeArtifacts(lifecycle.agentId, () =>
+    writeFailedAgentArtifacts(lifecycle, request, errorMessage),
+  );
+  const afterArtifactWrite = registry.get(lifecycle.agentId);
+  if (
+    !afterArtifactWrite ||
+    afterArtifactWrite.executionId !== lifecycle.executionId ||
+    isTerminalRuntimeTask(afterArtifactWrite)
+  )
+    return;
   // 失败的 child 不因排队消息复活；drain 后只在失败通知里说明未投递。
   const undelivered = takeUndeliveredMessages(
     options,
@@ -2683,7 +2727,7 @@ function createBackgroundStoppedTask(
 }
 
 async function finalizeBackgroundStopped(
-  options: ExploreSubagentPortOptions,
+  options: RunnerOptions,
   registry: RuntimeTaskRegistry,
   stopped: StoppedBackgroundAgentTask,
   abortTask: () => void,
@@ -2707,7 +2751,9 @@ async function finalizeBackgroundStopped(
   let notificationFailed = false;
   let artifactFailure: { error: unknown } | undefined;
   try {
-    await writeStoppedAgentArtifacts(stopped.task);
+    await options.writeArtifacts(stopped.task.agentId, () =>
+      writeStoppedAgentArtifacts(stopped.task),
+    );
   } catch (error) {
     // killed 已提交；产物写入失败不能阻断结束事件，否则后续 Stop 被拒后胶囊永久残留。
     // 先完成取消和终态发布，再向调用方报告原始文件错误。
