@@ -21,6 +21,43 @@ import { createTestAgentRuntime } from "./test-agent-runtime.js";
 import { createTestSessionEventStore } from "./test-event-store.js";
 import { createTestModelFactory } from "./test-runtime-model.js";
 
+const artifactRace = vi.hoisted(() => ({
+  active: undefined as
+    | {
+        outputFile: string;
+        outputDir: string;
+        held: boolean;
+        overlap: boolean;
+        hold: () => Promise<void>;
+      }
+    | undefined,
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    mkdir: (...args: Parameters<typeof actual.mkdir>) => {
+      const race = artifactRace.active;
+      if (race?.held && args[0] === race.outputDir) race.overlap = true;
+      return actual.mkdir(...args);
+    },
+    writeFile: async (
+      path: Parameters<typeof actual.writeFile>[0],
+      data: Parameters<typeof actual.writeFile>[1],
+      options?: Parameters<typeof actual.writeFile>[2],
+    ) => {
+      const race = artifactRace.active;
+      if (race && path === race.outputFile && data === "Completed findings.") {
+        race.held = true;
+        await race.hold();
+        race.held = false;
+      }
+      return actual.writeFile(path, data, options);
+    },
+  };
+});
+
 // 回归 2026-11-10：registry 只在进程内存里，App 重启、进程崩溃或 session 闲置被关闭后再打开，之前的
 // 子代理都不在 registry 里，SendMessage 原来直接返回找不到。新 port 模拟冷恢复后的新 runtime，
 // 两个 port 只共用输出目录（metadata.json）；新 port 只能从 transcript 记下的输出文件找到它。
@@ -120,6 +157,60 @@ function nextPort(
 const BEFORE_THIS_PROCESS = performance.timeOrigin - 1_000;
 
 describe("SendMessage after a cold resume", () => {
+  it("writes stopped artifacts after an in-flight completion and keeps metadata readable", async () => {
+    const outputRootDir = await mkdtemp(join(tmpdir(), "zcode-subagent-artifact-race-"));
+    const agentId = "agent_artifact_race";
+    const outputDir = join(outputRootDir, PARENT_SESSION, agentId);
+    const outputFile = join(outputDir, "output.txt");
+    const gate = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const race = {
+      outputDir,
+      outputFile,
+      held: false,
+      overlap: false,
+      hold: () => {
+        started.resolve();
+        return gate.promise;
+      },
+    };
+    const port = createExploreSubagentPort({
+      createAgentId: () => agentId,
+      emitParentEvent: async () => {},
+      enqueueParentTaskNotification: () => {},
+      outputRootDir,
+      runExploreAgent: async (request) => {
+        await request.onSessionReady?.();
+        return { events: [], response: "Completed findings.", traceId: "trace_race" };
+      },
+    });
+    const run = {
+      ...requestBase("artifact_race"),
+      agentType: "general-purpose",
+      description: "Artifact race",
+      parentToolCallId: "call_race",
+      prompt: "Run.",
+    };
+
+    artifactRace.active = race;
+    try {
+      await port.start?.(run);
+      await started.promise;
+      const closing = port.close!();
+      // 旧代码在 close 调用内直接启动停止产物的 I/O，无需等前一批写入完成。
+      gate.resolve();
+      await closing;
+      expect(race.overlap).toBe(false);
+      expect(await readSubagentRunMetadata({ agentId, outputFile })).toMatchObject({
+        status: "stopped",
+      });
+    } finally {
+      gate.resolve();
+      artifactRace.active = undefined;
+      await port.close?.();
+    }
+  });
+
   it.each([
     ["completed", "completed", 0],
     ["failed", "failed", 0],

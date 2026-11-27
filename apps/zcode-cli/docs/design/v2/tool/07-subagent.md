@@ -225,6 +225,9 @@ Agent part 也不会被改写。旧行为因此把这些 child 永久投影为 r
   启动与 SendMessage 恢复时写 `running`，完成、失败、停止时改写为 `completed` / `failed` / `stopped`。
   runtime 正常关闭时 owner 会统一 stopTask，写 `stopped`，通知因关闭被丢弃；只有进程意外退出时停在
   `running`。`SubagentStopped` 等事件只在进程内存的 event store 里，新进程读不到，不能作为判据。
+  同一 agent 的启动、正常收尾、停止产物由同一 runner 串行写入。若停止先认领 registry 终态，
+  已开始的文件写入须先结束，再写本次执行的最终 `stopped` 产物；下一次恢复的 `running` 写入排在其后。
+  这个等待不包含 child/model 的执行。后台完成/失败仅当写完后仍持有未结束的 execution，才 drain 消息并发布终态。
 - 模型：父会话恢复时，对上述遗留、transcript 中没有这次运行的 `task-id` 通知、`metadata.json` 不是终态
   （读不到时按 child 判断）、child 也没有终态（最后一条 assistant 带错误，或不含工具调用且已完成；
   stream recovery 作废的半截回复不算）的后台 Agent，生成标准 local_agent
