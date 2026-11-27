@@ -2319,7 +2319,7 @@ async function redeliverUndeliveredMessages(
   const { model, modelOverride } = first.redelivery;
   try {
     const result = await resumeTerminalAgentInBackground(
-      options,
+      context.options,
       context.getProfiles(),
       registry,
       context.abortControllers,
