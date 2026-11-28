@@ -8,6 +8,7 @@ import {
   zcodeProtocolMethods,
   zcodeProtocolNotifications,
   zcodeSessionListResultSchema,
+  zcodeSessionRawEventSchema,
   zcodeUserInputRequestParamsSchema,
   type DynamicWorkflowMode,
   type ZCodeProtocolMcpServer,
@@ -38,6 +39,9 @@ import type {
 import { createCommandCenter, parseSlashCommand } from "../command-center.js";
 import type { TuiPromptHandler } from "../tui-command-state.js";
 import { DEFAULT_CLI_WORKFLOW_MODE, workflowModeSessionParams } from "../workflow-mode.js";
+import { resolveAttachResumeTarget } from "./attach-resume-target.js";
+
+export { pickMostRecentResumeSessionId, resolveAttachResumeTarget } from "./attach-resume-target.js";
 
 const RECONNECT_BACKOFF_START_MS = 1000;
 const RECONNECT_BACKOFF_MAX_MS = 30_000;
@@ -110,111 +114,6 @@ export class AttachProtocolVersionError extends Error {
   }
 }
 
-/**
- * 解析 resume 目标（入口 -c/--resume 与 TUI 内 /resume <id> 共用同一裁决；
- * TUI 裸 /resume 由 commandCenter 的 session picker 承担，不走这里）：
- *   - 无 resume 意图 → undefined（调用方走 session/create，开新会话）
- *   - --resume <id>   → 完整 id；或本 workspace 内唯一匹配的 id 前缀
- *   - -c/--continue   → 本 workspace 最近一次会话
- *
- * “最近”按 updatedAt（退化 createdAt）显式取最大：server 的 session/list 返回
- * 顺序不保证（实测创建序/任意序混排），取末位会恢复到陈旧会话。
- *
- * 显式意图不静默降级：--resume 解析出多个候选、-c 列不出会话、或
- * session/list 本身失败，都直接抛错（stderr + exit 1），不再无声开新会话
- * ——操作者截断 id 恢复时曾因此进到空会话而毫无提示。
- */
-interface ListedResumeSession {
-  createdAt?: number;
-  sessionId?: string;
-  id?: string;
-  updatedAt?: number;
-}
-
-const toListedResumeSessions = (listed: unknown): ListedResumeSession[] => {
-  const wrapped = (listed ?? {}) as { sessions?: unknown };
-  return Array.isArray(wrapped.sessions) ? (wrapped.sessions as ListedResumeSession[]) : [];
-};
-
-const listedResumeSessionId = (session: ListedResumeSession): string | undefined =>
-  session.sessionId ?? session.id;
-
-const listWorkspaceSessionsForResume = async (
-  client: AttachClient,
-  workspace: { workspacePath: string; workspaceIdentity?: string; workspaceKey: string },
-): Promise<ListedResumeSession[]> => {
-  const listed = await client.request(zcodeProtocolMethods.sessionList, { workspace });
-  return toListedResumeSessions(listed);
-};
-
-/** “最近会话”裁决（入口 -c 与 resumeApp 的 continue 兜底共用；TUI 裸
- *  /resume 已改走 picker，不再猜最新）：按 updatedAt（退化 createdAt）
- *  显式取最大；空列表 / 首名无 id 抛显式错误，不静默降级。 */
-export function pickMostRecentResumeSessionId(
-  sessions: ListedResumeSession[],
-  workspacePath: string,
-): string {
-  const byRecency = [...sessions].sort(
-    (a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0),
-  );
-  const last = byRecency[0];
-  const lastId = last === undefined ? undefined : listedResumeSessionId(last);
-  if (lastId === undefined) {
-    throw new Error(`No resumable session found for ${workspacePath}`);
-  }
-  return lastId;
-}
-
-export const resolveAttachResumeTarget = async ({
-  client,
-  continueSession,
-  resumeSessionId,
-  workspace,
-}: {
-  client: AttachClient;
-  continueSession: boolean;
-  resumeSessionId?: string;
-  workspace: { workspacePath: string; workspaceIdentity?: string; workspaceKey: string };
-}): Promise<string | undefined> => {
-  if (!continueSession && !resumeSessionId) return undefined;
-  if (resumeSessionId) {
-    // --resume 支持本 workspace 内唯一匹配的 id 前缀（截断 id 是真实使用形
-    // 态：sess_99f180d5 这样的短前缀曾被静默换成新会话）。列表失败不阻断：
-    // 原样透传，由 session/resume 的错误浮出真相（可能是跨 workspace 完整 id）。
-    const sessions = await listWorkspaceSessionsForResume(client, workspace).catch(
-      () => undefined,
-    );
-    if (sessions !== undefined) {
-      const ids = sessions
-        .map(listedResumeSessionId)
-        .filter((id): id is string => typeof id === "string");
-      if (ids.includes(resumeSessionId)) return resumeSessionId;
-      const prefixed = ids.filter((id) => id.startsWith(resumeSessionId));
-      if (prefixed.length === 1) return prefixed[0];
-      if (prefixed.length > 1) {
-        throw new Error(
-          `--resume "${resumeSessionId}" is ambiguous: matches ${prefixed.length} sessions (${prefixed
-            .slice(0, 5)
-            .join(", ")}${prefixed.length > 5 ? ", …" : ""}). Use a longer prefix or the full id.`,
-        );
-      }
-    }
-    return resumeSessionId;
-  }
-  // -c：显式继续意图。列表失败或空列表都报错，与主 CLI 的
-  // “No resumable session found” 同语义，不再静默开新会话。
-  const sessions = await listWorkspaceSessionsForResume(client, workspace).catch(
-    (error: unknown) => {
-      throw new Error(
-        `--continue could not list sessions for ${workspace.workspacePath}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    },
-  );
-  return pickMostRecentResumeSessionId(sessions, workspace.workspacePath);
-};
-
 /** 断线横幅：投影能容忍未知 type（跳过），但仍造一条 SessionEvent 形态的通知行。 */
 function connectionNoticeEvent(sessionId: string, text: string): SessionEvent {
   return {
@@ -235,6 +134,7 @@ export class AttachRuntime {
   private current: AttachSessionHandle | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectDelay = RECONNECT_BACKOFF_START_MS;
+  private reconnecting = false;
   private connecting: Promise<AttachClient> | undefined;
   private stopped = false;
   private readonly statusListeners = new Set<(status: string) => void>();
@@ -269,6 +169,7 @@ export class AttachRuntime {
   }
 
   async connect(): Promise<AttachClient> {
+    if (this.stopped) throw new Error("attach runtime is closed");
     if (this.client) return this.client;
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
@@ -279,8 +180,11 @@ export class AttachRuntime {
       const client = await (
         this.options.connect ?? ((path: string) => connectAttachClient(path))
       )(socketPath);
+      if (this.stopped) {
+        client.close();
+        throw new Error("attach runtime is closed");
+      }
       this.installClient(client);
-      this.reconnectDelay = RECONNECT_BACKOFF_START_MS;
       return client;
     })().finally(() => {
       this.connecting = undefined;
@@ -294,7 +198,7 @@ export class AttachRuntime {
     client.setRequestHandler(async (method, params) =>
       this.routeReverseRequest(method, params),
     );
-    void client.closed.then(() => this.onDisconnected());
+    void client.closed.then(() => this.onDisconnected(client));
   }
 
   private routeNotification(method: string, params: unknown): void {
@@ -309,8 +213,12 @@ export class AttachRuntime {
       return;
     }
     if (method !== zcodeProtocolNotifications.sessionRawEvent) return;
-    const raw = params as ZCodeSessionRawEvent;
-    this.sessions.get(String(raw.sessionId))?.ingestRawEvent(raw);
+    const raw = zcodeSessionRawEventSchema.safeParse(params);
+    if (!raw.success) {
+      this.options.logger?.warn?.("attach dropped invalid raw session event");
+      return;
+    }
+    this.sessions.get(raw.data.sessionId)?.history.receiveLiveRawEvent(raw.data);
   }
 
   private async routeReverseRequest(method: string, params: unknown): Promise<unknown> {
@@ -412,11 +320,12 @@ export class AttachRuntime {
     }
   }
 
-  private onDisconnected(): void {
-    if (this.stopped) return;
+  private onDisconnected(client: AttachClient): void {
+    if (this.stopped || this.client !== client) return;
     this.client = undefined;
     this.emitStatus(this.connectionCopy.lost);
     for (const handle of this.sessions.values()) {
+      handle.history.pauseRawDelivery();
       handle.ingestRawEvent(
         connectionNoticeEvent(
           handle.sessionId,
@@ -428,7 +337,7 @@ export class AttachRuntime {
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped || this.reconnectTimer) return;
+    if (this.stopped || this.reconnecting || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.reconnect();
@@ -438,58 +347,62 @@ export class AttachRuntime {
 
   private async reconnect(): Promise<void> {
     if (this.stopped) return;
+    this.reconnecting = true;
+    let recoveredAll = false;
     try {
       if (this.options.ensureConnected) await this.options.ensureConnected();
-      await this.connect();
-    } catch {
-      this.scheduleReconnect();
-      return;
-    }
-    let recovered = 0;
-    const total = this.sessions.size;
-    for (const handle of this.sessions.values()) {
-      if (await this.recoverSession(handle)) {
-        recovered++;
-        handle.ingestRawEvent(
-          connectionNoticeEvent(
-            handle.sessionId,
-            "Reconnected to shared core.",
-          ) as unknown as ZCodeSessionRawEvent,
-        );
-      } else {
-        this.options.logger?.warn?.("attach resubscribe failed", {
-          sessionId: handle.sessionId,
-        });
+      const client = await this.connect();
+      for (const handle of this.sessions.values()) {
+        if (!handle.history.needsRawRecovery) continue;
+        const recovery = await this.recoverSession(handle, client);
+        if (this.stopped || this.client !== client) return;
+        if (this.sessions.get(handle.sessionId) !== handle) continue;
+        if (recovery) {
+          handle.ingestRawEvent(
+            connectionNoticeEvent(
+              handle.sessionId,
+              "Reconnected to shared core.",
+            ) as unknown as ZCodeSessionRawEvent,
+          );
+        }
       }
-    }
-    if (total === 0 || recovered === total) {
-      this.emitStatus(this.connectionCopy.reconnected);
-    } else {
-      // core 重连但会话不可恢复（新 core registry 无 record、store 未持久化）——
-      // 如实显示并继续退避：core 若在下一轮可恢复（异步物化），仍会补上。
-      this.emitStatus(this.connectionCopy.reconnectedSessionUnavailable);
-      this.scheduleReconnect();
+      recoveredAll = ![...this.sessions.values()].some((handle) => handle.history.needsRawRecovery);
+      if (recoveredAll) {
+        // socket 接通不代表补放成功；在最终页或冷恢复成功后才重置退避。
+        this.reconnectDelay = RECONNECT_BACKOFF_START_MS;
+        this.emitStatus(this.connectionCopy.reconnected);
+      } else {
+        this.emitStatus(this.connectionCopy.reconnectedSessionUnavailable);
+      }
+    } catch (error) {
+      this.options.logger?.warn?.("attach reconnect failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.reconnecting = false;
+      if (!recoveredAll) this.scheduleReconnect();
     }
   }
 
   /** subscribe 失败若是 sessionUnavailable，先经 session/resume 冷物化再重试一次。 */
-  private async recoverSession(handle: AttachSessionHandle): Promise<boolean> {
+  private async recoverSession(handle: AttachSessionHandle, client: AttachClient): Promise<boolean> {
     try {
-      await handle.resubscribe();
+      await handle.history.resubscribe(client);
       return true;
     } catch (error) {
       if (
         !(error instanceof AttachProtocolError) ||
         error.code !== zcodeProtocolErrorCodes.sessionUnavailable ||
-        !this.client ||
+        this.client !== client ||
         !this.options.workspace
       ) {
+        this.logRecoveryFailure(handle, error);
         return false;
       }
       try {
         const compactContextWindow = handle.getCompactContextWindow();
         const mcpServers = this.options.getSessionRecoveryMcpServers?.(handle.sessionId);
-        await this.client.request(zcodeProtocolMethods.sessionResume, {
+        await client.request(zcodeProtocolMethods.sessionResume, {
           sessionId: handle.sessionId,
           workspace: this.options.workspace,
           // 冷物化重建 runtime 会重读灰度门；不带参数就丢回进程级结论（fail-closed）。
@@ -504,12 +417,20 @@ export class AttachRuntime {
           // session/resume 回放。省略与显式 [] 语义不同，hook 回 undefined 才省略。
           ...(mcpServers !== undefined ? { mcpServers } : {}),
         });
-        await handle.resubscribe();
+        await handle.history.resubscribe(client);
         return true;
-      } catch {
+      } catch (resumeError) {
+        this.logRecoveryFailure(handle, resumeError);
         return false;
       }
     }
+  }
+
+  private logRecoveryFailure(handle: AttachSessionHandle, error: unknown): void {
+    this.options.logger?.warn?.("attach resubscribe failed", {
+      error: error instanceof Error ? error.message : String(error),
+      sessionId: handle.sessionId,
+    });
   }
 
   registerSession(handle: AttachSessionHandle): void {

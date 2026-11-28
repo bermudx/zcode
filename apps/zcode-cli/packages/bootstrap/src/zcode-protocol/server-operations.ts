@@ -50,6 +50,7 @@ import {
   type SessionInfo,
   type SessionTaskType,
   type CollaborationMode,
+  slimRetainedModelRequest,
   summarizeSessionUsageTotals,
   type TargetCompletionVerificationPayload,
   type TraceId,
@@ -62,6 +63,7 @@ import {
 import {
   subagentRuntimeConfigSchema,
   DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
+  ZCODE_ATTACH_MAX_LINE_CHARS,
   ZCODE_SESSION_RUNTIME_PREFERENCES_REQUEST_TIMEOUT_MS,
   zcodeProtocolErrorCodes,
   zcodeProtocolMethods,
@@ -107,6 +109,7 @@ import {
   type ZCodeSessionRuntimePreferencesResult,
   type ZCodeModelContextBudgetStrategy,
   type ZCodeProtocolTrace,
+  type ZCodeProtocolRequestId,
   type ZCodeSessionEvent,
   type ZCodeSessionRawEvent,
   type ZCodeSessionHistoryTarget,
@@ -834,7 +837,8 @@ async function readProtocolSessionEvents(
  */
 function serializeRawSessionEvent(event: SessionEvent): ZCodeSessionRawEvent {
   return {
-    ...event,
+    // 模型输入含图片和完整上下文；瘦客户端只需请求状态，不该收到诊断用大包。
+    ...slimRetainedModelRequest(event),
     timestamp:
       event.timestamp instanceof Date
         ? event.timestamp.toISOString()
@@ -2356,8 +2360,15 @@ export async function readEvents(context: ZCodeProtocolAgentServerContext, rawPa
 export async function subscribeSession(
   context: ZCodeProtocolAgentServerContext,
   rawParams: unknown,
+  requestId: ZCodeProtocolRequestId,
 ) {
   const params = parseParams(zcodeSessionSubscribeParamsSchema, rawParams);
+  if (
+    params.boundedRawReplay &&
+    (params.eventFormat !== "raw" || params.afterSeq === undefined || params.includeSnapshot)
+  ) {
+    throw new ProtocolRequestError(-32602, "Bounded raw replay requires a raw cursor without a snapshot");
+  }
   const record = requireSession(context, params.sessionId);
   record.deliveryKind = params.deliveryKind;
   // 兼容保护：旧 replayable 流没有 unsubscribe RPC。这里只记录真正的 subscribe，
@@ -2365,6 +2376,11 @@ export async function subscribeSession(
   record.legacyStreamSubscribed = true;
   const eventFormat = params.eventFormat ?? "mapped";
   record.eventFormat = eventFormat;
+  if (params.boundedRawReplay && params.afterSeq !== undefined) {
+    return await readBoundedRawReplayPage(context, record, params.afterSeq, requestId);
+  }
+  delete record.rawReplay;
+  delete record.rawReplayThrough;
   if (eventFormat === "raw") {
     // raw 续传：eventSeq 复用 SessionEvent.sequenceNumber——attach 客户端记下断线前
     // 最后一条的 sequenceNumber，重连后按 afterSeq 补放，语义与 mapped seq 对应。
@@ -2401,6 +2417,56 @@ export async function subscribeSession(
         })
       : undefined,
   };
+}
+
+async function readBoundedRawReplayPage(
+  context: ZCodeProtocolAgentServerContext,
+  record: ZCodeProtocolSessionRecord,
+  afterSeq: number,
+  requestId: ZCodeProtocolRequestId,
+) {
+  const sessionId = record.app.sessionId as SessionId;
+  const replay = (record.rawReplay = { latestLiveSeq: 0 });
+  const emptyPage = { events: [], rawEvents: [] as ZCodeSessionRawEvent[], sessionId };
+  // 预留实际请求 id、续页字段与最长水位；每个事件只需单独计量一次。
+  const envelopeChars = JSON.stringify({
+    id: requestId,
+    result: { ...emptyPage, eventSeq: Number.MAX_SAFE_INTEGER, rawReplayHasMore: true },
+  }).length;
+
+  for (;;) {
+    const head = await record.eventStore.getLatestSequenceNumber(sessionId);
+    const events = await record.eventStore.getEventsAfter(sessionId, afterSeq);
+    if (context.sessions.get(sessionId) !== record || record.rawReplay !== replay) {
+      throw new ProtocolRequestError(zcodeProtocolErrorCodes.sessionUnavailable, "Raw replay owner changed");
+    }
+    const rawEvents: ZCodeSessionRawEvent[] = [];
+    let chars = envelopeChars;
+    for (const event of events) {
+      const raw = serializeRawSessionEvent(event);
+      chars += JSON.stringify(raw).length + (rawEvents.length === 0 ? 0 : 1);
+      if (chars > ZCODE_ATTACH_MAX_LINE_CHARS) {
+        if (rawEvents.length === 0) {
+          throw new ProtocolRequestError(-32603, "Raw replay event exceeds the attach line cap", {
+            sequenceNumber: event.sequenceNumber,
+            type: event.type,
+          });
+        }
+        break;
+      }
+      rawEvents.push(raw);
+    }
+    const lastSeq = rawEvents.at(-1)?.sequenceNumber;
+    const capturedThrough = Math.max(head, lastSeq ?? 0);
+    if (rawEvents.length < events.length || replay.latestLiveSeq > capturedThrough) {
+      // 读库取样后才发布的新事件必须从下一页交付；空页则重读，不返回停滞游标。
+      if (lastSeq === undefined) continue;
+      return { ...emptyPage, eventSeq: lastSeq, rawEvents, rawReplayHasMore: true as const };
+    }
+    record.rawReplayThrough = capturedThrough;
+    delete record.rawReplay;
+    return { ...emptyPage, eventSeq: capturedThrough, rawEvents };
+  }
 }
 
 /** attach 客户端 composer ↑ 召回：输入历史归 session store（server 侧）所有。 */
@@ -3827,9 +3893,14 @@ export function onSessionEvent(
   // v4 通道：权威事件无条件喂给 v4 投影/发布器——v4 订阅不依赖旧协议的
   // deliveryKind 订阅态，帧节奏由 gateway 按订阅者 profile 自行调度。
   context.v4Gateway?.ingest(record.app.sessionId, event);
-  // raw 订阅（tui-attach）：SessionEvent 原样下投，绕过下方 mapped 折叠与 delta 合批；
+  // raw 订阅（tui-attach）：绕过下方 mapped 折叠与 delta 合批；
   // 断线续传用 sequenceNumber 做 afterSeq，与协议 seq 无关。
   if (record.eventFormat === "raw") {
+    if (record.rawReplay) {
+      record.rawReplay.latestLiveSeq = Math.max(record.rawReplay.latestLiveSeq, event.sequenceNumber);
+      return;
+    }
+    if (event.sequenceNumber > 0 && event.sequenceNumber <= (record.rawReplayThrough ?? 0)) return;
     context.notify({
       method: zcodeProtocolNotifications.sessionRawEvent,
       params: serializeRawSessionEvent(event),

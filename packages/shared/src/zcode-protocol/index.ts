@@ -139,6 +139,8 @@ export {
 
 export const ZCODE_PROTOCOL_NAME = "ZCode Protocol" as const;
 export const ZCODE_PROTOCOL_VERSION = 1 as const;
+/** attach socket 单行上限，按 UTF-16 code units 计，不含分隔换行。 */
+export const ZCODE_ATTACH_MAX_LINE_CHARS = 4 * 1024 * 1024;
 // V4 wire 与 legacy 主协议并存；禁止为了 V4 physical framing 改写 legacy 版本。
 export const ZCODE_PROTOCOL_V4_WIRE_VERSION = 3 as const;
 export const zcodeRuntimeCapabilitiesSchema = z.object({
@@ -1945,7 +1947,7 @@ export type ZCodeSessionEvent = z.infer<typeof zcodeSessionEventSchema>;
 
 /**
  * 订阅/读取的事件格式："mapped" = 既有 25-type 折叠协议事件（desktop-continuous 兼容面）；
- * "raw" = contracts `SessionEvent` 原样下投（tui-attach 瘦客户端用：TUI 共享层消费
+ * "raw" = contracts `SessionEvent` 词表（model_request 只带请求元数据；TUI 共享层消费
  * 完整内部事件词表，mapped 折叠会丢 dwf 进度/子代理/后台任务等事件）。
  */
 export const zcodeSessionEventFormatSchema = z.enum(["mapped", "raw"]);
@@ -1999,6 +2001,7 @@ export const zcodeSessionSubscribeParamsSchema = z
     sessionId: nonEmptyString,
     deliveryKind: zcodeDeliveryKindSchema,
     afterSeq: z.number().int().nonnegative().optional(),
+    boundedRawReplay: z.literal(true).optional(),
     includeSnapshot: z.boolean().default(false),
     eventFormat: zcodeSessionEventFormatSchema.optional(),
   })
@@ -2012,6 +2015,8 @@ export const zcodeSessionSubscribeResultSchema = z
     events: z.array(zcodeSessionEventSchema),
     /** eventFormat==="raw" 时回放事件装在这里（events 仍只装 mapped）。 */
     rawEvents: z.array(zcodeSessionRawEventSchema).optional(),
+    /** 有后续页时，eventSeq 只到本页最后交付的事件。 */
+    rawReplayHasMore: z.literal(true).optional(),
     snapshot: zcodeSessionStateSnapshotSchema.optional(),
   })
   .strict();

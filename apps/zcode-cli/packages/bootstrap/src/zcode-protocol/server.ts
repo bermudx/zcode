@@ -973,7 +973,7 @@ export class ZCodeProtocolAgentServer {
       case zcodeProtocolMethods.sessionEvents:
         return await readEvents(this.context, request.params);
       case zcodeProtocolMethods.sessionSubscribe:
-        return await subscribeSession(this.context, request.params);
+        return await subscribeSession(this.context, request.params, request.id);
       case zcodeProtocolMethods.sessionRecallPreviousInput:
         return await recallPreviousInput(this.context, request.params);
       case zcodeProtocolMethods.sessionDiscardPendingInputs:

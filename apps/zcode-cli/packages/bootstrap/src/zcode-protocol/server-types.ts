@@ -136,10 +136,14 @@ export interface ZCodeProtocolSessionRecord {
   deliveryKind?: ZCodeDeliveryKind;
   /**
    * 订阅事件格式（session/subscribe eventFormat）："mapped" 走既有折叠映射，
-   * "raw" 把 contracts SessionEvent 原样下投给 session/rawEvent（tui-attach 瘦客户端）。
+   * "raw" 把 contracts SessionEvent 下投给 session/rawEvent（tui-attach 瘦客户端）。
    * record 级与 deliveryKind 同一语义：同 record 只持一种格式，后写覆盖。
    */
   eventFormat?: ZCodeSessionEventFormat;
+  /** 有界补放期间暂停实时下发；读库在途时用已发布序号检测切换竞态。 */
+  rawReplay?: { latestLiveSeq: number };
+  /** 最终补放页已覆盖的水位，阻止已入库但迟到的实时通知重复下发。 */
+  rawReplayThrough?: number;
   /**
    * 旧 session/subscribe 没有 unsubscribe RPC；只在真正 subscribe 时置位，不能用
    * 会被 session/read 写入的 deliveryKind 代替。连接结束会销毁整个 CLI 进程。

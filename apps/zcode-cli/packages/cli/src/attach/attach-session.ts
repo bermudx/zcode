@@ -1,12 +1,8 @@
 // attach 模式下的协议态会话句柄：实现 CommandCenterApp 的可选面，
 // 业务状态全部留在共享 core；本文件只做 topic 映射与快照缓存。
-// raw SessionEvent 的 timestamp 在线上为 ISO 串，由 runtime  revive 成 Date。
 import { SessionEventType, type SessionEvent } from "@zcode/contracts";
 import {
   zcodeProtocolMethods,
-  zcodeSessionSubscribeResultSchema,
-  zcodeSessionEventsResultSchema,
-  zcodeSessionMessagesResultSchema,
   zcodeSessionRecallPreviousInputResultSchema,
   zcodeSessionCancelBackgroundTaskResultSchema,
   zcodeUsageQuotaSnapshotSchema,
@@ -18,12 +14,7 @@ import {
   type ZCodeSessionSubagentsResult,
   type ModelSelection,
 } from "@zcode/shared";
-import type {
-  TuiPromptInput,
-  TuiSendInputResult,
-  TuiSubmitPromptResult,
-  TuiSubagentTranscriptSnapshot,
-} from "@zcode/tui";
+import type { TuiPromptInput, TuiSendInputResult, TuiSubmitPromptResult, TuiSubagentTranscriptSnapshot } from "@zcode/tui";
 import type {
   CollaborationMode,
   DynamicWorkflowRunResumeResult,
@@ -49,10 +40,8 @@ import { newUploadConnectionId } from "./attach-v4-attachments.js";
 import { toV4AttachmentRefs } from "./attach-v4-input.js";
 import { newCommandId, sendTextCommand } from "./attach-v4-command.js";
 import { resolveCompactContextWindowForModel } from "./attach-compact-cap.js";
-import {
-  projectAttachTranscriptMessages,
-  projectSessionSnapshotSeed,
-} from "./attach-projection.js";
+import { projectSessionSnapshotSeed } from "./attach-projection.js";
+import { AttachSessionHistory } from "./attach-session-history.js";
 import { PendingInteractions } from "./attach-interactions.js";
 import { requestSessionStopBestEffort } from "./attach-session-stop.js";
 import { mergeCatalog, modelOptionKey, thoughtLevelKey } from "./attach-catalog.js";
@@ -98,7 +87,7 @@ export class AttachSessionHandle {
   private readonly sinks = new Set<(event: SessionEvent) => void>();
   private readonly pendingTurns = new Map<string, PendingTurn>();
   private readonly pendingByTurnId = new Map<string, PendingTurn>();
-  private lastSeq = 0;
+  readonly history: AttachSessionHistory;
   private locale: TuiSubmitPromptResult["locale"];
   /** core 忙时 v4 admission 自动排队；busy 输入仍停本地队列，settle 后自动 flush。 */
   private readonly queuedInputs: QueuedLocalInput[] = [];
@@ -134,10 +123,19 @@ export class AttachSessionHandle {
     this.snapshot = input.snapshot;
     this.traceId = input.snapshot.session.traceId ?? input.sessionId;
     this.locale = input.locale;
+    this.history = new AttachSessionHistory(
+      this.sessionId,
+      this.clientOf,
+      (event) => {
+        for (const sink of this.sinks) sink(event);
+        this.routeTurnEvent(event);
+      },
+      (snapshot) => { this.snapshot = this.adoptSnapshot(snapshot); },
+    );
   }
 
   get eventSeq(): number {
-    return this.lastSeq;
+    return this.history.eventSeq;
   }
 
   /** 常驻订阅（TuiSubscribeSessionEvents）。返回 unsubscribe。 */
@@ -146,33 +144,12 @@ export class AttachSessionHandle {
     return () => this.sinks.delete(sink);
   }
 
-  /** raw wire event → revive timestamp → 分发。 */
   ingestRawEvent(raw: ZCodeSessionRawEvent): void {
-    const event = {
-      ...raw,
-      timestamp: new Date(raw.timestamp),
-    } as unknown as SessionEvent;
-    if (typeof raw.sequenceNumber === "number" && raw.sequenceNumber > this.lastSeq) {
-      this.lastSeq = raw.sequenceNumber;
-    }
-    for (const sink of this.sinks) sink(event);
-    this.routeTurnEvent(event);
+    this.history.ingestRawEvent(raw);
   }
 
-  /** subscribe/续订：raw 格式 afterSeq 用 SessionEvent.sequenceNumber。 */
   async subscribe(afterSeq?: number, includeSnapshot = false): Promise<void> {
-    const result = zcodeSessionSubscribeResultSchema.parse(
-      await this.clientOf().request(zcodeProtocolMethods.sessionSubscribe, {
-        afterSeq,
-        deliveryKind: "desktop-continuous",
-        eventFormat: "raw",
-        includeSnapshot,
-        sessionId: this.sessionId,
-      }),
-    );
-    if (result.snapshot) this.snapshot = this.adoptSnapshot(result.snapshot);
-    if (result.eventSeq > this.lastSeq) this.lastSeq = result.eventSeq;
-    for (const raw of result.rawEvents ?? []) this.ingestRawEvent(raw);
+    await this.history.subscribe(afterSeq, includeSnapshot);
   }
 
   private routeTurnEvent(event: SessionEvent): void {
@@ -457,10 +434,7 @@ export class AttachSessionHandle {
       directory: this.snapshot.session.workspace.workspacePath ?? "",
       interruptedToolCount: 0,
       messageCount: messages.length,
-      partCount: messages.reduce(
-        (count, message) => count + (message.parts?.length ?? 0),
-        0,
-      ),
+      partCount: messages.reduce((count, message) => count + (message.parts?.length ?? 0), 0),
       traceId: this.traceId,
     };
   }
@@ -705,38 +679,8 @@ export class AttachSessionHandle {
     return zcodeUsageQuotaSnapshotSchema.parse(await this.clientOf().request(zcodeProtocolMethods.usageCodingPlanQuota, { sessionId: this.sessionId }));
   }
 
-  async readSubagentTranscript(
-    childSessionId: string,
-  ): Promise<TuiSubagentTranscriptSnapshot> {
-    // 子会话 record 由父 session 的同一 core 承载；直接用 childSessionId 读
-    // messages + raw events，客户端拼 TuiSubagentTranscriptSnapshot。
-    const [messagesResult, eventsResult] = await Promise.all([
-      this.clientOf().request(zcodeProtocolMethods.sessionMessages, {
-        sessionId: childSessionId,
-      }),
-      this.clientOf().request(zcodeProtocolMethods.sessionEvents, {
-        eventFormat: "raw",
-        sessionId: childSessionId,
-      }),
-    ]);
-    const messages = zcodeSessionMessagesResultSchema.parse(messagesResult).messages;
-    const rawEvents =
-      zcodeSessionEventsResultSchema.parse(eventsResult).rawEvents ?? [];
-    const events = rawEvents.map(
-      (raw) => ({ ...raw, timestamp: new Date(raw.timestamp) }) as unknown as SessionEvent,
-    );
-    return {
-      events,
-      messages: messages.map((message) => ({
-        content: "",
-        id: message.info.messageId,
-        parts: message.parts as never,
-        role: (message.info.role === "user" ? "user" : "agent") as "user" | "agent",
-      })),
-      replayMessageIds: [],
-      sequenceNumber: rawEvents.at(-1)?.sequenceNumber ?? 0,
-      sessionId: childSessionId,
-    };
+  async readSubagentTranscript(childSessionId: string): Promise<TuiSubagentTranscriptSnapshot> {
+    return await this.history.readSubagentTranscript(childSessionId);
   }
 
   async cancelBackgroundTask(
@@ -821,15 +765,8 @@ export class AttachSessionHandle {
     return await resumeWorkflowRunCommand(this.clientOf(), this.sessionId, input.workId);
   }
 
-  async loadSessionTranscript(): Promise<
-    NonNullable<TuiSubmitPromptResult["restoredMessages"]>
-  > {
-    const result = zcodeSessionMessagesResultSchema.parse(
-      await this.clientOf().request(zcodeProtocolMethods.sessionMessages, {
-        sessionId: this.sessionId,
-      }),
-    );
-    return projectAttachTranscriptMessages(result.messages);
+  async loadSessionTranscript(): Promise<NonNullable<TuiSubmitPromptResult["restoredMessages"]>> {
+    return await this.history.loadSessionTranscript();
   }
 
   async forkFromCheckpoint(): Promise<{
@@ -841,11 +778,6 @@ export class AttachSessionHandle {
       target: { kind: "latestCheckpoint" },
     })) as { forkedSessionId: string; response: string };
     return result;
-  }
-
-  /** 常驻 sink 续订（重连后）：用已见 sequenceNumber 补放缺口。 */
-  async resubscribe(): Promise<void> {
-    await this.subscribe(this.lastSeq, false);
   }
 
   /**

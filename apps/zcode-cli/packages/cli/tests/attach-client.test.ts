@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
+import { ZCODE_ATTACH_MAX_LINE_CHARS } from "@zcode/shared";
 import {
   AttachProtocolError,
   connectAttachClient,
@@ -174,6 +175,16 @@ test("超长无换行流触发行上限显式失败", async () => {
     );
     assert.match(settled.message, /exceeded/);
     await assert.rejects(client.request("session/send", {}), /closed|exceeded/i);
+  });
+});
+
+test("a newline-terminated JSON reply still fails if its line is too large", { timeout: 5_000 }, async () => {
+  await withFakeServer(async (fake, client) => {
+    fake.onMessage((message, socket) => {
+      fake.respond(socket, String(message.id), "x".repeat(ZCODE_ATTACH_MAX_LINE_CHARS));
+    });
+    await assert.rejects(client.request("session/subscribe"), /attach protocol line exceeded/);
+    assert.match((await client.closed)?.message ?? "", /char cap/);
   });
 });
 

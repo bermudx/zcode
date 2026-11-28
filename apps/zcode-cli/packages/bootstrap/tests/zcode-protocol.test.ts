@@ -14,8 +14,10 @@ import { createSqliteSessionStore } from "@zcode/adapters/storage";
 import {
   BUILTIN_MODEL_PROVIDER_IDS,
   elideSessionSnapshotForIndex,
+  ZCODE_ATTACH_MAX_LINE_CHARS,
   ZCODE_SESSION_RUNTIME_PREFERENCES_REQUEST_TIMEOUT_MS,
   zcodeProtocolMethods,
+  zcodeProtocolNotifications,
   zcodeMessagePartSchema,
   zcodeSessionCancelBackgroundTaskResultSchema,
   zcodeSessionCompactResultSchema,
@@ -52,6 +54,8 @@ import {
 } from "@zcode/shared/zcode-protocol-v4";
 import {
   SessionEventType,
+  createInMemorySessionEventStore,
+  createSessionEvent,
   createTraceId,
   type BackgroundTaskInfo,
   type MessageId,
@@ -2266,6 +2270,143 @@ describe("ZCodeProtocolAgentServer", () => {
       taskId: "bg_1",
     });
     expect(notifications.some((item) => item.method === "state.updated")).toBe(true);
+  });
+
+  it("keeps image-heavy model requests and multi-page raw recovery below the attach cap", async () => {
+    const eventStore = createInMemorySessionEventStore();
+    let liveSink: ((event: SessionEvent) => void | Promise<void>) | undefined;
+    const notifications: ZCodeProtocolNotification[] = [];
+    const server = new ZCodeProtocolAgentServer({
+      createSessionEventStore: () => eventStore,
+      createZCodeApp: (options) => {
+        const app = createFakeApp(options);
+        return {
+          ...app,
+          runtime: {
+            ...app.runtime,
+            subscribeEvents: (sink: {
+              onSessionEvent(event: SessionEvent): void | Promise<void>;
+            }) => {
+              liveSink = sink.onSessionEvent;
+              return () => {};
+            },
+          } as never,
+        };
+      },
+      cwd: workspace.workspacePath,
+      version: "test-version",
+    });
+    setTestNotificationSink(server, (message) => {
+      if ("method" in message && !("id" in message)) notifications.push(message);
+    });
+    const created = zcodeSessionStateSnapshotSchema.parse(
+      await requestResult(server, {
+        id: 1,
+        method: zcodeProtocolMethods.sessionCreate,
+        params: { workspace },
+      }),
+    );
+    const sessionId = created.session.sessionId as SessionId;
+    const subscription = {
+      method: zcodeProtocolMethods.sessionSubscribe,
+      params: { sessionId, eventFormat: "raw", deliveryKind: "desktop-continuous" },
+    };
+    const initial = zcodeSessionSubscribeResultSchema.parse(
+      await requestResult(server, { id: 2, ...subscription }),
+    );
+    const append = (type: SessionEvent["type"], payload: unknown) =>
+      eventStore.append(createSessionEvent(type, sessionId, payload));
+    if (!liveSink) throw new Error("Expected session event sink");
+    const publish = liveSink;
+    const messages = [{
+      role: "user",
+      content: [{ type: "image", image: `data:image/png;base64,${"A".repeat(ZCODE_ATTACH_MAX_LINE_CHARS)}` }],
+    }];
+    const modelRequest = await append(SessionEventType.ModelRequest, {
+      messages, modelId: "test-model", providerId: "test-provider",
+    });
+    await publish(modelRequest);
+    const liveModel = notifications.find(
+      (notice) => notice.method === zcodeProtocolNotifications.sessionRawEvent,
+    );
+    const modelMetadata = { messageCount: 1, modelId: "test-model", providerId: "test-provider" };
+    expect(liveModel?.params).toMatchObject({
+      sequenceNumber: modelRequest.sequenceNumber,
+      payload: modelMetadata,
+    });
+    expect(liveModel?.params).not.toHaveProperty("payload.messages");
+    expect((await eventStore.getEvents(sessionId)).at(-1)?.payload).toMatchObject({ messages });
+
+    // JSON 转义翻倍：两条单独都合法，一起超过 client 的单行上限。
+    const largeProgress = { delta: "\\".repeat(1_100_000), kind: "text_delta", done: false };
+    const a = await append(SessionEventType.ModelStreaming, largeProgress);
+    const b = await append(SessionEventType.ModelStreaming, largeProgress);
+    const cursorRequest = async (id: string, afterSeq: number) => {
+      const response = await server.handleMessage({
+        ...subscription,
+        id,
+        params: { ...subscription.params, afterSeq, boundedRawReplay: true },
+      });
+      expect(JSON.stringify(response).length).toBeLessThanOrEqual(ZCODE_ATTACH_MAX_LINE_CHARS);
+      if (!response || !("result" in response)) throw new Error("Expected raw replay page");
+      return zcodeSessionSubscribeResultSchema.parse(response.result);
+    };
+    const first = await cursorRequest("page-1", initial.eventSeq);
+    expect(first.rawReplayHasMore).toBe(true);
+    expect(first.eventSeq).toBe(a.sequenceNumber);
+    expect(first.rawEvents?.map((event) => event.sequenceNumber)).toEqual([
+      modelRequest.sequenceNumber, a.sequenceNumber,
+    ]);
+    expect(first.rawEvents?.[0]?.payload).toEqual(modelMetadata);
+
+    const readAfter = eventStore.getEventsAfter.bind(eventStore);
+    const terminalPayload = {
+      response: "", tokenCount: 0, toolCallCount: 0, duration: 1, resultType: "cancelled",
+    };
+    let terminal: SessionEvent | undefined;
+    vi.spyOn(eventStore, "getEventsAfter").mockImplementationOnce(async (...args) => {
+      const captured = await readAfter(...args);
+      terminal = await append(SessionEventType.TurnComplete, terminalPayload);
+      await publish(terminal);
+      return captured;
+    });
+    const second = await cursorRequest("page-2", first.eventSeq);
+    expect(second.rawReplayHasMore).toBe(true);
+    expect(second.eventSeq).toBe(b.sequenceNumber);
+    expect(second.rawEvents?.map((event) => event.sequenceNumber)).toEqual([b.sequenceNumber]);
+    const third = await cursorRequest("page-3", second.eventSeq);
+    expect(third.rawReplayHasMore).toBeUndefined();
+    expect(third.rawEvents).toMatchObject([{
+      sequenceNumber: third.eventSeq, type: SessionEventType.TurnComplete, payload: terminalPayload,
+    }]);
+    if (!terminal) throw new Error("Expected terminal event during replay");
+    await publish(terminal);
+    expect(notifications.filter((item) => item.method === zcodeProtocolNotifications.sessionRawEvent))
+      .toHaveLength(1);
+    const after = await append(SessionEventType.ModelRequest, {
+      messages: [], modelId: "test-model", providerId: "test-provider",
+    });
+    await publish(after);
+    expect(notifications.at(-1)).toMatchObject({
+      method: zcodeProtocolNotifications.sessionRawEvent,
+      params: { sequenceNumber: after.sequenceNumber, payload: { messageCount: 0 } },
+    });
+
+    const tooLarge = await append(SessionEventType.ModelStreaming, {
+      ...largeProgress, delta: "x".repeat(ZCODE_ATTACH_MAX_LINE_CHARS),
+    });
+    await expect(server.handleMessage({
+      ...subscription,
+      id: "oversize",
+      params: { ...subscription.params, afterSeq: after.sequenceNumber, boundedRawReplay: true },
+    })).resolves.toMatchObject({
+      id: "oversize",
+      error: {
+        message: "Raw replay event exceeds the attach line cap",
+        data: { sequenceNumber: tooLarge.sequenceNumber },
+      },
+    });
+    await server.shutdown();
   });
 
   it("sends contiguous protocol seq for the visible session event stream", async () => {

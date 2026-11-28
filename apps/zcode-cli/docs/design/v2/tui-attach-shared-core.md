@@ -420,6 +420,32 @@ socket close → 状态行 "reconnecting" + transcript 内 `session_notice`
 `session/resume` 冷物化再重试。composer 草稿本地保留，恢复后可继续
 输入。
 
+**Raw 事件大小与恢复顺序（#106）**：接收端仍拒绝超过 4,194,304 个
+UTF-16 code units 的单行；换行存在也不豁免。`model_request` 在 raw
+通知和历史输出中保留请求元数据与 `messageCount`，不传模型输入 `messages`。
+core 内的模型输入、事件存储和调试消费者不受影响。
+
+```text
+core event store (sequenceNumber)
+  → size-bounded replay pages → final page → live notifications
+  → client applies each page, then new live events
+```
+
+- 重连请求用 `boundedRawReplay: true`、`afterSeq` 和 `includeSnapshot: false`。
+  core 暂停该会话的 raw 实时通知，以序号从同一事件库返回能装入单行的最早
+  前缀。预算含响应包络；`rawReplayHasMore: true` 时 `eventSeq` 是此次已交付
+  的最后序号，不是 core 的当前水位。单个事件无法装入时返回明确错误，不跳过
+  事件，也不把坏帧写入 socket。
+- core 在最终页恢复实时通知，并用补放期间观察到的事件序号检查读库竞态；
+  不因异步读库而跳过新事件。旧 owner 的迟到读结果不得恢复实时通知；core
+  跳过已由最终页覆盖的迟到实时通知。客户端
+  在请求期间暂存实时通知：中间页由后续读库覆盖，最终页先应用补放，再接收
+  高于最终水位的通知。只有已应用的页才推进客户端恢复水位。订阅的首次快照、
+  mapped 订阅、权限反向请求和持久化边界保持原样。
+- `AttachRuntime` 每条连接只执行一轮恢复。退避仅在所有待恢复会话都就绪后
+  重置；只连通 socket 不算成功。失败保持 1s 至 30s 的指数退避，不重启或
+  终止共享 core，也不影响该连接上已恢复的会话。
+
 ### 会话选择（-c / --resume，默认新会话）
 
 attach 入口的会话选择与主 CLI 同语义，不再默认 resume：

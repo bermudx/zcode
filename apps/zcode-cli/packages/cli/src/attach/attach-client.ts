@@ -3,7 +3,7 @@
 // request/response 用递增 id 关联，notification 无 id，server 反向 request
 // （带 id+method）交给 reverseHandler 应答。不做业务状态，只有传输与分发。
 import { createConnection, type Socket } from "node:net";
-import { zcodeProtocolMessageSchema } from "@zcode/shared";
+import { ZCODE_ATTACH_MAX_LINE_CHARS, zcodeProtocolMessageSchema } from "@zcode/shared";
 
 export type AttachProtocolRequestHandler = (
   method: string,
@@ -42,12 +42,6 @@ export interface AttachClient {
 }
 
 const ATTACH_REQUEST_PREFIX = "attach";
-
-/** 单行 NDJSON 上限（utf8 解码后的字符数，是线上字节数的有界投影）：
- *  core 半写/卡死时可能长时间不发换行，无上限的残留 buffer 会让瘦客户端
- *  RSS 随坏流膨胀。取 4MB——远超最大的合法快照行，同时把“永远等不到换行”
- *  的坏流判成显式失败：拒绝全部 pending、closed 带 error，不让连接无声挂着。 */
-const ATTACH_MAX_LINE_CHARS = 4 * 1024 * 1024;
 
 export async function connectAttachClient(
   socketPath: string,
@@ -170,12 +164,13 @@ export async function connectAttachClient(
     }
   };
 
-  const failLineCap = (): void => {
+  const failLineCap = (lineLength: number, newlineReceived: boolean): void => {
     const error = new Error(
-      `attach protocol line exceeded ${ATTACH_MAX_LINE_CHARS}-char cap (peer never sent a newline)`,
+      `attach protocol line exceeded ${ZCODE_ATTACH_MAX_LINE_CHARS}-char cap`,
     );
     options.logger?.warn?.("attach client line cap exceeded", {
-      bufferLength: buffer.length,
+      lineLength,
+      newlineReceived,
     });
     finish(error);
     socket.destroy();
@@ -186,16 +181,16 @@ export async function connectAttachClient(
     for (;;) {
       const newlineIndex = buffer.indexOf("\n");
       if (newlineIndex < 0) break;
-      if (newlineIndex > ATTACH_MAX_LINE_CHARS) {
-        failLineCap();
+      if (newlineIndex > ZCODE_ATTACH_MAX_LINE_CHARS) {
+        failLineCap(newlineIndex, true);
         return;
       }
       const line = buffer.slice(0, newlineIndex);
       buffer = buffer.slice(newlineIndex + 1);
       dispatchLine(line);
     }
-    if (buffer.length > ATTACH_MAX_LINE_CHARS) {
-      failLineCap();
+    if (buffer.length > ZCODE_ATTACH_MAX_LINE_CHARS) {
+      failLineCap(buffer.length, false);
     }
   });
   socket.on("error", (error: Error) => {

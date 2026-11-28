@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { ZCODE_PROTOCOL_VERSION, zcodeProtocolErrorCodes } from "@zcode/shared";
 import { getZCodeCopy } from "@zcode/i18n";
-import { connectAttachClient } from "../src/attach/attach-client.js";
+import { connectAttachClient, type AttachClient } from "../src/attach/attach-client.js";
 import { AttachSessionHandle } from "../src/attach/attach-session.js";
 import { uploadAttachment } from "../src/attach/attach-v4-attachments.js";
 import {
@@ -720,11 +720,25 @@ test("AttachRuntime 断线状态行按 locale 走 i18n 目录", async () => {
   }
 });
 
-test("断线重连后按最后 sequenceNumber 续订", async () => {
+test("reconnect replays ordered pages before live events", { timeout: 10_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "attach-adapter-"));
   const socketPath = join(dir, "core.sock");
-  const responder = (request: Captured): unknown => {
+  const missed = rawEvent({ seq: 6, type: "turn_started", turnId: "turn-1" });
+  const terminal = rawEvent({ seq: 7, type: "turn_complete", turnId: "turn-1" });
+  const live = rawEvent({ seq: 8, type: "session_title_updated" });
+  const responder = (request: Captured, notify: FakeCore["notify"]): unknown => {
     if (request.method === "session/subscribe") {
+      if (request.params.boundedRawReplay && request.params.afterSeq === 5) {
+        notify(missed);
+        return {
+          eventSeq: 6, events: [], rawEvents: [missed], rawReplayHasMore: true, sessionId: SID,
+        };
+      }
+      if (request.params.boundedRawReplay && request.params.afterSeq === 6) {
+        notify(terminal);
+        notify(live);
+        return { eventSeq: 7, events: [], rawEvents: [terminal], sessionId: SID };
+      }
       return { eventSeq: 5, events: [], rawEvents: [], sessionId: SID };
     }
     return {};
@@ -738,22 +752,99 @@ test("断线重连后按最后 sequenceNumber 续订", async () => {
     snapshot: makeSnapshot() as never,
   });
   runtime.registerSession(handle);
-  await handle.subscribe();
-  // 注入一条 seq=5 的 live 事件，让 lastSeq 前进后再断线。
-  core.notify(rawEvent({ seq: 5, type: "session_created" }));
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  await core.kill();
-  // 等客户端感知 close 后重启 fake core。
-  await client.closed;
-  core = await startFakeCore(socketPath, responder);
-  // 触发重连定时器第一轮（1s backoff）。
-  await new Promise((resolve) => setTimeout(resolve, 1600));
-  const resubscribes = core.requests.filter((r) => r.method === "session/subscribe");
-  assert.equal(resubscribes.length >= 1, true);
-  assert.equal(resubscribes.at(-1)?.params.afterSeq, 5);
-  await runtime.close();
-  await core.close();
-  await rm(dir, { force: true, recursive: true });
+  try {
+    const resumed = Promise.withResolvers<void>();
+    const latest = Promise.withResolvers<void>();
+    const delivered: number[] = [];
+    handle.addSink((event) => {
+      if (event.sequenceNumber > 0) delivered.push(event.sequenceNumber);
+      if (event.sequenceNumber === 9) latest.resolve();
+    });
+    runtime.onConnectionStatus((status) => {
+      if (status === getZCodeCopy("en-US").tui.connection.reconnected) resumed.resolve();
+    });
+    await handle.subscribe();
+    await core.kill();
+    await client.closed;
+    core = await startFakeCore(socketPath, responder);
+    await resumed.promise;
+    assert.deepEqual(
+      core.requests.filter((r) => r.method === "session/subscribe").map((r) => r.params.afterSeq),
+      [5, 6],
+    );
+    core.notify(rawEvent({ seq: 9, type: "session_title_updated" }));
+    await latest.promise;
+    assert.deepEqual(delivered, [6, 7, 8, 9]);
+  } finally {
+    await runtime.close();
+    await core.close();
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("reconnect backs off until session recovery, not just socket connect, succeeds", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const connections: AttachClient[] = [];
+  let recoveries = 0;
+  const runtime = new AttachRuntime({
+    socketPath: "/unused",
+    connect: async () => {
+      const closed = Promise.withResolvers<Error | undefined>();
+      const client: AttachClient = {
+        closed: closed.promise,
+        close: () => closed.resolve(undefined),
+        notify: () => {},
+        onNotification: () => () => {},
+        setRequestHandler: () => {},
+        request: async <T>() => {
+          recoveries++;
+          if (recoveries === 1) {
+            closed.resolve(new Error("attach protocol line exceeded cap"));
+            throw new Error("attach protocol line exceeded cap");
+          }
+          if (recoveries === 2) throw new Error("replay unavailable on an open socket");
+          return { eventSeq: 0, events: [], rawEvents: [], sessionId: SID } as T;
+        },
+      };
+      connections.push(client);
+      return client;
+    },
+  });
+  const handle = new AttachSessionHandle({
+    client: () => runtime.currentClient(),
+    sessionId: SID,
+    snapshot: makeSnapshot() as never,
+  });
+  const advance = async (ms: number) => {
+    t.mock.timers.tick(ms);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+  runtime.registerSession(handle);
+  try {
+    (await runtime.connect()).close();
+    await advance(0);
+    await advance(1_000);
+    assert.equal(connections.length, 2);
+    assert.equal(recoveries, 1);
+    await advance(1_999);
+    assert.equal(connections.length, 2);
+    await advance(1);
+    assert.equal(connections.length, 3);
+    assert.equal(recoveries, 2);
+    await advance(3_999);
+    assert.equal(recoveries, 2);
+    await advance(1);
+    assert.equal(connections.length, 3, "reuse the socket if it stayed open");
+    assert.equal(recoveries, 3);
+
+    runtime.currentClient().close();
+    await advance(0);
+    await advance(1_000);
+    assert.equal(connections.length, 4, "reset backoff after successful recovery");
+    assert.equal(recoveries, 4);
+  } finally {
+    await runtime.close();
+  }
 });
 
 test("协议版本不匹配 → 退出码 2 与可操作错误", async () => {
